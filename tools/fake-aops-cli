@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+"""Development-only aops-cli stand-in."""
+
+import json
+import os
+import sys
+import time
+
+if "--version" in sys.argv:
+    print("aops-cli development-stub")
+    raise SystemExit(0)
+
+time.sleep(0.6)
+print(json.dumps({"status": 0, "count": 1, "data": [{"id": 7021, "name": "王五", "status": "ACTIVE"}]}, ensure_ascii=False))

@@ -1,0 +1,83 @@
+export type NodeStatus = 'PENDING' | 'READY' | 'RUNNING' | 'WAITING' | 'SUCCEEDED' | 'FAILED' | 'SKIPPED' | 'CANCELLED' | 'UNKNOWN'
+
+export type WorkflowNode = {
+  id: string
+  type: 'sql_read' | 'condition' | 'human_input' | 'approval' | 'end'
+  title: string
+  config: Record<string, unknown>
+  inputs: Array<{name: string; type: string; description?: string; required?: boolean; source: {kind: string; key?: string; nodeId?: string; jsonPointer?: string; value?: unknown}}>
+  approvalPolicy: string
+  timeoutSeconds: number
+  uiPosition?: {x: number; y: number}
+}
+
+export type WorkflowEdge = {id: string; source: string; target: string; label?: string; default?: boolean; condition?: Record<string, unknown>}
+
+export type Run = {
+  id?: string
+  runId: string
+  knowledgeId: string
+  knowledgeName: string
+  workflowVersionId: string
+  ticketId: number
+  initiatedBy: string
+  status: string
+  revision: number
+  lastEventId: number
+  observedAt: string
+  source: string
+  stale: boolean
+  terminal: boolean
+  runPath: string
+  planHash: string
+  workflow: {entryNodeId: string; nodes: WorkflowNode[]; edges: WorkflowEdge[]}
+  runInputs?: Record<string, unknown>
+  nodeStatuses: Record<string, NodeStatus>
+  currentNodeId?: string
+  waitingReason?: string
+  progress: {progressCurrent?: number; progressTotal?: number; current?: number; total?: number}
+  attempts: Array<Record<string, unknown>>
+  events?: Array<WorkflowEvent>
+  createdAt: string
+  startedAt?: string
+  finishedAt?: string
+}
+
+export type WorkflowEvent = {
+  eventId: string
+  sequence: number
+  runId: string
+  nodeId?: string
+  type: string
+  status?: string
+  safeSummary: string
+  progressCurrent?: number
+  progressTotal?: number
+  timestamp: string
+}
+
+export type Knowledge = {
+  knowledgeId: string
+  status: string
+  name: string
+  summary: string
+  matchPhrases: string[]
+  negativePhrases: string[]
+  systemKeys: string[]
+  creatorUid: string
+  sourceType: string
+  sourceTicketId?: number
+  sourceTicketNo?: string
+  uids: string[]
+  createdAt: string
+  updatedAt: string
+  submittedAt?: string
+  submittedBy?: string
+  reviewedAt?: string
+  reviewedBy?: string
+  reviewNote?: string
+  deletedAt?: string
+  deletedBy?: string
+  visibility: string
+  workflowDefinition: {schemaVersion: 1; entryNodeId: string; nodes: WorkflowNode[]; edges: WorkflowEdge[]}
+}

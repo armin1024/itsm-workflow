@@ -1,0 +1,26 @@
+[Unit]
+Description=ITSM Workflow MCP Adapter
+After=network-online.target itsm-workflow-api.service
+Wants=network-online.target
+Requires=itsm-workflow-api.service
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=__SERVICE_GROUP__
+WorkingDirectory=__PREFIX__
+Environment=MCP_BIND_HOST=127.0.0.1
+Environment=MCP_PORT=8090
+EnvironmentFile=__CONFIG_DIR__/mcp.env
+Environment=PYTHONPATH=__PREFIX__/site-packages:__PREFIX__
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=__PREFIX__/python/bin/python3 -m uvicorn app.mcp_server:app --host ${MCP_BIND_HOST} --port ${MCP_PORT}
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

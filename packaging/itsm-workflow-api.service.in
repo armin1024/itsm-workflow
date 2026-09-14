@@ -1,0 +1,24 @@
+[Unit]
+Description=ITSM Workflow API
+After=network-online.target itsm-workflow-migrate.service
+Wants=network-online.target
+Requires=itsm-workflow-migrate.service
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=__SERVICE_GROUP__
+WorkingDirectory=__PREFIX__
+EnvironmentFile=__CONFIG_DIR__/service.env
+Environment=PYTHONPATH=__PREFIX__/site-packages:__PREFIX__
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=__PREFIX__/python/bin/python3 -m uvicorn app.main:app --host ${WORKFLOW_BIND_HOST} --port ${WORKFLOW_PORT}
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
