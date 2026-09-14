@@ -34,8 +34,8 @@ WORKFLOW_REVIEW_ACTOR_UID=workflow-review-service
 ## 安装
 
 ```bash
-tar -xzf itsm-workflow-0.4.1-linux-x86_64.tar.gz
-cd itsm-workflow-0.4.1-linux-x86_64
+tar -xzf itsm-workflow-0.5.0-linux-x86_64.tar.gz
+cd itsm-workflow-0.5.0-linux-x86_64
 sudo ./install.sh --no-start
 sudo vi /etc/itsm-workflow/service.env
 sudo systemctl start itsm-workflow-migrate

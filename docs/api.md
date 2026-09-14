@@ -47,6 +47,25 @@ GET  /workflow-versions/{workflowVersionId}
 GET  /node-types
 ```
 
+### 知识列表分页
+
+```http
+GET /api/v1/knowledge?page=1&pageSize=20&keyword=客户查询&status=PENDING_REVIEW
+```
+
+- `page` 从1开始，越界时返回最后一个有效页。
+- `pageSize` 只允许20、50、100。
+- `status` 允许空值、`DRAFT`、`PENDING_REVIEW`、`PUBLISHED`。
+- 关键词精确匹配知识ID、来源工单ID和事件编号，模糊匹配名称、摘要、匹配短语和创建人UID。
+- 权限过滤在数据库分页前完成；`DELETED` 永不出现在列表。
+- 列表项是轻量摘要，只包含 `nodeCount`，完整 `workflowDefinition` 通过详情接口读取。
+
+统一分页响应：
+
+```json
+{"items":[],"page":1,"pageSize":20,"total":138,"totalPages":7}
+```
+
 ### 草稿提交与服务审核
 
 已认证操作员可以通过工单摄入生成草稿，并管理自己创建的 `DRAFT`：
@@ -183,6 +202,14 @@ DELETE /api/v1/knowledge/{knowledgeId}
 发布会生成新的不可变 `workflowVersionId`；运行始终保存版本快照。
 
 ## 运行
+
+运行列表分页：
+
+```http
+GET /api/v1/runs?page=1&pageSize=20&keyword=100173&statusGroup=ACTIVE
+```
+
+`statusGroup` 支持 `ALL/ACTIVE/WAITING/SUCCEEDED/FAILED`。纯数字关键词精确匹配工单ID，`run_`开头匹配运行ID，其他文本匹配运行ID、经验名称和发起人UID。列表只返回状态和进度摘要，不包含workflow、attempt、interrupt或事件。
 
 ```text
 POST /runs/plan
