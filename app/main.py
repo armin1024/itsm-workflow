@@ -22,6 +22,7 @@ from app.crypto import SecretBox
 from app.db import SessionLocal, get_session, initialize_database
 from app.events import emit_event, event_dict, stream_events
 from app.idempotency import IdempotencyConflict, IdempotencyInProgress, claim as claim_idempotency, complete as complete_idempotency
+from app.listing import KNOWLEDGE_STATUSES, RUN_STATUS_GROUPS, paginated_knowledge, paginated_runs, validate_page_size
 from app.knowledge import authorized_knowledge, create_knowledge, delete_knowledge as soft_delete_knowledge, import_legacy_package, match_knowledge, publish_knowledge, reject_knowledge_review, serialize_knowledge, submit_knowledge_review, update_knowledge
 from app.extraction import extract_ticket_draft
 from app.node_types import NODE_TYPES
@@ -168,19 +169,21 @@ async def node_type_list(principal: Principal = Depends(current_principal)) -> d
 
 
 @app.get("/api/v1/knowledge")
-async def knowledge_list(principal: Principal = Depends(current_principal), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
-    result = await session.execute(select(Knowledge).where(Knowledge.status != "DELETED").order_by(Knowledge.updated_at.desc()).limit(200))
-    items = []
-    for record in result.scalars():
-        if principal.is_admin or record.creator_uid == principal.uid and record.status in {"DRAFT", "PENDING_REVIEW"}:
-            items.append(serialize_knowledge(record))
-            continue
-        try:
-            await authorized_knowledge(session, record.id, principal.uid)
-            items.append(serialize_knowledge(record))
-        except KeyError:
-            continue
-    return {"items": items, "total": len(items)}
+async def knowledge_list(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize"),
+    keyword: str = Query(default="", max_length=200),
+    status: str = Query(default="", max_length=32),
+    principal: Principal = Depends(current_principal),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    try:
+        page_size = validate_page_size(page_size)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if status and status not in KNOWLEDGE_STATUSES:
+        raise HTTPException(422, "status只允许DRAFT、PENDING_REVIEW或PUBLISHED")
+    return await paginated_knowledge(session, uid=principal.uid, is_admin=principal.is_admin, page=page, page_size=page_size, keyword=keyword, status=status)
 
 
 @app.get("/api/v1/knowledge/{knowledge_id}")
@@ -296,12 +299,22 @@ async def run_approve(run_id: str, body: ApproveRequest, idempotency_key: str | 
 
 
 @app.get("/api/v1/runs")
-async def run_list(principal: Principal = Depends(_operator), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
-    query = select(WorkflowRun).order_by(WorkflowRun.created_at.desc()).limit(200)
-    if not principal.is_admin:
-        query = query.where(WorkflowRun.initiated_by == principal.uid)
-    result = await session.execute(query)
-    return {"items": [await serialize_run(session, run) for run in result.scalars()]}
+async def run_list(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize"),
+    keyword: str = Query(default="", max_length=200),
+    status_group: str = Query(default="ALL", alias="statusGroup", max_length=20),
+    principal: Principal = Depends(_operator),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    try:
+        page_size = validate_page_size(page_size)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    status_group = status_group.upper()
+    if status_group not in RUN_STATUS_GROUPS:
+        raise HTTPException(422, "statusGroup只允许ALL、ACTIVE、WAITING、SUCCEEDED或FAILED")
+    return await paginated_runs(session, uid=principal.uid, is_admin=principal.is_admin, page=page, page_size=page_size, keyword=keyword, status_group=status_group)
 
 
 @app.get("/api/v1/runs/{run_id}")

@@ -82,5 +82,8 @@ async def test_api_creates_versioned_plan_and_requires_hash(tmp_path, monkeypatc
     assert client.get(f"/api/v1/knowledge/{knowledge_id}").status_code == 404
     assert client.get(f"/api/v1/runs/{run_id}").json()["knowledgeName"] == "客户查询"
     assert all(item["knowledgeId"] != knowledge_id for item in client.get("/api/v1/knowledge").json()["items"])
+    assert client.get("/api/v1/knowledge?pageSize=10").status_code == 422
+    assert client.get("/api/v1/knowledge?status=DELETED").status_code == 422
+    assert client.get("/api/v1/runs?statusGroup=INVALID").status_code == 422
     app.dependency_overrides.clear()
     await engine.dispose()
