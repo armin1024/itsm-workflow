@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Button,
   InlineLoading,
@@ -32,6 +32,9 @@ import type {
   WorkflowNode,
 } from "./types";
 import { withBase } from "./runtime";
+import { ListPagination, ListToolbar } from "./ListControls";
+import { useListQuery } from "./useListQuery";
+import type { KnowledgeSummary, Paginated, RunSummary } from "./types";
 
 type User = { uid: string; isAdmin: boolean; isOperator: boolean };
 
@@ -176,14 +179,51 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
 }
 
 function RunList() {
-  const [runs, setRuns] = useState<Run[] | null>(null);
+  const query = useListQuery("statusGroup", "");
+  const [data, setData] = useState<Paginated<RunSummary> | null>(null);
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState<Date>();
+  const requestSequence = useRef(0);
+  const load = useCallback(
+    async (background = false) => {
+      const sequence = ++requestSequence.current;
+      if (!background) setLoading(true);
+      setError("");
+      try {
+        const result = await api.runs({
+          page: query.page,
+          pageSize: query.pageSize,
+          keyword: query.keyword,
+          statusGroup: query.status || undefined,
+        });
+        if (sequence === requestSequence.current) {
+          setData(result);
+          setLastUpdated(new Date());
+          if (result.page !== query.page) query.setPage(result.page);
+        }
+      } catch (value) {
+        if (sequence === requestSequence.current)
+          setError((value as Error).message);
+      } finally {
+        if (sequence === requestSequence.current) setLoading(false);
+      }
+    },
+    [query.page, query.pageSize, query.keyword, query.status],
+  );
   useEffect(() => {
-    api
-      .runs()
-      .then((value) => setRuns(value.items))
-      .catch((value) => setError(value.message));
-  }, []);
+    void load();
+  }, [load]);
+  useEffect(() => {
+    const hasActive = data?.items.some(
+      (item) => !["SUCCEEDED", "FAILED", "CANCELLED"].includes(item.status),
+    );
+    if (!hasActive) return;
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void load(true);
+    }, 10000);
+    return () => window.clearInterval(timer);
+  }, [data?.items, load]);
   return (
     <main className="page">
       <header className="page-title">
@@ -196,6 +236,25 @@ function RunList() {
           创建运行
         </Button>
       </header>
+      <ListToolbar
+        keyword={query.draftKeyword}
+        placeholder="工单 ID / 运行 ID / 经验名称 / 发起人 UID"
+        status={query.status}
+        statusOptions={[
+          { value: "", label: "全部状态" },
+          { value: "ACTIVE", label: "执行中" },
+          { value: "WAITING", label: "等待处理" },
+          { value: "SUCCEEDED", label: "已完成" },
+          { value: "FAILED", label: "失败或取消" },
+        ]}
+        loading={loading}
+        lastUpdated={lastUpdated}
+        onKeywordChange={query.setDraftKeyword}
+        onKeywordCommit={query.commitKeyword}
+        onStatusChange={query.setStatus}
+        onRefresh={() => void load()}
+        onClear={query.clear}
+      />
       {error && (
         <InlineNotification
           kind="error"
@@ -204,49 +263,79 @@ function RunList() {
           hideCloseButton
         />
       )}
-      {runs === null ? (
+      {loading && data === null ? (
         <RunSkeleton />
-      ) : runs.length === 0 ? (
+      ) : data && data.items.length === 0 ? (
         <section className="empty-state">
           <span>00</span>
-          <h2>还没有运行记录</h2>
-          <p>从一条已发布经验创建计划，确认后才会进入执行队列。</p>
-          <Button as={Link} to="/runs/new">
-            创建第一条运行
-          </Button>
+          <h2>
+            {query.keyword || query.status
+              ? "当前条件没有匹配运行"
+              : "还没有运行记录"}
+          </h2>
+          <p>
+            {query.keyword || query.status
+              ? "调整关键词或状态，或者清空查询条件。"
+              : "从一条已发布经验创建计划，确认后才会进入执行队列。"}
+          </p>
+          {query.keyword || query.status ? (
+            <Button onClick={query.clear}>清空查询条件</Button>
+          ) : (
+            <Button as={Link} to="/runs/new">
+              创建第一条运行
+            </Button>
+          )}
         </section>
-      ) : (
-        <section className="run-table" aria-label="运行记录">
-          <div className="run-row header">
-            <span>状态</span>
-            <span>工单 / 运行</span>
-            <span>当前节点</span>
-            <span>发起人</span>
-            <span>进度</span>
-            <span>创建时间</span>
-          </div>
-          {runs.map((run) => (
-            <Link className="run-row" to={`/runs/${run.runId}`} key={run.runId}>
-              <StatusTag status={run.status} />
-              <span>
-                <strong>#{run.ticketId}</strong>
-                <small>{run.runId}</small>
-              </span>
-              <span>
-                {run.currentNodeId ||
-                  run.waitingReason ||
-                  statusLabel[run.status] ||
-                  "尚未开始"}
-              </span>
-              <span>{run.initiatedBy}</span>
-              <span>
-                {run.progress.current ?? 0}/{run.progress.total ?? 0}
-              </span>
-              <time>{new Date(run.createdAt).toLocaleString()}</time>
-            </Link>
-          ))}
-        </section>
-      )}
+      ) : data ? (
+        <>
+          <section
+            className={`run-table ${loading ? "is-refreshing" : ""}`}
+            aria-label="运行记录"
+          >
+            <div className="run-row header">
+              <span>状态</span>
+              <span>工单 / 运行</span>
+              <span>当前节点</span>
+              <span>发起人</span>
+              <span>进度</span>
+              <span>创建时间</span>
+            </div>
+            {data.items.map((run) => (
+              <Link
+                className="run-row"
+                to={`/runs/${run.runId}`}
+                key={run.runId}
+              >
+                <StatusTag status={run.status} />
+                <span>
+                  <strong>#{run.ticketId}</strong>
+                  <small>{run.runId}</small>
+                </span>
+                <span>
+                  {run.currentNodeId ||
+                    run.waitingReason ||
+                    statusLabel[run.status] ||
+                    "尚未开始"}
+                </span>
+                <span>{run.initiatedBy}</span>
+                <span>
+                  {run.progress.current ?? 0}/{run.progress.total ?? 0}
+                </span>
+                <time>{new Date(run.createdAt).toLocaleString()}</time>
+              </Link>
+            ))}
+          </section>
+          <ListPagination
+            page={data.page}
+            pageSize={data.pageSize}
+            total={data.total}
+            totalPages={data.totalPages}
+            loading={loading}
+            onPageChange={query.setPage}
+            onPageSizeChange={query.setPageSize}
+          />
+        </>
+      ) : null}
     </main>
   );
 }
@@ -267,7 +356,11 @@ function RunSkeleton() {
 
 function NewRun() {
   const navigate = useNavigate();
-  const [knowledge, setKnowledge] = useState<Knowledge[]>([]);
+  const [knowledge, setKnowledge] = useState<KnowledgeSummary[]>([]);
+  const [selectedKnowledge, setSelectedKnowledge] = useState<Knowledge | null>(
+    null,
+  );
+  const [knowledgeKeyword, setKnowledgeKeyword] = useState("");
   const [knowledgeId, setKnowledgeId] = useState("");
   const [ticketId, setTicketId] = useState("");
   const [parameters, setParameters] = useState<
@@ -276,20 +369,33 @@ function NewRun() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   useEffect(() => {
-    api
-      .knowledge()
-      .then((value) => {
-        setKnowledge(value.items.filter((item) => item.status === "PUBLISHED"));
-        setKnowledgeId(
-          value.items.find((item) => item.status === "PUBLISHED")
-            ?.knowledgeId || "",
-        );
-      })
-      .catch((value) => setError(value.message));
-  }, []);
-  const selectedKnowledge = knowledge.find(
-    (item) => item.knowledgeId === knowledgeId,
-  );
+    const timer = window.setTimeout(() => {
+      api
+        .knowledge({
+          status: "PUBLISHED",
+          pageSize: 20,
+          keyword: knowledgeKeyword.trim(),
+        })
+        .then((value) => {
+          setKnowledge(value.items);
+          setKnowledgeId((current) =>
+            value.items.some((item) => item.knowledgeId === current)
+              ? current
+              : value.items[0]?.knowledgeId || "",
+          );
+        })
+        .catch((value) => setError(value.message));
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [knowledgeKeyword]);
+  useEffect(() => {
+    setSelectedKnowledge(null);
+    if (knowledgeId)
+      api
+        .knowledgeById(knowledgeId)
+        .then(setSelectedKnowledge)
+        .catch((value) => setError(value.message));
+  }, [knowledgeId]);
   const parameterDefinitions = selectedKnowledge
     ? Array.from(
         new Map(
@@ -361,6 +467,13 @@ function NewRun() {
             hideCloseButton
           />
         )}
+        <TextInput
+          id="knowledge-option-keyword"
+          labelText="筛选已发布经验"
+          value={knowledgeKeyword}
+          onChange={(event) => setKnowledgeKeyword(event.target.value)}
+          placeholder="名称、摘要、知识 ID 或来源工单"
+        />
         <label className="select-label">
           已发布经验
           <select
@@ -464,7 +577,10 @@ function NewRun() {
           <Button kind="secondary" as={Link} to="/runs">
             取消
           </Button>
-          <Button type="submit" disabled={busy || !knowledgeId}>
+          <Button
+            type="submit"
+            disabled={busy || !knowledgeId || !selectedKnowledge}
+          >
             {busy ? "正在生成" : "生成计划"}
           </Button>
         </div>
@@ -930,18 +1046,42 @@ function EventTimeline({ events }: { events: WorkflowEvent[] }) {
 }
 
 function KnowledgeList({ user }: { user: User }) {
-  const [items, setItems] = useState<Knowledge[] | null>(null);
+  const query = useListQuery("status", "");
+  const [data, setData] = useState<Paginated<KnowledgeSummary> | null>(null);
   const [error, setError] = useState("");
-  const [deleteTarget, setDeleteTarget] = useState<Knowledge | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState<Date>();
+  const [deleteTarget, setDeleteTarget] = useState<KnowledgeSummary | null>(
+    null,
+  );
   const [deleting, setDeleting] = useState(false);
-  const load = () =>
-    api
-      .knowledge()
-      .then((value) => setItems(value.items))
-      .catch((value) => setError(value.message));
+  const requestSequence = useRef(0);
+  const load = useCallback(async () => {
+    const sequence = ++requestSequence.current;
+    setLoading(true);
+    setError("");
+    try {
+      const result = await api.knowledge({
+        page: query.page,
+        pageSize: query.pageSize,
+        keyword: query.keyword,
+        status: query.status || undefined,
+      });
+      if (sequence === requestSequence.current) {
+        setData(result);
+        setLastUpdated(new Date());
+        if (result.page !== query.page) query.setPage(result.page);
+      }
+    } catch (value) {
+      if (sequence === requestSequence.current)
+        setError((value as Error).message);
+    } finally {
+      if (sequence === requestSequence.current) setLoading(false);
+    }
+  }, [query.page, query.pageSize, query.keyword, query.status]);
   useEffect(() => {
     void load();
-  }, []);
+  }, [load]);
   const publish = async (id: string) => {
     try {
       await api.publishKnowledge(id);
@@ -992,6 +1132,24 @@ function KnowledgeList({ user }: { user: User }) {
           )}
         </div>
       </header>
+      <ListToolbar
+        keyword={query.draftKeyword}
+        placeholder="名称 / 摘要 / 工单 ID / 事件编号 / 创建人 UID"
+        status={query.status}
+        statusOptions={[
+          { value: "", label: "全部状态" },
+          { value: "DRAFT", label: "草稿" },
+          { value: "PENDING_REVIEW", label: "待审核" },
+          { value: "PUBLISHED", label: "已发布" },
+        ]}
+        loading={loading}
+        lastUpdated={lastUpdated}
+        onKeywordChange={query.setDraftKeyword}
+        onKeywordCommit={query.commitKeyword}
+        onStatusChange={query.setStatus}
+        onRefresh={() => void load()}
+        onClear={query.clear}
+      />
       {error && (
         <InlineNotification
           kind="error"
@@ -1000,81 +1158,103 @@ function KnowledgeList({ user }: { user: User }) {
           hideCloseButton
         />
       )}
-      {items === null ? (
+      {loading && data === null ? (
         <RunSkeleton />
-      ) : items.length === 0 ? (
+      ) : data && data.items.length === 0 ? (
         <section className="empty-state">
           <span>K0</span>
-          <h2>还没有可执行经验</h2>
-          <p>从已处理工单提取，或手工编排多个只读查询节点。</p>
-          <Button as={Link} to="/knowledge/extract">
-            从工单提取第一条经验
-          </Button>
+          <h2>
+            {query.keyword || query.status
+              ? "当前条件没有匹配经验"
+              : "还没有可执行经验"}
+          </h2>
+          <p>
+            {query.keyword || query.status
+              ? "调整关键词或状态，或者清空查询条件。"
+              : "从已处理工单提取，或手工编排多个只读查询节点。"}
+          </p>
+          {query.keyword || query.status ? (
+            <Button onClick={query.clear}>清空查询条件</Button>
+          ) : (
+            <Button as={Link} to="/knowledge/extract">
+              从工单提取第一条经验
+            </Button>
+          )}
         </section>
-      ) : (
-        <div className="knowledge-grid">
-          {items.map((item) => (
-            <article key={item.knowledgeId}>
-              <div>
-                <StatusTag status={item.status} />
-                <span>
-                  {item.sourceType === "TICKET_EXTRACTION"
-                    ? `工单 #${item.sourceTicketId}`
-                    : "手工编排"}
-                </span>
-              </div>
-              <Link
-                className="knowledge-link"
-                to={`/knowledge/${item.knowledgeId}`}
-              >
-                <h2>{item.name}</h2>
-                <p>{item.summary}</p>
-              </Link>
-              <footer>
-                <span>
-                  {item.workflowDefinition.nodes.length} 节点 ·{" "}
-                  {item.visibility}
-                </span>
-                <div className="knowledge-actions">
-                  {user.isAdmin && item.status === "PENDING_REVIEW" ? (
-                    <Button
-                      size="sm"
-                      kind="tertiary"
-                      onClick={() => publish(item.knowledgeId)}
-                    >
-                      审核并发布
-                    </Button>
-                  ) : item.status === "DRAFT" &&
-                    (user.isAdmin || item.creatorUid === user.uid) ? (
-                    <Button
-                      size="sm"
-                      kind="tertiary"
-                      onClick={() => submitReview(item.knowledgeId)}
-                    >
-                      提交审核
-                    </Button>
-                  ) : item.status === "PENDING_REVIEW" ? (
-                    <span>等待管理员审核</span>
-                  ) : (
-                    <code>{item.knowledgeId}</code>
-                  )}
-                  {(user.isAdmin ||
-                    (item.creatorUid === user.uid &&
-                      item.status === "DRAFT")) && (
-                    <Button
-                      size="sm"
-                      kind="danger--ghost"
-                      onClick={() => setDeleteTarget(item)}
-                    >
-                      删除
-                    </Button>
-                  )}
+      ) : data ? (
+        <>
+          <div className={`knowledge-grid ${loading ? "is-refreshing" : ""}`}>
+            {data.items.map((item) => (
+              <article key={item.knowledgeId}>
+                <div>
+                  <StatusTag status={item.status} />
+                  <span>
+                    {item.sourceType === "TICKET_EXTRACTION"
+                      ? `工单 #${item.sourceTicketId}`
+                      : "手工编排"}
+                  </span>
                 </div>
-              </footer>
-            </article>
-          ))}
-        </div>
-      )}
+                <Link
+                  className="knowledge-link"
+                  to={`/knowledge/${item.knowledgeId}`}
+                >
+                  <h2>{item.name}</h2>
+                  <p>{item.summary}</p>
+                </Link>
+                <footer>
+                  <span>
+                    {item.nodeCount} 节点 · {item.visibility}
+                  </span>
+                  <div className="knowledge-actions">
+                    {user.isAdmin && item.status === "PENDING_REVIEW" ? (
+                      <Button
+                        size="sm"
+                        kind="tertiary"
+                        onClick={() => publish(item.knowledgeId)}
+                      >
+                        审核并发布
+                      </Button>
+                    ) : item.status === "DRAFT" &&
+                      (user.isAdmin || item.creatorUid === user.uid) ? (
+                      <Button
+                        size="sm"
+                        kind="tertiary"
+                        onClick={() => submitReview(item.knowledgeId)}
+                      >
+                        提交审核
+                      </Button>
+                    ) : item.status === "PENDING_REVIEW" ? (
+                      <span>等待管理员审核</span>
+                    ) : (
+                      <code>{item.knowledgeId}</code>
+                    )}
+                    {(user.isAdmin ||
+                      (item.creatorUid === user.uid &&
+                        item.status === "DRAFT")) && (
+                      <Button
+                        size="sm"
+                        kind="danger--ghost"
+                        onClick={() => setDeleteTarget(item)}
+                      >
+                        删除
+                      </Button>
+                    )}
+                  </div>
+                </footer>
+              </article>
+            ))}
+          </div>
+          <ListPagination
+            page={data.page}
+            pageSize={data.pageSize}
+            total={data.total}
+            totalPages={data.totalPages}
+            loading={loading}
+            onPageChange={query.setPage}
+            onPageSizeChange={query.setPageSize}
+          />
+        </>
+      ) : null}
       <Modal
         open={Boolean(deleteTarget)}
         danger
