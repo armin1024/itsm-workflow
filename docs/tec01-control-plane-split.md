@@ -17,7 +17,7 @@
 
 技术上可行，但建议分阶段：
 
-1. **近期推荐架构**：tec01承担Channel、MCP、控制面和全部存储；保留Python Executor，仅负责执行。
+1. **近期推荐架构**：tec01承担Channel、MCP、控制面和全部存储；itsm-workflow保留无存储的Workflow Compiler和Python Executor，分别负责草稿编译与运行执行。
 2. **中期兼容架构**：建立语言无关Executor协议，Python与Java Executor并存，tec01根据工作流能力选择执行池。
 3. **长期可选架构**：Java Executor通过等价验收后接管全部节点，Python Executor退役。
 
@@ -37,6 +37,7 @@ flowchart LR
     Control --> Store
 
     Control -->|Executor协议| Router[Executor Router]
+    Knowledge -->|草稿编译协议| Compiler[Python Workflow Compiler]
     Router --> Py[Python Executor Pool]
     Router -.逐步迁移.-> Java[Java Executor Pool]
     Py --> CLI[aops-cli]
@@ -53,10 +54,13 @@ flowchart LR
 | 部署单元 | 技术 | 职责 | 是否持久化 |
 |---|---|---|---|
 | `tec01-gateway-control` | Java | Channel、MCP、身份、知识、检索、版本、计划、运行状态机、事件、审批、中断、导入导出 | 是，唯一业务事实源 |
+| `itsm-workflow-compiler` | Python，近期保留 | SQL审计过滤、只读校验、参数化、LLM结构化分析和DAG草稿生成 | 否，输入输出均通过tec01 |
 | `tec01-executor-java` | Java，可后续增加 | DAG调度、Java节点Handler、CLI控制、恢复协调 | 否，通过Executor协议访问tec01 |
 | `itsm-workflow-executor-python` | Python，近期保留 | LangGraph、现有节点Handler、CLI控制、Remote Checkpointer客户端 | 否，通过Executor协议访问tec01 |
 
 即便最终全部使用Java，也建议将Gateway/Control和Executor作为不同进程或部署单元。`aops-cli`子进程、节点超时和Worker重启不应影响 AOPS Channel接入与用户消息。
+
+Workflow Compiler和Executor也应保持模块边界：Compiler处理“把历史工单经验编译为候选DAG”，Executor处理“运行已发布的不可变DAG”。两者可以共用Node Manifest、SQL安全校验和数据类型库，但不能共用运行内存或本地持久化。
 
 ## 计划和运行状态保存在哪里
 
@@ -108,6 +112,99 @@ tec01至少持有以下实体：
 
 为了避免tec01节点状态和LangGraph checkpoint出现双事实源，节点完成接口应支持原子提交：artifact可以先上传为临时对象，但`attempt complete + node transition + event + checkpoint reference`必须在tec01同一事务中完成。checkpoint只描述执行游标，面向用户的运行和节点状态始终以tec01业务表为准。
 
+## Workflow草稿提取放在哪里
+
+推荐交给itsm-workflow，但作为独立的**无存储Workflow Compiler**，不归Executor运行循环，也不继续承担草稿持久化。
+
+职责分配：
+
+| 环节 | 责任方 |
+|---|---|
+| 接收用户“从工单提取经验”请求 | tec01 Channel/Admin API |
+| 校验创建人、授权UID和工单访问权限 | tec01 |
+| 获取工单详情与audit timeline | 优先由tec01 AOPS网关获取 |
+| 过滤失败操作、只读SQL校验、去重和参数化 | itsm-workflow Compiler |
+| LLM中文提炼、参数语义和依赖生成 | itsm-workflow Compiler通过tec01 Model Gateway |
+| 校验目标Node Catalog版本 | Compiler生成时校验，tec01保存前再次校验 |
+| 保存提取任务、诊断和DRAFT | tec01 |
+| 人工编辑、提交审核、发布和向量索引 | tec01 |
+
+这样分配的原因：
+
+- 现有Python已经具备`sqlglot`只读SQL分析、历史值参数化、审计结果过滤和结构化LLM提炼能力，复用成本最低。
+- 草稿生成必须与Executor的节点Schema和参数绑定语义一致，共享Manifest/Schema库可以减少“能生成但不能执行”的漂移。
+- tec01仍是唯一事实源；Compiler只返回候选定义，不能自行创建知识ID、改变审核状态或发布版本。
+- tec01作为Channel网关获取工单证据，可以避免把长期AOPS用户凭据传给Compiler。确需Compiler调用`aops-cli`时，也只能使用tec01签发的短期、单次证据读取凭据。
+
+### tec01提取任务状态
+
+tec01保存`workflow_extraction_jobs`：
+
+```text
+extractionId
+creatorUid
+ticketId
+status: QUEUED / ANALYZING / DRAFT_CREATED / FAILED
+evidenceHash
+compilerVersion
+nodeCatalogVersion
+promptVersion
+diagnostics
+knowledgeId
+createdAt / startedAt / finishedAt
+```
+
+相同`ticketId + evidenceHash + compilerVersion + promptVersion`的重复请求使用幂等键返回已有结果，避免重复调用LLM。
+
+### 草稿编译协议
+
+```http
+POST /internal/v1/compiler/workflow-drafts
+```
+
+请求由tec01发起：
+
+```json
+{
+  "extractionId": "ext_xxx",
+  "ticketInfo": {},
+  "auditTimeline": [],
+  "targetNodeCatalog": {
+    "catalogVersion": "2026-09-17",
+    "nodeTypes": [
+      {"type":"sql_read","schemaVersion":1},
+      {"type":"condition","schemaVersion":1},
+      {"type":"hitl_select","schemaVersion":1},
+      {"type":"llm_extract","schemaVersion":1},
+      {"type":"end","schemaVersion":1}
+    ]
+  },
+  "locale": "zh-CN"
+}
+```
+
+Compiler返回候选结果，不写数据库：
+
+```json
+{
+  "compilerVersion": "1.0.0",
+  "evidenceHash": "sha256...",
+  "name": "客户信息查询",
+  "summary": "根据工单条件查询客户信息",
+  "matchPhrases": ["客户信息查询"],
+  "negativePhrases": [],
+  "systemKeys": ["crm"],
+  "workflowDefinition": {},
+  "diagnostics": {
+    "auditOperationCount": 5,
+    "acceptedOperationCount": 2,
+    "ignoredOperations": []
+  }
+}
+```
+
+tec01收到响应后再次执行Schema、节点能力、只读SQL、依赖和敏感字段校验，随后在一个事务中创建知识`DRAFT`、生命周期事件并完成extraction job。LLM失败、无有效操作或Compiler响应不合法时只更新job为`FAILED`，不得生成兜底草稿。
+
 ## tec01职责
 
 | 模块 | 主要职责 |
@@ -116,6 +213,7 @@ tec01至少持有以下实体：
 | MCP Server | 暴露知识匹配、计划、批准、状态等待、中断回复、暂停、继续、取消、重试、结果读取等工具 |
 | Identity & Policy | Channel用户到UID映射、管理员/操作员权限、知识可见范围和运行访问控制 |
 | Knowledge & Retrieval | 草稿、审核、发布、版本、生命周期、全文/向量/RRF/rerank和授权UID |
+| Extraction Job | 保存提取任务、证据哈希、Compiler版本、过滤诊断和最终知识ID |
 | Workflow Control | `planHash`、运行状态机、revision CAS、幂等控制、中断、审批和路由到Executor |
 | Executor Registry | Executor注册、健康状态、节点能力、版本兼容和调度选择 |
 | Lease & Attempt Ledger | 领取、租约、心跳、attempt STARTED/完成/失败、UNKNOWN协调 |
@@ -434,7 +532,45 @@ sql_read → llm_extract → hitl_select → downstream_node
 
 ## 关键流程泳道图
 
-### 1. Channel、Hermes和tec01 MCP
+### 1. 从工单证据编译Workflow草稿
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as 操作员/管理员
+    participant T as tec01
+    participant A as AOPS Gateway
+    participant C as itsm-workflow Compiler
+    participant L as tec01 Model Gateway
+    participant S as tec01 Knowledge Store
+
+    U->>T: 从工单提取经验(ticketId,uids)
+    T->>T: 创建QUEUED extraction job并校验权限
+    T->>A: 获取ticketInfo和auditTimeline
+    A-->>T: 工单证据
+    T->>T: 计算evidenceHash和幂等检查
+    T->>C: 证据 + 目标Node Catalog
+    C->>C: 过滤失败操作、只读校验、去重和参数化
+    alt 没有有效操作
+        C-->>T: NO_VALID_OPERATIONS + 过滤诊断
+        T->>S: extraction job FAILED
+        T-->>U: 展示过滤原因
+    else 有有效操作
+        C->>L: 受控Prompt + 结构化证据
+        L-->>C: 中文名称、摘要、短语、参数语义和依赖
+        C->>C: 生成并校验候选DAG
+        C-->>T: DraftProposal + diagnostics + compilerVersion
+        alt tec01二次校验通过
+            T->>S: 单事务创建DRAFT、生命周期和DRAFT_CREATED job
+            T-->>U: 打开草稿编辑审核
+        else Schema/能力/安全校验失败
+            T->>S: extraction job FAILED
+            T-->>U: 返回明确校验错误，不创建草稿
+        end
+    end
+```
+
+### 2. Channel、Hermes和tec01 MCP
 
 ```mermaid
 sequenceDiagram
@@ -458,7 +594,7 @@ sequenceDiagram
     H->>M: 下一MCP工具调用
 ```
 
-### 2. 计划、确认和Executor调度
+### 3. 计划、确认和Executor调度
 
 ```mermaid
 sequenceDiagram
@@ -486,7 +622,7 @@ sequenceDiagram
     C-->>E: 后续claim可见
 ```
 
-### 3. 节点执行、结果和checkpoint
+### 4. 节点执行、结果和checkpoint
 
 ```mermaid
 sequenceDiagram
@@ -518,7 +654,7 @@ sequenceDiagram
     end
 ```
 
-### 4. 中断、继续、暂停、取消和重试
+### 5. 中断、继续、暂停、取消和重试
 
 ```mermaid
 sequenceDiagram
@@ -560,7 +696,7 @@ sequenceDiagram
     end
 ```
 
-### 5. SQL多结果、LLM结构化与HITL选择
+### 6. SQL多结果、LLM结构化与HITL选择
 
 ```mermaid
 sequenceDiagram
@@ -606,7 +742,7 @@ sequenceDiagram
     end
 ```
 
-### 6. 新节点发布和能力路由
+### 7. 新节点发布和能力路由
 
 ```mermaid
 sequenceDiagram
@@ -634,7 +770,7 @@ sequenceDiagram
     end
 ```
 
-### 7. Python和Java执行器并存迁移
+### 8. Python和Java执行器并存迁移
 
 ```mermaid
 sequenceDiagram
@@ -706,7 +842,7 @@ Java Executor可以使用：
 | 方案 | 优点 | 主要成本/风险 | 建议 |
 |---|---|---|---|
 | MCP留在Python，Python Executor保留 | 改动最少 | 身份和状态多一跳；Python仍像半个控制面 | 不推荐作为目标态 |
-| MCP迁入tec01，Python Executor保留 | 控制面统一；复用现有可靠执行语义；扩展边界清楚 | 需要Executor协议和Remote Checkpointer | **近期推荐** |
+| MCP迁入tec01，Python Compiler/Executor保留 | 控制面统一；复用现有草稿提炼和可靠执行语义；扩展边界清楚 | 需要Compiler、Executor协议和Remote Checkpointer | **近期推荐** |
 | MCP迁入tec01，Python/Java Executor并存 | 可渐进迁移节点；可按能力路由 | 需要严格版本和能力治理 | **中期推荐** |
 | 全部迁入tec01单JVM | 部署数量少 | Gateway和执行故障耦合；需重写全部恢复语义 | 不推荐 |
 | tec01控制面 + 独立Java Executor | Java技术栈统一且故障隔离 | 重写DAG运行时、持久化和故障语义 | 达到准入条件后可选 |
@@ -719,30 +855,37 @@ Java Executor可以使用：
 - Hermes MCP地址切换到tec01；tec01直接使用Channel Principal。
 - Python MCP进入只读兼容期，确认无调用后下线。
 
-### 阶段2：建立Executor协议
+### 阶段2：Workflow Compiler无存储化
+
+- tec01建立extraction job、证据获取、幂等和草稿保存接口。
+- Python Compiler只接收`ticketInfo + auditTimeline + Node Catalog`并返回DraftProposal。
+- 将模型调用收口到tec01 Model Gateway；验证结果一致后下线Python旧知识写接口。
+
+### 阶段3：建立Executor协议
 
 - 实现注册、能力、claim、lease、commands、attempt、artifact和credential接口。
 - Python Executor改为无数据库模式并接入Remote Checkpointer。
 - 新运行写tec01；旧运行在原服务排空和只读归档。
 
-### 阶段3：节点扩展平台
+### 阶段4：节点扩展平台
 
 - tec01建立Node Type Catalog和发布时能力校验。
 - 工作流版本固定schema/handler兼容约束。
 - 新节点先在Python或Java任一Executor实现，通过契约后开放。
 
-### 阶段4：Java Executor试点
+### 阶段5：Java Executor试点
 
 - 先实现`condition/end`，再实现`sql_read`，最后实现human input和approval恢复。
 - 使用计划影子校验，不对AOPS执行重复请求。
 - 低风险工作流小流量切换并保留Python回退。
 
-### 阶段5：决定是否退役Python
+### 阶段6：决定是否退役Python
 
-- Java满足全部准入条件时，新版本固定到Java runtime。
+- Java Executor满足全部准入条件时，新版本固定到Java runtime。
+- 若要求完全移除Python，还需另行实现Java Workflow Compiler，并对SQL过滤、参数化、LLM结构化和DAG输出执行黄金样本对比。
 - 等Python活跃运行和保留期结束后下线。
 - 若Java成本高于收益，长期保留Python Executor也符合目标架构，因为控制面、MCP和数据已经统一在tec01。
 
 ## 最终建议
 
-立即把MCP迁到tec01，并把Python服务收缩为纯Executor。与此同时先定义稳定的语言无关Executor协议和节点Manifest，不要把tec01数据库表直接暴露给Executor。Java Executor作为兼容实现逐步加入，而不是一次性重写生产执行链路。这样既满足tec01统一入口和数据归属，也保留现有中断、继续、取消、重试和UNKNOWN协调能力，并为后续新增节点或最终全Java迁移留出清晰路径。
+立即把MCP迁到tec01，并把itsm-workflow收缩为两个无存储计算模块：Workflow Compiler和Executor。与此同时定义稳定的草稿编译协议、语言无关Executor协议和节点Manifest，不要把tec01数据库表直接暴露给Python。Java Executor作为兼容实现逐步加入，而不是一次性重写生产执行链路。这样既满足tec01统一入口和数据归属，又复用现有草稿提炼、SQL安全分析、中断恢复、重试和UNKNOWN协调能力，并为新增LLM/HITL节点或最终全Java迁移留出清晰路径。
