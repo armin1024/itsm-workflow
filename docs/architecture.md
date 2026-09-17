@@ -2,6 +2,8 @@
 
 各 systemd服务、外部组件职责及安装、鉴权、知识提取、执行、中断恢复、条件分支和跨环境迁移泳道图，见 [服务职责、总体架构与关键流程泳道图](services-and-swimlanes.md)。
 
+如需把知识、运行、事件和checkpoint存储迁移到同时承担 AOPS Channel网关的Java服务tec01，并让Python端只保留执行与MCP，见 [tec01控制面与工作流执行面拆分设计](tec01-control-plane-split.md)。
+
 ## 编排模型
 
 流程画布保存节点位置、控制边和结构化配置，但不允许携带 Python代码或任意 shell命令。`sql_read`、`condition`、`human_input`、`approval`、`end` 均来自节点注册表；新增操作类型通过 Handler、配置 Schema、输入 Schema、输出 Schema和风险级别扩展，不修改调度核心。

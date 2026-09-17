@@ -106,6 +106,7 @@ python3 -c 'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_
 - [部署与运维](docs/deployment.md)
 - [架构和恢复语义](docs/architecture.md)
 - [服务职责、总体架构与关键流程泳道图](docs/services-and-swimlanes.md)
+- [tec01控制面与Python执行面拆分设计](docs/tec01-control-plane-split.md)
 - [MCP 与 Agent 接入指南](docs/mcp-agent-integration.md)
 - [MCP 与 Agent 接入实施计划](docs/mcp-implementation-plan.md)
 - [通用节点与卡片扩展平台设计](docs/node-extension-platform.md)
