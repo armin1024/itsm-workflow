@@ -107,6 +107,7 @@ export type WorkflowEvent = {
   safeSummary: string;
   progressCurrent?: number;
   progressTotal?: number;
+  payload?: Record<string, unknown>;
   timestamp: string;
 };
 
@@ -132,6 +133,17 @@ export type Knowledge = {
   reviewNote?: string;
   deletedAt?: string;
   deletedBy?: string;
+  lastPublishedAt?: string;
+  lastPublishedBy?: string;
+  lifecycle?: Array<{
+    eventId: string;
+    eventType: string;
+    workflowVersionId?: string;
+    actorUid?: string;
+    summary: string;
+    source: string;
+    createdAt: string;
+  }>;
   visibility: string;
   workflowDefinition: {
     schemaVersion: 1;
@@ -166,4 +178,16 @@ export type Paginated<T> = {
   pageSize: number;
   total: number;
   totalPages: number;
+  appliedFilters?: Record<string, unknown>;
+};
+
+export type WorkflowVersionSummary = {
+  workflowVersionId: string;
+  knowledgeId: string;
+  knowledgeName: string;
+  versionNumber: number;
+  contentHash: string;
+  publishedBy: string;
+  publishedAt: string;
+  current: boolean;
 };

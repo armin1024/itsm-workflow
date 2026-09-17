@@ -1,6 +1,8 @@
-import { Button, TextInput } from "@carbon/react";
+import { useState } from "react";
+import { Button, Select, SelectItem, TextInput } from "@carbon/react";
 
 export type FilterOption = { value: string; label: string };
+export type ExactFilter = { key: string; label: string; placeholder?: string; type?: "text" | "datetime-local" };
 
 export function ListToolbar({
   keyword,
@@ -14,6 +16,9 @@ export function ListToolbar({
   onStatusChange,
   onRefresh,
   onClear,
+  exactFields = [],
+  exactValues = {},
+  onExactChange,
 }: {
   keyword: string;
   placeholder: string;
@@ -26,7 +31,12 @@ export function ListToolbar({
   onStatusChange: (value: string) => void;
   onRefresh: () => void;
   onClear: () => void;
+  exactFields?: ExactFilter[];
+  exactValues?: Record<string, string>;
+  onExactChange?: (key: string, value: string) => void;
 }) {
+  const [advanced, setAdvanced] = useState(false);
+  const active = exactFields.filter((field) => exactValues[field.key]);
   return (
     <section className="list-toolbar" aria-label="列表查询">
       <form
@@ -42,20 +52,11 @@ export function ListToolbar({
           value={keyword}
           onChange={(event) => onKeywordChange(event.target.value)}
         />
-        <label className="select-label">
-          状态
-          <select
-            value={status}
-            onChange={(event) => onStatusChange(event.target.value)}
-          >
-            {statusOptions.map((option) => (
-              <option value={option.value} key={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </label>
+        <Select id="list-status" labelText="状态" value={status} onChange={(event) => onStatusChange(event.target.value)}>
+          {statusOptions.map((option) => <SelectItem value={option.value} text={option.label} key={option.value} />)}
+        </Select>
         <div className="toolbar-actions">
+          {exactFields.length > 0 && <Button type="button" size="sm" kind="tertiary" onClick={() => setAdvanced((value) => !value)}>精确筛选{active.length ? ` · ${active.length}` : ""}</Button>}
           <Button
             type="button"
             size="sm"
@@ -70,7 +71,7 @@ export function ListToolbar({
             size="sm"
             kind="ghost"
             onClick={onClear}
-            disabled={!keyword && !status}
+          disabled={!keyword && !status && !active.length}
           >
             清空
           </Button>
@@ -81,6 +82,11 @@ export function ListToolbar({
           ? `更新于 ${lastUpdated.toLocaleTimeString()}`
           : "等待查询"}
       </p>
+      {active.length > 0 && <div className="filter-chips">{active.map((field) => <button type="button" key={field.key} onClick={() => onExactChange?.(field.key, "")}>{field.label}：{exactValues[field.key]} <span>×</span></button>)}</div>}
+      {advanced && <aside className="exact-filter-panel" aria-label="精确筛选条件">
+        <header><div><strong>精确筛选</strong><small>不同字段之间按 AND 组合</small></div><button type="button" onClick={() => setAdvanced(false)}>关闭</button></header>
+        <div>{exactFields.map((field) => <TextInput key={field.key} id={`exact-${field.key}`} type={field.type || "text"} labelText={field.label} placeholder={field.placeholder} value={exactValues[field.key] || ""} onChange={(event) => onExactChange?.(field.key, event.target.value)} />)}</div>
+      </aside>}
     </section>
   );
 }

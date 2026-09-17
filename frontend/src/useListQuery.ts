@@ -16,6 +16,11 @@ export function useListQuery(statusKey: string, defaultStatus: string) {
   const keyword = searchParams.get("keyword") || "";
   const status = searchParams.get(statusKey) || defaultStatus;
   const [draftKeyword, setDraftKeyword] = useState(keyword);
+  const exactFilters = Object.fromEntries(
+    [...searchParams.entries()].filter(
+      ([key]) => !["page", "pageSize", "keyword", statusKey].includes(key),
+    ),
+  );
 
   useEffect(() => setDraftKeyword(keyword), [keyword]);
 
@@ -64,9 +69,16 @@ export function useListQuery(statusKey: string, defaultStatus: string) {
     setPage: (value: number) => update({ page: Math.max(1, value) }),
     setPageSize: (value: number) => update({ pageSize: value, page: 1 }),
     setStatus: (value: string) => update({ [statusKey]: value, page: 1 }),
+    exactFilters,
+    setExactFilter: (key: string, value: string) =>
+      update({ [key]: value, page: 1 }),
+    clearExactFilter: (key: string) => update({ [key]: "", page: 1 }),
     clear: () => {
       setDraftKeyword("");
-      update({ keyword: "", [statusKey]: defaultStatus, page: 1 });
+      const cleared = Object.fromEntries(
+        Object.keys(exactFilters).map((key) => [key, ""]),
+      );
+      update({ ...cleared, keyword: "", [statusKey]: defaultStatus, page: 1 });
     },
   };
 }

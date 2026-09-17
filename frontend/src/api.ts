@@ -4,6 +4,7 @@ import type {
   Paginated,
   Run,
   RunSummary,
+  WorkflowVersionSummary,
 } from "./types";
 import { withBase } from "./runtime";
 
@@ -64,9 +65,11 @@ export const api = {
       pageSize?: number;
       keyword?: string;
       status?: string;
-    } = {},
+    } & Record<string, string | number | undefined> = {},
   ) => request<Paginated<KnowledgeSummary>>(query("/api/v1/knowledge", params)),
   knowledgeById: (id: string) => request<Knowledge>(`/api/v1/knowledge/${id}`),
+  versions: (params: Record<string, string | number | undefined> = {}) =>
+    request<Paginated<WorkflowVersionSummary>>(query("/api/v1/workflow-versions", params)),
   createKnowledge: (body: Record<string, unknown>) =>
     request<Knowledge>("/api/v1/knowledge", {
       method: "POST",
@@ -115,7 +118,7 @@ export const api = {
       pageSize?: number;
       keyword?: string;
       statusGroup?: string;
-    } = {},
+    } & Record<string, string | number | undefined> = {},
   ) => request<Paginated<RunSummary>>(query("/api/v1/runs", params)),
   run: (id: string) => request<Run>(`/api/v1/runs/${id}`),
   plan: (body: {
@@ -164,4 +167,25 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ decision }),
     }),
+  diagnostic: (runId: string, attemptId: string) =>
+    request<{
+      attemptId: string;
+      errorCode?: string;
+      errorMessage?: string;
+      exitCode?: number;
+      diagnosticTruncated: boolean;
+      data: { stdout: string; stderr: string; truncated: boolean };
+    }>(`/api/v1/runs/${runId}/attempts/${attemptId}/diagnostic`),
+  exportPreview: (knowledgeIds: string[]) =>
+    request<Record<string, unknown>>("/api/v1/transfers/export/preview", { method: "POST", body: JSON.stringify({ knowledgeIds }) }),
+  exportPackage: (body: Record<string, unknown>) =>
+    request<Record<string, unknown>>("/api/v1/transfers/export", { method: "POST", body: JSON.stringify(body) }),
+  importPreview: (body: Record<string, unknown>) =>
+    request<Record<string, unknown>>("/api/v1/transfers/import/preview", { method: "POST", body: JSON.stringify(body) }),
+  importPackage: (body: Record<string, unknown>) =>
+    request<Record<string, unknown>>("/api/v1/transfers/import", { method: "POST", body: JSON.stringify(body) }),
+  replacePreview: (body: Record<string, unknown>) =>
+    request<Record<string, unknown>>("/api/v1/database-paths/replace/preview", { method: "POST", body: JSON.stringify(body) }),
+  replacePaths: (body: Record<string, unknown>) =>
+    request<Record<string, unknown>>("/api/v1/database-paths/replace", { method: "POST", body: JSON.stringify(body) }),
 };
