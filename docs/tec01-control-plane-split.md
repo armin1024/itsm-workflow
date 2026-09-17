@@ -452,7 +452,7 @@ sequenceDiagram
 - 查看临时事件、artifact、checkpoint和失败诊断。
 - 将审核后的候选草稿提交到tec01进入正式审核。
 
-Studio使用tec01 SSO或短期开发JWT。生产Channel用户不会访问Studio，Studio也不能直接将临时测试运行标为生产成功。
+Studio使用tec01 SSO或短期开发JWT。生产Channel用户不会访问Studio，Studio也不能直接将临时测试运行标为生产成功。“模拟LLM/HITL/SQL”表示从统一Node Registry加载正式节点Handler并注入Simulation Adapter，不是另外维护模拟节点定义。
 
 ## 临时测试存储选择
 
@@ -570,7 +570,9 @@ workflow-studio
   temporary SQLite
 ```
 
-Compiler、Executor和Studio共享`workflow-schema`，但只有Executor加载生产节点执行Handler；Studio调用相同Handler时必须运行在测试模式或sandbox上下文。
+Compiler、Executor和Studio共享`workflow-schema`。Executor以`PRODUCTION`模式加载Handler；Studio调用同一Handler时只能使用`TEST/SIMULATION/DRY_RUN`模式或sandbox上下文。
+
+统一Node Registry的Manifest、Handler、Port/Adapter、执行模式和版本兼容细节见 [统一Node Registry与节点扩展设计](node-registry-design.md)。
 
 ## 内部接口
 
