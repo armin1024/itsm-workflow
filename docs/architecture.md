@@ -2,7 +2,7 @@
 
 各 systemd服务、外部组件职责及安装、鉴权、知识提取、执行、中断恢复、条件分支和跨环境迁移泳道图，见 [服务职责、总体架构与关键流程泳道图](services-and-swimlanes.md)。
 
-如需把知识、运行、事件和checkpoint存储迁移到同时承担 AOPS Channel网关的Java服务tec01，并让Python端只保留执行与MCP，见 [tec01控制面与工作流执行面拆分设计](tec01-control-plane-split.md)。
+如需把MCP、知识、运行、事件和checkpoint迁移到同时承担 AOPS Channel网关的Java服务tec01，并把Python收缩为可替换执行器，或进一步评估全Java迁移，见 [tec01统一控制面、MCP与可替换执行器设计](tec01-control-plane-split.md)。
 
 ## 编排模型
 
