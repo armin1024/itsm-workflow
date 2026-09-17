@@ -5,6 +5,8 @@ from pathlib import Path
 
 with tempfile.TemporaryDirectory() as directory:
     package_root = Path(__file__).parent
+    forbidden_metadata = [path for path in package_root.rglob("*") if path.name == ".DS_Store" or path.name.startswith("._") or path.name in {".AppleDouble", "__MACOSX"}]
+    assert not forbidden_metadata, f"macOS metadata found in release: {forbidden_metadata[:5]}"
     static_root = package_root / "frontend" / "dist"
     if not static_root.is_dir():
         static_root = package_root.parent / "frontend" / "dist"

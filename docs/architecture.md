@@ -18,7 +18,8 @@ itsm-workflow-api ───── SSE ─────► run cards
         │
         ▼
 PostgreSQL
-  knowledge / immutable versions / runs / events
+  knowledge / lifecycle / immutable versions / runs / events
+  transfer provenance / transfer audits
   encrypted credentials / encrypted artifacts
   LangGraph encrypted checkpoints
         ▲
@@ -44,6 +45,7 @@ LangGraph能恢复图状态，但不能保证外部 CLI 调用 exactly-once。Wo
 - 暂停在节点安全边界生效；取消可以终止当前 CLI进程组，但不承诺撤销已经到达 AOPS 的请求。
 - Agent接入应使用短事件等待而非永久阻塞的 MCP调用，使用户指令能及时进入下一轮。
 - Web控制与 Agent控制使用相同 REST状态机，因此用户可在 Agent等待期间直接从执行详情页暂停或取消。
+- CLI失败会从 SSE错误事件、JSON错误字段或 stderr中提炼安全摘要；脱敏后的 stdout/stderr作为独立加密诊断 artifact保存，不进入普通列表或 MCP状态快照。
 
 ## Checkpoint和敏感数据
 
@@ -52,6 +54,13 @@ LangGraph能恢复图状态，但不能保证外部 CLI 调用 exactly-once。Wo
 - PostgreSQL checkpointer使用 `EncryptedSerializer`。
 - 启用 `LANGGRAPH_STRICT_MSGPACK=true`。
 - 完整运行输入、artifact和 checkpoint默认保留30天；审计元数据长期保留。
+
+## 知识生命周期与跨环境迁移
+
+- `knowledge`保存当前工作草稿和最近发布信息，`workflow_versions`保存不可变发布快照，`knowledge_lifecycle_events`保存创建、修改、提交、退回、发布、导入、路径替换和删除事件。
+- 原生迁移包只包含结构化知识定义和 DAG，不包含向量、凭据、运行结果或 checkpoint。
+- 导入始终创建待审核知识，不覆盖生产现有知识；规范化后的 `effectiveContentHash`用于重复检测，包内来源哈希只承担变更提示，不是数字签名。
+- 数据库路径在导出和导入预检中按完整字符串去重映射；修改已发布经验路径会退回待审核并生成生命周期和迁移审计。
 
 ## 扩展节点
 

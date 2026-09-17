@@ -1,5 +1,7 @@
 # ITSM Workflow
 
+当前稳定版本：`0.6.3`。
+
 面向 AOPS 生产操作的可观测、可中断、可恢复工作流平台。知识、不可变工作流版本、运行状态、LangGraph checkpoint、审批与审计统一保存在 PostgreSQL。
 
 当前实现：
@@ -22,6 +24,9 @@
 - 创建运行时根据经验中的 `RUN_INPUT` 动态生成类型化表单；节点输出绑定参数不会重复向用户索要。
 - `FAILED` 节点支持人工重试；`UNKNOWN` 节点要求操作者选择重试或标记失败。
 - 独立 Streamable HTTP MCP Adapter，提供经验匹配、计划确认、紧凑事实短等待、节点结果读取、中断和恢复等13个工具。
+- 节点失败记录可读错误原因，并为运行发起人和管理员提供加密、脱敏的 stdout/stderr诊断。
+- 知识、运行与不可变版本支持权限感知的字段级精确筛选和生命周期时间线。
+- 原生 DAG v2跨环境导入导出支持数据库路径映射、重复检测、待审核导入、快速路径替换和迁移审计。
 
 ## 经验创建
 
@@ -82,6 +87,7 @@ WORKFLOW_MASTER_KEY=<Base64编码的32字节密钥>
 WORKFLOW_ADMIN_UIDS=S000001,S000002
 WORKFLOW_OPERATOR_UIDS=S000001,S000002,S000003
 WORKFLOW_BASE_PATH=
+KNOWLEDGE_ENVIRONMENT_NAME=生产
 ```
 
 MCP进程实际读取独立的 `/etc/itsm-workflow/mcp.env`，其中只保留 MCP配置和 `WORKFLOW_API_TOKEN`；不要把数据库密码或 `WORKFLOW_MASTER_KEY` 写入该文件。
@@ -102,3 +108,4 @@ python3 -c 'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_
 - [MCP 与 Agent 接入指南](docs/mcp-agent-integration.md)
 - [MCP 与 Agent 接入实施计划](docs/mcp-implementation-plan.md)
 - [通用节点与卡片扩展平台设计](docs/node-extension-platform.md)
+- [0.6.x版本说明](CHANGELOG.md)

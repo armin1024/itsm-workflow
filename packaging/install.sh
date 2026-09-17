@@ -37,6 +37,9 @@ find "$PREFIX" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 cp -R "$PACKAGE_DIR/app" "$PACKAGE_DIR/frontend" "$PACKAGE_DIR/migrations" "$PACKAGE_DIR/python" "$PACKAGE_DIR/site-packages" "$PREFIX/"
 cp "$PACKAGE_DIR/alembic.ini" "$PACKAGE_DIR/pyproject.toml" "$PACKAGE_DIR/uv.lock" "$PACKAGE_DIR/README.md" "$PREFIX/"
 cp -R "$PACKAGE_DIR/docs" "$PREFIX/"
+# Some macOS/SMB transfer paths create AppleDouble sidecar files after the
+# archive was built. Alembic would otherwise try to import ._*.py as scripts.
+find "$PREFIX" \( -name '.DS_Store' -o -name '._*' -o -name '.AppleDouble' -o -name '__MACOSX' \) -prune -exec rm -rf {} +
 touch "$PREFIX/.itsm-workflow-install"
 if [ ! -f "$CONFIG_DIR/service.env" ]; then
   cp "$PACKAGE_DIR/service.env.example" "$CONFIG_DIR/service.env"

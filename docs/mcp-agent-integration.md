@@ -220,7 +220,7 @@ Agent 循环调用 `workflow_run_wait`，每次最长等待10秒。每次返回�
 | `WAITING_NODE_APPROVAL` | 展示风险节点完整计划，等待明确批准 |
 | `WAITING_CREDENTIAL` | 要求用户重新认证；API Key 不出现在对话或日志中 |
 | `PAUSED` | 告知已在安全边界暂停，等待继续或取消 |
-| `FAILED` | 展示错误类别，询问是否重试失败节点 |
+| `FAILED` | 展示 `errorCode`、事件 `payload.errorMessage` 和安全摘要，询问是否重试失败节点；完整脱敏 stdout/stderr 由运行发起人在控制台“查看诊断”中读取 |
 | `UNKNOWN` | 明确提示可能已经到达 AOPS，让用户先查审计记录，再选择重试或标记失败 |
 
 ### 6. 完成
