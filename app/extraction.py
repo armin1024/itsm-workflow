@@ -14,6 +14,7 @@ from sqlglot import exp, parse_one
 from app.cli import CliExecutionError, execute_json_command
 from app.config import settings
 from app.models import Knowledge, KnowledgeUser
+from app.knowledge import add_lifecycle
 from app.workflow import WorkflowDefinition, WorkflowEdge, WorkflowNode
 
 
@@ -271,6 +272,7 @@ async def extract_ticket_draft(session: AsyncSession, *, ticket_id: int, uids: l
     record = Knowledge(id="knw_" + uuid.uuid4().hex, status="DRAFT", name=name, summary=summary, match_phrases=phrases, negative_phrases=negatives, system_keys=systems[:20], creator_uid=creator_uid, public=not clean_uids, source_type="TICKET_EXTRACTION", source_ticket_id=ticket_id, source_ticket_no=str(ticket.get("incident_id") or "").strip()[:120] or None, draft_definition=definition.model_dump(mode="json"))
     session.add(record)
     await session.flush()
+    add_lifecycle(session, record, "CREATED", creator_uid, "从工单证据生成知识草稿", source="TICKET_EXTRACTION")
     for uid in clean_uids:
         session.add(KnowledgeUser(knowledge_id=record.id, uid=uid))
     await session.commit()

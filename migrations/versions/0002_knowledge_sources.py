@@ -10,12 +10,15 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("knowledge", sa.Column("source_type", sa.String(length=32), nullable=False, server_default="MANUAL"))
-    op.add_column("knowledge", sa.Column("source_ticket_id", sa.Integer(), nullable=True))
-    op.add_column("knowledge", sa.Column("source_ticket_no", sa.String(length=120), nullable=True))
-    op.create_index("ix_knowledge_source_type", "knowledge", ["source_type"])
-    op.create_index("ix_knowledge_source_ticket_id", "knowledge", ["source_ticket_id"])
-    op.create_index("ix_knowledge_source_ticket_no", "knowledge", ["source_ticket_no"])
+    inspector = sa.inspect(op.get_bind())
+    columns = {item["name"] for item in inspector.get_columns("knowledge")}
+    for column in (sa.Column("source_type", sa.String(length=32), nullable=False, server_default="MANUAL"), sa.Column("source_ticket_id", sa.Integer(), nullable=True), sa.Column("source_ticket_no", sa.String(length=120), nullable=True)):
+        if column.name not in columns:
+            op.add_column("knowledge", column)
+    indexes = {item["name"] for item in sa.inspect(op.get_bind()).get_indexes("knowledge")}
+    for name, columns in (("ix_knowledge_source_type", ["source_type"]), ("ix_knowledge_source_ticket_id", ["source_ticket_id"]), ("ix_knowledge_source_ticket_no", ["source_ticket_no"])):
+        if name not in indexes:
+            op.create_index(name, "knowledge", columns)
 
 
 def downgrade() -> None:

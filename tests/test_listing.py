@@ -34,7 +34,8 @@ async def test_knowledge_pagination_boundaries_and_summary_dto(tmp_path):
         exact = await paginated_knowledge(session, uid="admin", is_admin=True, page=1, page_size=20, keyword="INC-0021", status="")
     assert (first["total"], first["totalPages"], len(first["items"])) == (201, 11, 20)
     assert len(last["items"]) == 1 and overflow["page"] == 11
-    assert empty == {"items": [], "page": 1, "pageSize": 20, "total": 0, "totalPages": 0}
+    assert {key: empty[key] for key in ("items", "page", "pageSize", "total", "totalPages")} == {"items": [], "page": 1, "pageSize": 20, "total": 0, "totalPages": 0}
+    assert empty["appliedFilters"] == {"keyword": "missing"}
     assert exact["items"][0]["knowledgeId"] == "knw_0021"
     assert "workflowDefinition" not in first["items"][0] and first["items"][0]["nodeCount"] == 1
     await engine.dispose()
@@ -61,6 +62,23 @@ async def test_knowledge_permissions_are_applied_before_pagination(tmp_path):
         result = await paginated_knowledge(session, uid="user-a", is_admin=False, page=1, page_size=20, keyword="", status="")
     assert {item["knowledgeId"] for item in result["items"]} == {"knw_0001", "knw_0002", "knw_0003", "knw_0004"}
     assert result["total"] == 4
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_exact_knowledge_filters_are_combined_and_reported(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'exact.db'}")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    async with sessions() as session:
+        first, second = knowledge(1, creator="S1"), knowledge(2, creator="S2")
+        first.system_keys, first.match_phrases = ["crm"], ["客户资料"]
+        session.add_all([first, second])
+        await session.commit()
+        result = await paginated_knowledge(session, uid="admin", is_admin=True, page=1, page_size=20, keyword="", filters={"creatorUid": ["S1"], "systemKey": ["crm"], "sourceTicketId": ["100001"]})
+    assert [item["knowledgeId"] for item in result["items"]] == ["knw_0001"]
+    assert result["appliedFilters"]["creatorUid"] == ["S1"]
     await engine.dispose()
 
 

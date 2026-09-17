@@ -48,6 +48,28 @@ async def test_cli_adapter_rejects_status_failure(tmp_path, monkeypatch):
     assert error.value.code == "AOPS_BUSINESS_ERROR"
 
 
+@pytest.mark.asyncio
+async def test_nonzero_exit_reports_sse_or_stderr_reason_and_redacts_secret(tmp_path, monkeypatch):
+    executable = tmp_path / "aops-cli"
+    executable.write_text("""#!/usr/bin/env python3
+import sys
+if '--version' in sys.argv:
+    print('aops-cli diagnostic-test')
+else:
+    print('event:error')
+    print('data:数据库路径不存在')
+    print('Authorization: Bearer should-never-leak', file=sys.stderr)
+    raise SystemExit(7)
+""")
+    executable.chmod(0o755)
+    monkeypatch.setattr(cli.settings, "aops_cli_path", executable)
+    with pytest.raises(CliExecutionError, match="数据库路径不存在") as error:
+        await cli.execute_sql_read(database_ref="db", sql="SELECT 1", ticket_id=1, api_key="key", timeout_seconds=5)
+    assert error.value.exit_code == 7
+    diagnostic, _ = cli.redact_diagnostic(error.value.stderr, 1024)
+    assert "should-never-leak" not in diagnostic and "Bearer ***" in diagnostic
+
+
 def test_sql_read_sse_is_mapped_to_rows_for_json_pointer_binding():
     output = b'''event:open\nretry:86400000\ndata:<nil>\n\nevent:uuid\ndata:e6910020-b47e-41f5-8941-17a486999887\n\nevent:title\ndata:["user_id"]\n\nevent:fieldtype\ndata:[{"comment":"user id","name":"user_id","type":"varchar(64)"}]\n\nevent:message\ndata:["000244"]\n\nevent:done\ndata:!ok\n'''
     payload = parse_sql_read_output(output)
