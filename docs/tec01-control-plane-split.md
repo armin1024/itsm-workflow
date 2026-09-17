@@ -58,6 +58,56 @@ flowchart LR
 
 即便最终全部使用Java，也建议将Gateway/Control和Executor作为不同进程或部署单元。`aops-cli`子进程、节点超时和Worker重启不应影响 AOPS Channel接入与用户消息。
 
+## 计划和运行状态保存在哪里
+
+**全部保存在tec01。**“Python无业务存储”表示Python不拥有数据库，不表示运行过程没有状态。Executor执行节点时可以在内存中持有短期上下文，但任何可恢复事实都必须提交到tec01后才算生效。
+
+tec01至少持有以下实体：
+
+| 实体 | 保存内容 | 产生时机 |
+|---|---|---|
+| `workflow_versions` | 不可变DAG、节点Schema版本、内容哈希 | 知识发布时 |
+| `workflow_runs` | 版本快照、工单ID、运行输入、`planHash`、运行状态、revision、目标Executor runtime | 生成计划时 |
+| `workflow_node_states` | 每个节点的 `PENDING/READY/RUNNING/WAITING/SUCCEEDED/FAILED/SKIPPED/UNKNOWN`、当前attempt和输出引用 | 计划创建时初始化，执行中更新 |
+| `workflow_attempts` | STARTED时间、Executor、lease、Handler版本、退出码、错误类别和完成时间 | 每次节点执行前创建 |
+| `workflow_interrupts` | HITL/审批/补参请求、候选项、状态、用户响应和处理人 | 节点需要人工参与时 |
+| `workflow_events` | 单调sequence、安全摘要、节点进度和Channel通知状态 | 每次已提交状态变化时 |
+| `workflow_artifacts` | SQL结果、LLM结构化结果、HITL选择、失败诊断 | 节点产生输出时 |
+| `workflow_checkpoints` | runtime、格式版本、执行游标、pending writes | 节点边界或interrupt时 |
+| `workflow_credentials` | 加密凭据或短期凭据引用 | 创建运行或凭据刷新时 |
+
+计划创建后的tec01记录示意：
+
+```json
+{
+  "runId": "run_xxx",
+  "workflowVersionId": "wfv_12",
+  "status": "WAITING_PLAN_APPROVAL",
+  "revision": 1,
+  "planHash": "sha256...",
+  "workflowSnapshot": {},
+  "runInputs": {},
+  "nodeStatuses": {
+    "sql-read": "PENDING",
+    "llm-extract": "PENDING",
+    "hitl-select": "PENDING",
+    "sql-next": "PENDING"
+  },
+  "executorRuntime": "python-langgraph"
+}
+```
+
+状态保持原则：
+
+1. Hermes通过tec01 MCP创建计划，tec01保存完整版本快照和全部节点初始状态。
+2. 用户确认后，tec01以CAS把运行从`WAITING_PLAN_APPROVAL`改为`QUEUED`。
+3. Executor领取运行，只得到快照、当前状态、checkpoint和短期租约。
+4. 节点开始前，Executor必须让tec01提交`STARTED attempt`。
+5. 节点完成时，tec01在一个事务中提交节点状态、事件、artifact引用和对应checkpoint；不能分别成功。
+6. Executor崩溃后，新Executor从tec01最近已提交的节点状态和checkpoint恢复。
+
+为了避免tec01节点状态和LangGraph checkpoint出现双事实源，节点完成接口应支持原子提交：artifact可以先上传为临时对象，但`attempt complete + node transition + event + checkpoint reference`必须在tec01同一事务中完成。checkpoint只描述执行游标，面向用户的运行和节点状态始终以tec01业务表为准。
+
 ## tec01职责
 
 | 模块 | 主要职责 |
@@ -256,6 +306,132 @@ UNKNOWN_EXTERNAL_RESULT
 - 下线Handler前必须确认没有活跃或可重试运行引用该版本。
 - 高风险节点强制`NODE`级审批，不能由知识作者关闭。
 
+## LLM与HITL扩展示例
+
+用户描述的流程适合定义为：
+
+```text
+sql_read → llm_extract → hitl_select → downstream_node
+```
+
+其中`hitl_select`支持“单候选自动通过，多候选中断选择”，无需为单选和多选复制下游节点。
+
+### `llm_extract`节点
+
+职责：读取前置SQL artifact的受限投影，根据受控提示词输出符合JSON Schema的候选参数。
+
+```json
+{
+  "id": "llm-extract",
+  "type": "llm_extract",
+  "schemaVersion": 1,
+  "config": {
+    "modelProfile": "internal-structured-medium",
+    "promptTemplateId": "extract-customer-parameter-v3",
+    "responseSchema": {
+      "type": "object",
+      "required": ["candidates"],
+      "properties": {
+        "candidates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "label", "value"],
+            "properties": {
+              "id": {"type": "string"},
+              "label": {"type": "string"},
+              "value": {"type": "string"},
+              "reason": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "maxInputRows": 100,
+    "temperature": 0,
+    "dataPolicy": "CUSTOMER_QUERY_INTERNAL"
+  },
+  "inputs": [
+    {
+      "name": "rows",
+      "source": {
+        "kind": "NODE_OUTPUT",
+        "nodeId": "sql-read",
+        "jsonPointer": "/data"
+      }
+    }
+  ]
+}
+```
+
+约束：
+
+- 模型地址、API Key和系统提示词不能由知识定义任意填写，只能引用tec01批准的`modelProfile`和`promptTemplateId`。
+- SQL大结果不直接塞入checkpoint或模型请求；tec01 artifact服务按列白名单、行数和大小生成投影。
+- LLM输出必须通过JSON Schema校验；无效结构可按策略重试有限次数，不能把自然语言直接传给下游SQL。
+- 输出保存为artifact，并同时记录输入哈希、模型版本、提示词版本和响应哈希。
+- LLM只负责结构化候选，不负责决定是否跳过人工确认。
+
+### `hitl_select`节点
+
+职责：消费候选列表，并将最终唯一选择输出给下游。
+
+```json
+{
+  "id": "hitl-select",
+  "type": "hitl_select",
+  "schemaVersion": 1,
+  "config": {
+    "selectionMode": "SINGLE",
+    "autoSelectSingle": true,
+    "zeroCandidatePolicy": "REQUEST_MANUAL_INPUT",
+    "title": "请选择用于后续查询的客户参数",
+    "optionIdPointer": "/id",
+    "optionLabelPointer": "/label",
+    "optionValuePointer": "/value"
+  },
+  "inputs": [
+    {
+      "name": "candidates",
+      "source": {
+        "kind": "NODE_OUTPUT",
+        "nodeId": "llm-extract",
+        "jsonPointer": "/candidates"
+      }
+    }
+  ]
+}
+```
+
+运行语义：
+
+| 候选数量 | 行为 |
+|---:|---|
+| 0 | 根据策略创建手工输入interrupt或明确失败 |
+| 1 | 自动输出唯一候选，记录`AUTO_SELECTED_SINGLE`事件，不中断用户 |
+| 大于1 | 在tec01创建OPEN interrupt，运行转`WAITING_INPUT`并释放Executor租约 |
+
+用户通过 AOPS Channel选择后，Hermes调用tec01 MCP的`workflow_interrupt_reply`。tec01使用`interruptId + expectedRevision`校验选项仍然有效，保存中断响应并把运行重新置为`QUEUED`，但此时不提前宣称节点成功。Executor重新领取后恢复HITL checkpoint，将用户选择输出、节点成功状态和新checkpoint原子提交；下游通过：
+
+```json
+{
+  "kind": "NODE_OUTPUT",
+  "nodeId": "hitl-select",
+  "jsonPointer": "/selected/value"
+}
+```
+
+取得唯一、已确认的参数。
+
+### LLM和HITL恢复语义
+
+- LLM请求使用`runId + nodeId + inputHash + promptVersion`作为幂等键。
+- 模型响应已保存但complete超时时，Executor先按幂等键查询，复用原响应，避免重复生成不同候选。
+- HITL interrupt由tec01持久化，等待数小时或Executor重启不会丢失。
+- 重复的用户回复返回原处理结果；过期revision或不在候选集合中的ID返回冲突。
+- HITL等待期间没有Executor租约，不占用Worker并发。
+- 如果LLM调用结果无法确定且没有已保存响应，可以按节点`resumeSemantics`进入可重试失败；它不能被误标为SQL等外部生产操作已经成功。
+
 ## 关键流程泳道图
 
 ### 1. Channel、Hermes和tec01 MCP
@@ -384,7 +560,53 @@ sequenceDiagram
     end
 ```
 
-### 5. 新节点发布和能力路由
+### 5. SQL多结果、LLM结构化与HITL选择
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant E as Executor
+    participant C as tec01 Control
+    participant S as tec01 Artifact Store
+    participant L as tec01 Model Gateway
+    participant M as tec01 MCP
+    participant H as Hermes
+    participant U as AOPS用户
+
+    E->>C: sql_read attempt STARTED
+    E->>E: aops-cli执行SQL读
+    E->>S: 保存多行SQL结果artifact
+    E->>C: sql_read SUCCEEDED + checkpoint
+    E->>S: 读取受限行列投影
+    E->>L: llm_extract(inputHash,promptVersion,responseSchema)
+    L-->>E: candidates[]结构化响应
+    E->>S: 保存LLM结果artifact
+    E->>C: llm_extract SUCCEEDED + checkpoint
+    E->>E: 执行hitl_select
+    alt 只有一个候选
+        E->>C: AUTO_SELECTED_SINGLE + selected artifact
+        E->>C: 继续下游节点
+    else 多个候选
+        E->>C: 创建OPEN interrupt和安全候选摘要
+        C->>C: 运行转WAITING_INPUT并释放租约
+        M-->>H: workflow_run_wait返回选择请求
+        H-->>U: 展示候选选项
+        U-->>H: 选择optionId
+        H->>M: workflow_interrupt_reply
+        M->>C: 校验optionId和expectedRevision
+        C->>C: 保存interrupt response，运行QUEUED
+        E->>C: 重新claim并恢复checkpoint
+        E->>C: 恢复HITL并读取用户响应
+        E->>S: 保存selected artifact
+        E->>C: HITL SUCCEEDED + checkpoint
+        E->>S: 读取selected/value
+        E->>C: 执行下游节点
+    else 没有候选
+        E->>C: 按zeroCandidatePolicy请求手工输入或失败
+    end
+```
+
+### 6. 新节点发布和能力路由
 
 ```mermaid
 sequenceDiagram
@@ -412,7 +634,7 @@ sequenceDiagram
     end
 ```
 
-### 6. Python和Java执行器并存迁移
+### 7. Python和Java执行器并存迁移
 
 ```mermaid
 sequenceDiagram
