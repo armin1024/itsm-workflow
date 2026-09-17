@@ -1,5 +1,7 @@
 # 架构与恢复语义
 
+各 systemd服务、外部组件职责及安装、鉴权、知识提取、执行、中断恢复、条件分支和跨环境迁移泳道图，见 [服务职责、总体架构与关键流程泳道图](services-and-swimlanes.md)。
+
 ## 编排模型
 
 流程画布保存节点位置、控制边和结构化配置，但不允许携带 Python代码或任意 shell命令。`sql_read`、`condition`、`human_input`、`approval`、`end` 均来自节点注册表；新增操作类型通过 Handler、配置 Schema、输入 Schema、输出 Schema和风险级别扩展，不修改调度核心。
