@@ -326,6 +326,17 @@ sql_read → llm_extract → hitl_select → downstream_node
 
 下游节点通过`/selected/value`读取已确认参数。
 
+HITL响应不仅支持选择：
+
+```text
+SELECT        选择候选
+REFINE        用户补充条件，重新执行声明的上游llm_extract节点
+MANUAL_VALUE  用户直接填写最终值并通过valueSchema校验
+CANCEL        取消本次交互或运行
+```
+
+`REFINE`使用Registry定义的受控迭代关系，不允许任意DAG回边。默认最多3轮，每轮创建新的LLM attempt和HITL interrupt，并在tec01保存feedback history。到达上限后只能选择、手工输入或取消。完整协议见 [统一Node Registry与节点扩展设计](node-registry-design.md)。
+
 ### 运行泳道图
 
 ```mermaid
@@ -354,12 +365,28 @@ sequenceDiagram
         E->>T: OPEN interrupt，WAITING_INPUT，释放租约
         M-->>H: 返回候选选择请求
         H-->>U: Channel展示候选
-        U-->>H: 选择candidateId
-        H->>M: workflow_interrupt_reply
-        M->>T: 保存响应并QUEUED
-        E->>T: 重新领取并恢复HITL checkpoint
-        E->>S: 保存selected artifact
-        E->>T: HITL SUCCEEDED + checkpoint
+        alt 用户SELECT
+            U-->>H: 选择candidateId
+            H->>M: workflow_interrupt_reply SELECT
+            M->>T: 保存响应并QUEUED
+            E->>T: 恢复HITL并提交selected + checkpoint
+        else 用户REFINE
+            U-->>H: 补充具体条件
+            H->>M: workflow_interrupt_reply REFINE
+            M->>T: 保存feedback，iteration+1并QUEUED
+            E->>L: 原始投影 + 旧候选 + feedback
+            L-->>E: 新candidates[]
+            E->>T: 新LLM attempt完成并创建新interrupt
+        else 用户MANUAL_VALUE
+            U-->>H: 输入明确值
+            H->>M: workflow_interrupt_reply MANUAL_VALUE
+            M->>T: valueSchema校验并QUEUED
+            E->>T: 恢复HITL并提交manual selected + checkpoint
+        else 用户CANCEL
+            U-->>H: 取消
+            H->>M: workflow_interrupt_reply CANCEL
+            M->>T: interaction和运行按策略取消
+        end
     end
     E->>S: 下游读取selected/value
 ```
@@ -449,10 +476,13 @@ sequenceDiagram
 - 输入`ticketInfo/auditTimeline`调试草稿提取。
 - 使用脱敏样例执行节点和条件分支。
 - 模拟LLM结构化输出和HITL候选选择。
+- 选择任意Registry节点进行单节点调试，手工输入或引用测试artifact，不启动整张DAG。
 - 查看临时事件、artifact、checkpoint和失败诊断。
 - 将审核后的候选草稿提交到tec01进入正式审核。
 
 Studio使用tec01 SSO或短期开发JWT。生产Channel用户不会访问Studio，Studio也不能直接将临时测试运行标为生产成功。“模拟LLM/HITL/SQL”表示从统一Node Registry加载正式节点Handler并注入Simulation Adapter，不是另外维护模拟节点定义。
+
+单节点调试只允许`TEST/SIMULATION/DRY_RUN`，每次创建独立`test_debug_run`和attempt并写临时SQLite。若需要分析生产失败节点，只能把经过授权和脱敏的artifact复制为临时快照；不能从Studio重试或修改tec01生产运行。正式重试仍通过tec01 MCP状态机完成。
 
 ## 临时测试存储选择
 
@@ -477,6 +507,7 @@ studio_test_node_states
 studio_test_events
 studio_test_artifacts
 studio_extraction_jobs
+studio_node_debug_runs
 ```
 
 规则：
@@ -635,13 +666,15 @@ payloadHash
 ### 阶段4：Studio和临时SQLite
 
 - 保留独立编排与调试页面。
+- 实现Registry节点的单节点调试API、输入来源选择、独立attempt和诊断展示。
 - 临时数据明确`TEST_ONLY`并启用TTL和容量限制。
 - 建立“提交到tec01 DRAFT”流程，不允许直接发布。
 
 ### 阶段5：扩展LLM/HITL节点
 
 - 实现`llm_extract`结构化输出、幂等和数据策略。
-- 实现`hitl_select`单候选自动选择和多候选持久化interrupt。
+- 实现`hitl_select`单候选自动选择、多候选持久化interrupt以及`SELECT/REFINE/MANUAL_VALUE/CANCEL`响应。
+- 实现最多1至5轮的受控LLM/HITL refinement loop和feedback history。
 - 通过Channel端到端验证长时间等待和恢复。
 
 ## 验收标准
@@ -650,6 +683,8 @@ payloadHash
 - itsm-workflow删除生产数据库配置后，Compiler和Executor仍能完整工作。
 - 草稿提取、DAG校验和生产Executor引用同一Node Manifest版本。
 - SQL多行结果可以经过LLM结构化，并在多候选时通过Channel完成HITL选择。
+- 用户可以补充条件让LLM重新生成候选，直到选择、手工输入、取消或达到迭代上限。
+- 任意Registry节点都可以在Studio中单步调试，且不会改变tec01生产运行状态。
 - Hermes、Executor或Studio重启不会丢失tec01中的生产中断和运行状态。
 - SQLite删除或损坏只影响临时Studio测试，不影响生产知识和运行。
 - localStorage中搜索不到Token、工单证据、SQL结果或客户数据。

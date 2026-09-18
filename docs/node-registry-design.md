@@ -94,6 +94,10 @@ supportedModes:
   - TEST
   - SIMULATION
   - DRY_RUN
+debugPolicy:
+  allowSingleNode: true
+  allowedModes: [TEST, SIMULATION, DRY_RUN]
+  productionArtifactReplay: REDACTED_COPY_ONLY
 configSchema: config.schema.json
 inputSchema: input.schema.json
 outputSchema: output.schema.json
@@ -115,6 +119,7 @@ planner: nodes.llm_extract.planner:LlmExtractPlanner
 | `idempotencyClass` | 是否可安全重放、需复用结果或不可自动重试 |
 | `resumeSemantics` | Worker丢失后的恢复或UNKNOWN规则 |
 | `supportedModes` | 节点允许在哪些执行上下文运行 |
+| `debugPolicy` | 是否允许单节点调试、允许模式及生产artifact复用限制 |
 | Schema字段 | 配置、输入、输出和通用表单渲染协议 |
 | `resultSensitivity` | artifact脱敏、权限和保留策略 |
 
@@ -193,6 +198,7 @@ ClockPort
 - 1个候选：自动选择并记录事件。
 - 多个候选：通过`HumanInteractionPort`创建持久化interrupt。
 - 生产Adapter把interrupt写tec01并通过Channel交互；Studio Adapter在本地页面展示相同选择卡片。
+- 用户响应支持`SELECT`、`REFINE`、`MANUAL_VALUE`和`CANCEL`。`REFINE`只能回到Manifest声明的上游`llm_extract`节点，并受最大迭代次数约束。
 
 ### `human_input`
 
@@ -233,6 +239,199 @@ ClockPort
 - 使用同一Handler，但注入TEST/SIMULATION Ports。
 - 保存到SQLite的数据始终标记`TEST_ONLY`。
 - 提交到tec01前重新通过Registry执行生产级静态校验。
+
+## 单节点调试
+
+Studio必须支持选择一个节点单独执行，而无需启动整张DAG。单节点调试仍使用正式Handler和Schema，只是把依赖输入与Port替换为测试上下文。
+
+### 输入来源
+
+调试者可以为节点输入选择：
+
+```text
+MANUAL_VALUE       手工填写并通过Input Schema校验
+FIXTURE             Registry随节点提供的脱敏Fixture
+TEST_ARTIFACT       当前Studio workspace中前置测试节点的artifact
+REDACTED_SNAPSHOT   经授权复制并脱敏的生产artifact快照
+```
+
+禁止单节点调试直接引用可变的生产artifact地址。`REDACTED_SNAPSHOT`必须复制到Studio临时存储、记录来源哈希并应用字段脱敏，不能反向修改生产结果。
+
+### 调试API
+
+```http
+POST /studio/api/v1/node-debug-runs
+GET  /studio/api/v1/node-debug-runs/{debugRunId}
+POST /studio/api/v1/node-debug-runs/{debugRunId}/interrupts/{interruptId}/reply
+POST /studio/api/v1/node-debug-runs/{debugRunId}/cancel
+```
+
+创建请求：
+
+```json
+{
+  "workspaceId": "test_ws_xxx",
+  "node": {
+    "id": "llm-extract",
+    "type": "llm_extract",
+    "schemaVersion": 1,
+    "config": {}
+  },
+  "mode": "SIMULATION",
+  "inputs": {
+    "rows": {
+      "source": "TEST_ARTIFACT",
+      "artifactId": "test_art_xxx",
+      "jsonPointer": "/data"
+    }
+  }
+}
+```
+
+每次调试创建独立`debugRunId`和attempt，保存到Studio SQLite：
+
+```text
+node definition snapshot
+resolved inputs hash
+mode
+handlerVersion
+status
+events
+temporary artifacts
+diagnostic
+expiresAt
+```
+
+单节点调试不允许改变tec01生产运行状态。生产节点失败后的正式重试仍必须通过tec01 MCP和原运行状态机；Studio只能建立诊断副本。
+
+### 调试泳道图
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant D as 开发/管理员
+    participant UI as Studio
+    participant R as Node Registry
+    participant H as Node Handler
+    participant A as Test/Simulation Adapters
+    participant DB as 临时SQLite
+
+    D->>UI: 选择单节点和执行模式
+    UI->>R: 获取Manifest、Schema和debugPolicy
+    R-->>UI: 配置表单和允许输入来源
+    D->>UI: 手工输入或选择测试artifact
+    UI->>H: validate + execute单节点
+    H->>A: 调用测试DB/模型/HITL Port
+    A-->>H: 标准结果或interrupt
+    H-->>UI: NodeResult/diagnostic
+    UI->>DB: 保存TEST_ONLY debug run
+    UI-->>D: 展示输入、输出、事件和诊断
+```
+
+## HITL反馈与LLM重新提取
+
+`hitl_select`收到多候选时，用户不仅可以选择，也可以补充信息让上游LLM重新生成候选，或直接输入明确值。
+
+### 用户动作
+
+```json
+{"action":"SELECT","candidateId":"candidate-2"}
+```
+
+```json
+{"action":"REFINE","feedback":"手机号后四位是8821，请按手机号重新判断"}
+```
+
+```json
+{"action":"MANUAL_VALUE","value":"C000244","reason":"用户已确认客户编号"}
+```
+
+```json
+{"action":"CANCEL"}
+```
+
+### 受控Refinement Loop
+
+不允许在DAG中配置任意回边。Registry提供受控的LLM/HITL refinement关系：
+
+```yaml
+type: hitl_select
+config:
+  refinement:
+    enabled: true
+    targetNodeId: llm-extract
+    maxIterations: 3
+    feedbackInputName: user_feedback
+    includePreviousCandidates: true
+```
+
+校验规则：
+
+- `targetNodeId`必须是当前HITL直接声明的上游`llm_extract`节点。
+- 回路内不能包含SQL写、消息发送等有副作用节点。
+- `maxIterations`必须为1至5，默认3。
+- 每次REFINE创建新的LLM attempt和新的HITL interrupt，旧interrupt关闭且不能再次回复。
+- LLM输入包含原始数据投影、上一轮候选和用户补充，但不允许Prompt指令覆盖系统Schema或安全策略。
+- 达到上限后只允许`SELECT`、`MANUAL_VALUE`或`CANCEL`。
+- `MANUAL_VALUE`必须通过节点`valueSchema`校验，并记录用户、理由和时间。
+
+tec01保存`interactionSession`：
+
+```text
+interactionSessionId
+runId
+llmNodeId
+hitlNodeId
+iteration
+maxIterations
+feedbackHistory
+llmAttemptIds
+interruptIds
+status: WAITING / RESOLVED / CANCELLED / LIMIT_REACHED
+selectedArtifactId
+```
+
+### 迭代泳道图
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant E as Executor
+    participant T as tec01 Control
+    participant L as LLM Node
+    participant H as HITL Node
+    participant M as tec01 MCP
+    participant U as 用户
+
+    E->>L: iteration=1，原始SQL投影
+    L-->>E: candidates v1
+    E->>H: candidates v1
+    H->>T: OPEN interrupt v1
+    M-->>U: 展示候选
+    alt 用户选择
+        U->>M: SELECT candidateId
+        M->>T: 保存响应并QUEUED
+        E->>H: resume并输出selected
+    else 用户补充信息
+        U->>M: REFINE feedback
+        M->>T: 关闭interrupt v1，iteration=2，QUEUED
+        E->>L: 原始投影 + candidates v1 + feedback
+        L-->>E: candidates v2
+        E->>H: candidates v2
+        H->>T: OPEN interrupt v2
+        M-->>U: 展示新候选和剩余次数
+    else 用户直接输入
+        U->>M: MANUAL_VALUE
+        M->>T: Schema校验并保存响应
+        E->>H: resume并输出manual selected
+    else 用户取消
+        U->>M: CANCEL
+        M->>T: interaction CANCELLED
+        T-->>E: 运行取消或按流程终止
+    end
+```
+
+在Studio单节点调试中，同一循环使用SQLite `HumanInteractionPort`和`FixtureModelAdapter`；生产中使用tec01持久化interrupt和Model Gateway，但节点输入输出Schema完全相同。
 
 ## 节点测试流程
 
