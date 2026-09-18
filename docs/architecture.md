@@ -6,6 +6,8 @@
 
 SQL读、条件、LLM、HITL等节点及其生产/测试/模拟模式统一由 [Node Registry与节点扩展设计](node-registry-design.md) 管理。
 
+架构拆分实施前的代码现状、技术风险和Go/No-Go条件见 [可行性评审](tec01-runtime-feasibility-review.md)；分阶段接口、迁移、测试和切换步骤见 [详细实施计划](tec01-runtime-implementation-plan.md)。
+
 ## 编排模型
 
 流程画布保存节点位置、控制边和结构化配置，但不允许携带 Python代码或任意 shell命令。`sql_read`、`condition`、`human_input`、`approval`、`end` 均来自节点注册表；新增操作类型通过 Handler、配置 Schema、输入 Schema、输出 Schema和风险级别扩展，不修改调度核心。

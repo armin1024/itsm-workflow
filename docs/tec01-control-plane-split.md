@@ -614,23 +614,22 @@ GET  /internal/v1/node-catalog
 POST /internal/v1/workflows/validate
 POST /internal/v1/workflows/plan
 POST /internal/v1/compiler/workflow-drafts
+```
+
+### itsm-workflow调用tec01
+
+```text
 POST /internal/v1/execution/claims
 POST /internal/v1/execution/claims/{leaseToken}/heartbeat
 GET  /internal/v1/execution/claims/{leaseToken}/commands
-```
-
-实际领取方向可以由Executor长轮询tec01；接口命名按最终网络方向调整，但状态和幂等语义不变。
-
-### itsm-workflow回写tec01
-
-```text
-POST /internal/v1/runs/{runId}/attempts/start
-POST /internal/v1/runs/{runId}/attempts/{attemptId}/complete
-POST /internal/v1/runs/{runId}/attempts/{attemptId}/fail
-PUT  /internal/v1/runs/{runId}/artifacts/{artifactId}
-PUT  /internal/v1/runs/{runId}/checkpoints/{checkpointId}
+POST /internal/v1/runs/{runId}/attempts
+PUT  /internal/v1/runs/{runId}/staged-artifacts/{uploadId}
+PUT  /internal/v1/runs/{runId}/staged-checkpoints/{checkpointId}
+POST /internal/v1/runs/{runId}/attempts/{attemptId}/commit
 POST /internal/v1/runs/{runId}/interrupts
 ```
+
+artifact和checkpoint先以`STAGED`上传；只有`attempt commit`可以在tec01同一事务中转正它们，并同时完成attempt、节点状态、事件和run revision。恢复只读取`COMMITTED` checkpoint，避免checkpoint和业务状态形成双事实源。
 
 所有生产写请求携带：
 
