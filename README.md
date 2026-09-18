@@ -111,4 +111,6 @@ python3 -c 'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_
 - [MCP 与 Agent 接入实施计划](docs/mcp-implementation-plan.md)
 - [通用节点与卡片扩展平台设计](docs/node-extension-platform.md)
 - [统一Node Registry与节点扩展设计](docs/node-registry-design.md)
+- [tec01与itsm-workflow可行性评审](docs/tec01-runtime-feasibility-review.md)
+- [tec01与itsm-workflow详细实施计划](docs/tec01-runtime-implementation-plan.md)
 - [0.6.x版本说明](CHANGELOG.md)
