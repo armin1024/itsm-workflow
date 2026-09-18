@@ -1,5 +1,7 @@
 # Linux x86_64 非 Docker部署
 
+当前推荐部署版本为 `0.6.3`。不要继续部署 `0.6.0`：该版本的 Alembic revision超过 PostgreSQL默认版本字段长度。`0.6.1`修复迁移，`0.6.2`修复可编辑导出包的哈希策略，`0.6.3`进一步清理并阻止 macOS AppleDouble元数据进入安装目录。
+
 ## 前置条件
 
 - Linux x86_64和 systemd。
@@ -31,11 +33,19 @@ WORKFLOW_REVIEW_ACTOR_UID=workflow-review-service
 
 审核 Token不要写入 Hermes MCP配置；它只交给受信任的审核平台。
 
+跨环境导出必须标记当前环境；新安装和升级环境都要增加：
+
+```dotenv
+KNOWLEDGE_ENVIRONMENT_NAME=生产
+```
+
+未配置时仅禁止导出，不影响知识查询和工作流执行。
+
 ## 安装
 
 ```bash
-tar -xzf itsm-workflow-0.4.1-linux-x86_64.tar.gz
-cd itsm-workflow-0.4.1-linux-x86_64
+tar -xzf itsm-workflow-0.6.3-linux-x86_64.tar.gz
+cd itsm-workflow-0.6.3-linux-x86_64
 sudo ./install.sh --no-start
 sudo vi /etc/itsm-workflow/service.env
 sudo systemctl start itsm-workflow-migrate
@@ -69,6 +79,45 @@ journalctl -u itsm-workflow-mcp -n 100 --no-pager
 ```
 
 健康检查中的 `cli.status` 必须为 `ok`。`CLI_NOT_FOUND`、`CLI_VERSION_MISMATCH` 会阻止操作节点成功执行。
+
+### 迁移启动失败
+
+不要使用不带 unit过滤的 `journalctl -xe`，它会混入 Zabbix等无关服务。按下面顺序收集事实：
+
+```bash
+sudo systemctl status itsm-workflow-migrate --full --no-pager
+sudo journalctl -u itsm-workflow-migrate -n 200 --no-pager -o cat
+sudo systemctl show itsm-workflow-migrate \
+  -p User -p Group -p ExecStart -p EnvironmentFiles --no-pager
+```
+
+正常升级应出现：
+
+```text
+Running upgrade 0006_list_search_indexes -> 0007_diagnostics_transfer
+```
+
+如果日志出现 `value too long for type character varying(32)`，说明仍在使用 `0.6.0`迁移文件，请安装 `0.6.3`。如果出现 `SyntaxError`、`source code string cannot contain null bytes` 或文件名以 `._` 开头，说明传输链路生成了 AppleDouble文件；`0.6.3`安装器会自动清理，也可以先只读检查：
+
+```bash
+sudo find /opt/itsm-workflow -name '._*' -o -name '.DS_Store' -o -name '__MACOSX'
+```
+
+安装包本身可这样验收，命令应无输出：
+
+```bash
+tar -tzf itsm-workflow-0.6.3-linux-x86_64.tar.gz \
+  | grep -E '(^|/)(\._|\.DS_Store|\.AppleDouble|__MACOSX)(/|$)'
+```
+
+修正问题后重试：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl reset-failed itsm-workflow-migrate
+sudo systemctl restart itsm-workflow-migrate
+sudo systemctl status itsm-workflow-migrate --full --no-pager
+```
 
 离线包所有原生扩展均按 `manylinux_2_17 x86_64` 选择并在构建时扫描 GLIBC符号，可运行于 glibc 2.17及以上系统。
 
@@ -186,3 +235,10 @@ https://test.mg.tf.cn/aops/itsm-workflow/mcp
 ## 升级
 
 安装器会停止 API、Worker、MCP和迁移单元，替换程序文件但保留 `/etc/itsm-workflow/service.env`。启动迁移单元成功后才能启动 API、Worker和MCP。
+
+从任意 `0.5.x/0.6.x`升级时，直接安装 `0.6.3`并运行迁移即可；PostgreSQL迁移使用事务DDL，失败不会把 Alembic版本号推进到一半。升级后检查：
+
+```bash
+curl http://127.0.0.1:8089/api/v1/health
+sudo systemctl status itsm-workflow-api itsm-workflow-worker itsm-workflow-mcp --no-pager
+```

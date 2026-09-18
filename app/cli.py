@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import signal
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,10 +14,63 @@ from app.config import settings
 
 
 class CliExecutionError(RuntimeError):
-    def __init__(self, code: str, message: str, *, exit_code: int | None = None):
+    def __init__(self, code: str, message: str, *, exit_code: int | None = None, stdout: bytes = b"", stderr: bytes = b"", truncated: bool = False):
         super().__init__(message)
         self.code = code
         self.exit_code = exit_code
+        self.stdout = stdout
+        self.stderr = stderr
+        self.truncated = truncated
+
+
+_SECRET_PATTERNS = (
+    (re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;]+"), r"\1***"),
+    (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}"), r"\1***"),
+    (re.compile(r"(?i)((?:aops[_-]?api[_-]?key|api[_-]?key|token|password|passwd)\s*[:=]\s*)[^\s,;]+"), r"\1***"),
+    (re.compile(r"(postgres(?:ql)?(?:\+asyncpg)?://[^:/\s]+:)[^@\s]+@", re.I), r"\1***@"),
+)
+
+
+def redact_diagnostic(value: bytes | str, limit: int) -> tuple[str, bool]:
+    text = value.decode("utf-8", "replace") if isinstance(value, bytes) else value
+    for pattern, replacement in _SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text, False
+    tail = encoded[-limit:].decode("utf-8", "replace")
+    return "[前部内容已截断]\n" + tail, True
+
+
+def _failure_message(stdout: bytes, stderr: bytes, fallback: str) -> str:
+    for source in (stdout, stderr):
+        text, _ = redact_diagnostic(source, 64 * 1024)
+        stripped = text.strip()
+        if not stripped:
+            continue
+        try:
+            payload = json.loads(stripped)
+            if isinstance(payload, dict):
+                for key in ("message", "error", "msg", "detail"):
+                    if payload.get(key):
+                        return re.sub(r"\s+", " ", str(payload[key])).strip()[:500]
+        except json.JSONDecodeError:
+            pass
+        event_values = []
+        current = ""
+        for line in stripped.replace("\r", "").split("\n"):
+            if line.startswith("event:"):
+                current = line[6:].strip().lower()
+            elif line.startswith("data:") and current in {"error", "failed", "failure", "message"}:
+                value = line[5:].strip().strip('"')
+                if value and value not in {"<nil>", "null", "!ok"}:
+                    event_values.append(value)
+        if event_values:
+            return re.sub(r"\s+", " ", event_values[-1]).strip()[:500]
+        lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+        if lines:
+            return re.sub(r"\s+", " ", lines[-1]).strip()[:500]
+    return fallback
 
 
 @dataclass(frozen=True)
@@ -224,11 +278,13 @@ async def execute_sql_read(
             if not task.done():
                 task.cancel()
     if process.returncode != 0:
-        raise CliExecutionError("NON_ZERO_EXIT", "aops-cli 返回非零退出码", exit_code=process.returncode)
+        raise CliExecutionError("NON_ZERO_EXIT", _failure_message(stdout, stderr, "aops-cli 返回非零退出码"), exit_code=process.returncode, stdout=stdout, stderr=stderr)
     try:
         payload = parse_sql_read_output(stdout)
     except CliExecutionError as exc:
         exc.exit_code = process.returncode
+        exc.stdout = stdout
+        exc.stderr = stderr
         raise
     return CliResult(payload, stdout, stderr, process.returncode, metadata)
 
@@ -261,7 +317,7 @@ async def execute_json_command(arguments: list[str], *, api_key: str, timeout_se
     if len(stdout) > 20 * 1024 * 1024 or len(stderr) > 1024 * 1024:
         raise CliExecutionError("OUTPUT_LIMIT_EXCEEDED", "aops-cli 获取工单证据的输出超过限制")
     if process.returncode != 0:
-        raise CliExecutionError("NON_ZERO_EXIT", "aops-cli 获取工单证据失败", exit_code=process.returncode)
+        raise CliExecutionError("NON_ZERO_EXIT", _failure_message(stdout, stderr, "aops-cli 获取工单证据失败"), exit_code=process.returncode, stdout=stdout, stderr=stderr)
     try:
         payload = json.loads(stdout.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:

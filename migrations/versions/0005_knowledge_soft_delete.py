@@ -10,8 +10,10 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("knowledge", sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True))
-    op.add_column("knowledge", sa.Column("deleted_by", sa.String(length=120), nullable=True))
+    columns = {item["name"] for item in sa.inspect(op.get_bind()).get_columns("knowledge")}
+    for column in (sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True), sa.Column("deleted_by", sa.String(length=120), nullable=True)):
+        if column.name not in columns:
+            op.add_column("knowledge", column)
 
 
 def downgrade() -> None:

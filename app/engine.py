@@ -244,12 +244,25 @@ class WorkflowEngine:
                 current = await session.get(WorkflowRun, state["run_id"])
                 attempt = await session.get(NodeAttempt, attempt_id)
                 code = exc.code if isinstance(exc, CliExecutionError) else "NODE_EXECUTION_ERROR"
-                attempt.status, attempt.error_code, attempt.exit_code, attempt.finished_at = "FAILED", code, getattr(exc, "exit_code", None), datetime.now(UTC)
+                message = str(exc)[:500]
+                diagnostic_id = None
+                diagnostic_truncated = False
+                if isinstance(exc, CliExecutionError) and (exc.stdout or exc.stderr):
+                    from app.cli import redact_diagnostic
+                    stdout_text, stdout_truncated = redact_diagnostic(exc.stdout, 64 * 1024)
+                    stderr_text, stderr_truncated = redact_diagnostic(exc.stderr, 1024 * 1024)
+                    diagnostic_truncated = exc.truncated or stdout_truncated or stderr_truncated
+                    diagnostic_id = _id("art_")
+                    diagnostic_payload = {"stdout": stdout_text, "stderr": stderr_text, "truncated": diagnostic_truncated}
+                    encoded = json.dumps(diagnostic_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                    session.add(EncryptedArtifact(id=diagnostic_id, run_id=current.id, node_id=node.id, artifact_type="DIAGNOSTIC", ciphertext=SecretBox().seal(diagnostic_payload, purpose="artifact:" + diagnostic_id), content_hash=sha256_bytes(encoded), size_bytes=len(encoded), expires_at=datetime.now(UTC) + timedelta(days=settings.result_retention_days)))
+                attempt.status, attempt.error_code, attempt.error_message = "FAILED", code, message
+                attempt.exit_code, attempt.diagnostic_artifact_id, attempt.diagnostic_truncated, attempt.finished_at = getattr(exc, "exit_code", None), diagnostic_id, diagnostic_truncated, datetime.now(UTC)
                 statuses = dict(current.node_statuses)
                 statuses[node.id] = "CANCELLED" if code == "CANCELLED" else "FAILED"
                 current.node_statuses, current.status = statuses, "CANCELLED" if code == "CANCELLED" else "FAILED"
                 current.finished_at = datetime.now(UTC)
-                await emit_event(session, current, "NODE_FAILED", node_id=node.id, attempt_id=attempt_id, status=statuses[node.id], summary=str(exc), payload={"errorCode": code})
+                await emit_event(session, current, "NODE_FAILED", node_id=node.id, attempt_id=attempt_id, status=statuses[node.id], summary=message, payload={"errorCode": code, "errorMessage": message, "exitCode": getattr(exc, "exit_code", None), "diagnosticAvailable": diagnostic_id is not None})
                 await session.commit()
             raise
 

@@ -43,6 +43,12 @@ async def test_api_creates_versioned_plan_and_requires_hash(tmp_path, monkeypatc
     assert submitted.status_code == 200 and submitted.json()["status"] == "PENDING_REVIEW"
     published = client.post(f"/api/v1/knowledge/{knowledge_id}/publish", json={})
     assert published.status_code == 200 and published.json()["version"] == 1
+    versions = client.get(f"/api/v1/workflow-versions?knowledgeId={knowledge_id}")
+    assert versions.status_code == 200 and versions.json()["items"][0]["current"] is True
+    detail = client.get(f"/api/v1/knowledge/{knowledge_id}").json()
+    assert detail["lastPublishedAt"] and any(item["eventType"] == "PUBLISHED" for item in detail["lifecycle"])
+    exact = client.get(f"/api/v1/knowledge?knowledgeId={knowledge_id}&creatorUid=S000001")
+    assert exact.status_code == 200 and exact.json()["total"] == 1
     plan_body = {"knowledgeId": knowledge_id, "ticketId": 100173, "parameters": {"name": "王五"}}
     planned = client.post("/api/v1/runs/plan", json=plan_body, headers={"Idempotency-Key": "plan-1"})
     assert planned.status_code == 200 and planned.json()["status"] == "WAITING_PLAN_APPROVAL"
@@ -82,5 +88,8 @@ async def test_api_creates_versioned_plan_and_requires_hash(tmp_path, monkeypatc
     assert client.get(f"/api/v1/knowledge/{knowledge_id}").status_code == 404
     assert client.get(f"/api/v1/runs/{run_id}").json()["knowledgeName"] == "客户查询"
     assert all(item["knowledgeId"] != knowledge_id for item in client.get("/api/v1/knowledge").json()["items"])
+    assert client.get("/api/v1/knowledge?pageSize=10").status_code == 422
+    assert client.get("/api/v1/knowledge?status=DELETED").status_code == 422
+    assert client.get("/api/v1/runs?statusGroup=INVALID").status_code == 422
     app.dependency_overrides.clear()
     await engine.dispose()

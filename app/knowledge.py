@@ -9,7 +9,7 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crypto import canonical_hash
-from app.models import Knowledge, KnowledgeUser, WorkflowVersion
+from app.models import Knowledge, KnowledgeLifecycleEvent, KnowledgeUser, WorkflowVersion
 from app.schemas import KnowledgeCreate, KnowledgeUpdate
 from app import retrieval
 from app.workflow import WorkflowDefinition, legacy_steps_to_workflow
@@ -17,6 +17,10 @@ from app.workflow import WorkflowDefinition, legacy_steps_to_workflow
 
 def _id(prefix: str) -> str:
     return prefix + uuid.uuid4().hex
+
+
+def add_lifecycle(session: AsyncSession, record: Knowledge, event_type: str, actor_uid: str | None, summary: str, *, version_id: str | None = None, source: str = "APPLICATION") -> None:
+    session.add(KnowledgeLifecycleEvent(id=_id("kle_"), knowledge_id=record.id, workflow_version_id=version_id, event_type=event_type, actor_uid=actor_uid, safe_summary=summary[:2000], source=source))
 
 
 def _chars(value: str) -> set[str]:
@@ -47,6 +51,13 @@ def serialize_knowledge(record: Knowledge, uids: list[str] | None = None) -> dic
         "reviewedAt": record.reviewed_at.isoformat() if record.reviewed_at else None,
         "reviewedBy": record.reviewed_by,
         "reviewNote": record.review_note,
+        "lastPublishedAt": record.last_published_at.isoformat() if record.last_published_at else None,
+        "lastPublishedBy": record.last_published_by,
+        "originEnvironment": record.origin_environment,
+        "originKnowledgeId": record.origin_knowledge_id,
+        "originVersionId": record.origin_version_id,
+        "originContentHash": record.origin_content_hash,
+        "importPackageId": record.import_package_id,
         "deletedAt": record.deleted_at.isoformat() if record.deleted_at else None,
         "deletedBy": record.deleted_by,
     }
@@ -64,13 +75,14 @@ async def create_knowledge(session: AsyncSession, body: KnowledgeCreate, creator
     )
     session.add(record)
     await session.flush()
+    add_lifecycle(session, record, "CREATED", creator_uid, "创建知识草稿")
     for uid in dict.fromkeys(item.strip() for item in body.uids if item.strip()):
         session.add(KnowledgeUser(knowledge_id=record.id, uid=uid))
     await session.commit()
     return record
 
 
-async def update_knowledge(session: AsyncSession, record: Knowledge, body: KnowledgeUpdate) -> Knowledge:
+async def update_knowledge(session: AsyncSession, record: Knowledge, body: KnowledgeUpdate, actor_uid: str | None = None) -> Knowledge:
     record.name = body.name.strip()
     record.summary = body.summary.strip()
     record.match_phrases = [item.strip() for item in body.matchPhrases if item.strip()]
@@ -90,6 +102,7 @@ async def update_knowledge(session: AsyncSession, record: Knowledge, body: Knowl
     await session.execute(delete(KnowledgeUser).where(KnowledgeUser.knowledge_id == record.id))
     for uid in dict.fromkeys(item.strip() for item in body.uids if item.strip()):
         session.add(KnowledgeUser(knowledge_id=record.id, uid=uid))
+    add_lifecycle(session, record, "UPDATED", actor_uid or record.creator_uid, "更新知识定义")
     await session.commit()
     await session.refresh(record, attribute_names=["users"])
     return record
@@ -107,6 +120,7 @@ async def submit_knowledge_review(session: AsyncSession, record: Knowledge, uid:
     record.reviewed_at = None
     record.reviewed_by = None
     record.review_note = None
+    add_lifecycle(session, record, "SUBMITTED", uid, "提交知识审核")
     await session.commit()
     return record
 
@@ -122,6 +136,7 @@ async def delete_knowledge(session: AsyncSession, record: Knowledge, uid: str) -
     record.retrieval_text = ""
     record.embedding = None
     record.embedding_model = None
+    add_lifecycle(session, record, "DELETED", uid, "删除知识")
     await session.commit()
     return record
 
@@ -143,6 +158,9 @@ async def publish_knowledge(session: AsyncSession, knowledge_id: str, uid: str) 
     record.reviewed_by = uid
     record.review_note = "审核通过并发布"
     record.published_version_id = version.id
+    record.last_published_at = version.published_at
+    record.last_published_by = uid
+    add_lifecycle(session, record, "PUBLISHED", uid, f"发布工作流版本 {version.version_number}", version_id=version.id)
     record.retrieval_text = retrieval.retrieval_text(record)
     if retrieval.settings.embedding_base_url:
         record.embedding = (await retrieval.embed([record.retrieval_text]))[0]
@@ -160,6 +178,7 @@ async def reject_knowledge_review(session: AsyncSession, record: Knowledge, uid:
     record.reviewed_at = datetime.now(UTC)
     record.reviewed_by = uid
     record.review_note = reason.strip()[:2000]
+    add_lifecycle(session, record, "REVIEW_REJECTED", uid, "审核退回：" + record.review_note)
     await session.commit()
     return record
 
@@ -244,9 +263,13 @@ async def import_legacy_package(session: AsyncSession, package: dict[str, Any], 
             summary=str(definition.get("summary") or "")[:2000], match_phrases=definition.get("matchPhrases") or [str(definition.get("name") or "导入经验")],
             negative_phrases=definition.get("negativePhrases") or [], system_keys=definition.get("systemKeys") or [],
             creator_uid=str(definition.get("creatorUid") or creator_uid)[:120], public=not uids,
-            draft_definition=workflow.model_dump(mode="json"),
+            draft_definition=workflow.model_dump(mode="json"), source_type="IMPORT",
+            origin_environment=str(package.get("sourceEnvironment") or "legacy"), origin_knowledge_id=str(item.get("sourceKnowledgeId") or "") or None,
+            origin_version_id=str(item.get("sourceVersionId") or "") or None, import_package_id=str(package.get("packageId") or "") or None,
         )
         session.add(record)
+        await session.flush()
+        add_lifecycle(session, record, "IMPORTED", creator_uid, "从旧版知识包导入", source="IMPORT")
         for allowed_uid in dict.fromkeys(uids):
             session.add(KnowledgeUser(knowledge_id=knowledge_id, uid=allowed_uid))
         ids.append(knowledge_id)

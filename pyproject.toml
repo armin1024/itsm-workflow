@@ -1,6 +1,6 @@
 [project]
 name = "itsm-workflow"
-version = "0.4.1"
+version = "0.6.3"
 description = "Observable and resumable AOPS production workflows"
 requires-python = ">=3.12"
 dependencies = [

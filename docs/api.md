@@ -44,7 +44,34 @@ POST /knowledge/{knowledgeId}/publish
 POST /knowledge/match
 POST /knowledge/import-legacy
 GET  /workflow-versions/{workflowVersionId}
+GET  /workflow-versions
 GET  /node-types
+POST /transfers/export/preview
+POST /transfers/export
+POST /transfers/import/preview
+POST /transfers/import
+POST /database-paths/replace/preview
+POST /database-paths/replace
+GET  /transfer-audits
+```
+
+### 知识列表分页
+
+```http
+GET /api/v1/knowledge?page=1&pageSize=20&keyword=客户查询&status=PENDING_REVIEW
+```
+
+- `page` 从1开始，越界时返回最后一个有效页。
+- `pageSize` 只允许20、50、100。
+- `status` 允许空值、`DRAFT`、`PENDING_REVIEW`、`PUBLISHED`。
+- 关键词精确匹配知识ID、来源工单ID和事件编号，模糊匹配名称、摘要、匹配短语和创建人UID。
+- 权限过滤在数据库分页前完成；`DELETED` 永不出现在列表。
+- 列表项是轻量摘要，只包含 `nodeCount`，完整 `workflowDefinition` 通过详情接口读取。
+
+统一分页响应：
+
+```json
+{"items":[],"page":1,"pageSize":20,"total":138,"totalPages":7}
 ```
 
 ### 草稿提交与服务审核
@@ -184,6 +211,14 @@ DELETE /api/v1/knowledge/{knowledgeId}
 
 ## 运行
 
+运行列表分页：
+
+```http
+GET /api/v1/runs?page=1&pageSize=20&keyword=100173&statusGroup=ACTIVE
+```
+
+`statusGroup` 支持 `ALL/ACTIVE/WAITING/SUCCEEDED/FAILED`。纯数字关键词精确匹配工单ID，`run_`开头匹配运行ID，其他文本匹配运行ID、经验名称和发起人UID。列表只返回状态和进度摘要，不包含workflow、attempt、interrupt或事件。
+
 ```text
 POST /runs/plan
 POST /runs/{runId}/approve
@@ -280,3 +315,99 @@ GET  /api/v1/health
 GET  /metrics
 POST /api/v1/admin/retention/run
 ```
+
+## 精确查询接口
+
+列表接口先应用身份与可见范围，再统计和分页。不同字段按 `AND` 组合；同一字段可以重复传递或用逗号分隔，按 `IN` 匹配。时间使用 ISO 8601，`From` 包含边界，`To` 不包含边界。响应中的 `appliedFilters` 表示服务实际采用的条件。
+
+知识查询支持：
+
+```text
+knowledgeId status nameExact summaryExact matchPhrase negativePhrase
+creatorUid authorizedUid visibility sourceType sourceTicketId sourceTicketNo
+publishedVersionId systemKey createdFrom createdTo updatedFrom updatedTo
+submittedFrom submittedTo publishedFrom publishedTo keyword page pageSize
+```
+
+其中 `authorizedUid` 仅管理员可用。示例：
+
+```bash
+curl -G 'http://workflow.internal:8089/api/v1/knowledge' \
+  -H 'Authorization: Bearer <WORKFLOW_API_TOKEN>' \
+  -H 'X-AOPS-Api-Key: <AOPS_API_KEY>' \
+  --data-urlencode 'creatorUid=S000001' \
+  --data-urlencode 'status=PUBLISHED' \
+  --data-urlencode 'systemKey=crm' \
+  --data-urlencode 'publishedFrom=2026-09-01T00:00:00+08:00'
+```
+
+运行查询支持 `runId/knowledgeId/workflowVersionId/ticketId/initiatedBy/status/statusGroup/currentNodeId` 和创建、开始、结束时间范围。普通用户只能查询自己的运行。
+
+版本分页查询：
+
+```http
+GET /api/v1/workflow-versions?knowledgeId=knw_xxx&versionNumber=2&page=1&pageSize=20
+```
+
+支持 `workflowVersionId/knowledgeId/versionNumber/contentHash/publishedBy/publishedFrom/publishedTo`。
+
+审核队列支持 `page/pageSize/knowledgeId/creatorUid/sourceTicketId/sourceTicketNo/submittedFrom/submittedTo`。
+
+## 生命周期与失败诊断
+
+知识详情包含 `createdAt/updatedAt/submittedAt/submittedBy/reviewedAt/reviewedBy/lastPublishedAt/lastPublishedBy/deletedAt/deletedBy` 和 `lifecycle[]`。每个不可变版本单独保留发布人和发布时间。
+
+失败尝试在运行详情的 `attempts[]` 中返回 `errorCode/errorMessage/exitCode/diagnosticAvailable/diagnosticTruncated`。运行发起人或管理员可读取完整脱敏诊断：
+
+```http
+GET /api/v1/runs/{runId}/attempts/{attemptId}/diagnostic
+```
+
+`data.stdout` 和 `data.stderr` 已过滤凭据，并按节点结果保留期限加密保存。
+
+## 跨环境导入导出
+
+各环境必须配置 `KNOWLEDGE_ENVIRONMENT_NAME`。REST接口始终收发 JSON；管理页面 `/transfers` 才把导出响应保存为本地 UTF-8 JSON文件。
+
+导出预检：
+
+```json
+POST /api/v1/transfers/export/preview
+{"knowledgeIds":["knw_1","knw_2"]}
+```
+
+确认导出：
+
+```json
+POST /api/v1/transfers/export
+{
+  "knowledgeIds":["knw_1","knw_2"],
+  "confirmed":true,
+  "databaseMappings":[
+    {"sourceRef":"1/dev/dev/read/svc","targetRef":"9/prod/prod/read/svc"}
+  ]
+}
+```
+
+返回 `schema=itsm-workflow-export`、`schemaVersion=2` 的 JSON对象。包中包含 DAG、匹配范围、授权UID和来源信息，不包含凭据、向量、运行结果或 checkpoint。
+
+导入先调用 `/transfers/import/preview`，再调用 `/transfers/import`：
+
+```json
+{
+  "package":{"schema":"itsm-workflow-export","schemaVersion":2,"items":[]},
+  "confirmed":true,
+  "databaseMappings":[
+    {"sourceRef":"9/prod/prod/read/svc","targetRef":"12/prod/prod/readonly/svc"}
+  ],
+  "knowledgeOverrides":[
+    {"itemIndex":0,"creatorUid":"S000001","uids":["S000123"],"action":"CREATE"}
+  ]
+}
+```
+
+`action` 支持 `CREATE/SKIP/COPY`。来源和内容完全相同的条目默认跳过；`COPY` 表示明确重复复制。所有新建经验进入 `PENDING_REVIEW`，整批失败时全部回滚。旧 `aops-workflow-knowledge-export/schemaVersion=1` 包仍可导入。
+
+导出包未使用数字签名，允许管理员核实并修改路径、授权或通用描述。若当前 JSON内容与包内来源 `contentHash` 不一致，预检返回 `contentHashMismatch=true` 和告警，但不会拒绝导入；服务会对规范化后的实际导入内容生成 `effectiveContentHash`，并用它完成重复检测。
+
+快速路径替换使用 `/database-paths/replace/preview` 和 `/database-paths/replace`，只对所选知识做完整路径匹配。已发布知识会退回待审核。迁移审计通过 `/transfer-audits` 查询。
