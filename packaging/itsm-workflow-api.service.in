@@ -1,8 +1,7 @@
 [Unit]
 Description=ITSM Workflow API
-After=network-online.target itsm-workflow-migrate.service
+After=network-online.target
 Wants=network-online.target
-Requires=itsm-workflow-migrate.service
 
 [Service]
 Type=simple
@@ -19,6 +18,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
+ReadWritePaths=/var/lib/itsm-workflow
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

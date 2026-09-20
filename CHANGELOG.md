@@ -1,5 +1,13 @@
 # 版本说明
 
+## 0.8.0
+
+- 将服务收敛为Node Registry、Compiler、Runtime Adapter、tec01 Client和独立Studio。
+- 删除本地生产知识/检索/运行数据库、MCP、登录权限、Alembic和旧Worker。
+- Studio无需管理员登录，提供节点单步调试、可视化DAG校验和工单草稿提取。
+- SQL读TEST模式按请求接收`X-AOPS-Api-Key`，凭据不落盘、不进入调试记录。
+- 安装包只保留API与可选Compiler Worker，并在升级时停用旧MCP/Worker/Migrate unit。
+
 ## 0.7.0
 
 - 增加统一Node Registry、完整Manifest、节点Schema、执行模式和Catalog摘要。
@@ -36,6 +44,6 @@
 ## 兼容性
 
 - 目标系统：Linux x86_64、glibc 2.17及以上、systemd。
-- 持久化：生产环境使用 PostgreSQL；SQLite仅用于测试。
+- 持久化：itsm-workflow只使用TEST_ONLY SQLite；生产数据和运行状态由tec01持有。
 - `aops-cli`由目标机提供，不包含在离线包中。
 - 旧 `aops-workflow-knowledge-export/schemaVersion=1` 知识包仍可导入；新包使用 `itsm-workflow-export/schemaVersion=2`。

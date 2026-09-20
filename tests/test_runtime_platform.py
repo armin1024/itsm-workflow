@@ -5,6 +5,7 @@ import pytest
 
 from app.runtime import NODE_REGISTRY
 from app.runtime.planner import render_plan, validate_workflow
+from app.runtime.executor import execute_single_node
 from app.runtime.remote_checkpointer import RemoteTec01Checkpointer
 from app.studio.debug import reject_credentials, run_single_node
 from app.studio.store import StudioStore
@@ -55,14 +56,29 @@ async def test_studio_single_node_debug_and_hitl_reply(tmp_path):
     store = StudioStore(tmp_path / "studio.db")
     await store.initialize()
     sql = {"id": "sql", "type": "sql_read", "title": "查询", "config": {"databaseRef": "test/db", "sqlTemplate": "SELECT 1"}, "inputs": []}
-    executed = run_single_node(node=sql, inputs={}, mode="SIMULATION", simulation={"fixtureOutput": {"status": 0, "data": [{"value": 1}], "rowCount": 1}})
+    executed = await run_single_node(node=sql, inputs={}, mode="SIMULATION", simulation={"fixtureOutput": {"status": 0, "data": [{"value": 1}], "rowCount": 1}})
     saved = await store.create_debug_run(creator_uid="admin", workspace_id=None, node=sql, inputs={}, mode="SIMULATION", handler_version="1.0.0", status=executed["status"], output=executed["output"], diagnostic=None, interrupt=None)
     assert (await store.get_debug_run(saved["debugRunId"], "admin", True))["output"]["rowCount"] == 1
     hitl = {"id": "hitl", "type": "hitl_select", "title": "选择", "config": {"selectionMode": "SINGLE", "autoSelectSingle": True, "zeroCandidatePolicy": "FAIL", "title": "选择"}, "inputs": []}
-    waiting = run_single_node(node=hitl, inputs={"candidates": [{"id": "a", "label": "A", "value": 1}, {"id": "b", "label": "B", "value": 2}]}, mode="SIMULATION")
+    waiting = await run_single_node(node=hitl, inputs={"candidates": [{"id": "a", "label": "A", "value": 1}, {"id": "b", "label": "B", "value": 2}]}, mode="SIMULATION")
     record = await store.create_debug_run(creator_uid="admin", workspace_id=None, node=hitl, inputs={"candidates": []}, mode="SIMULATION", handler_version="1.0.0", status=waiting["status"], output=None, diagnostic=None, interrupt=waiting["interrupt"])
     resolved = await store.resolve_interrupt(record["debugRunId"], "admin", {"action": "SELECT", "candidateId": "b"})
     assert resolved["status"] == "SUCCEEDED" and resolved["output"]["selected"]["value"] == 2
+
+
+@pytest.mark.asyncio
+async def test_sql_test_mode_uses_ephemeral_api_key(monkeypatch):
+    seen = {}
+    async def execute(**kwargs):
+        seen.update(kwargs)
+        from app.cli import CliMetadata, CliResult
+        return CliResult({"status": 0, "data": [{"id": 1}], "rowCount": 1}, b"", b"", 0, CliMetadata("test", "0" * 64))
+    monkeypatch.setattr("app.runtime.executor.execute_sql_read", execute)
+    node = {"id": "sql", "type": "sql_read", "title": "查询", "config": {"databaseRef": "test/db", "sqlTemplate": "SELECT id FROM users WHERE name={{name}}"}, "inputs": [{"name": "name", "type": "string", "source": {"kind": "RUN_INPUT", "key": "name"}}]}
+    result = await execute_single_node(node=node, inputs={"name": "王五"}, mode="TEST", api_key="ephemeral-secret", ticket_id=100173)
+    assert result["status"] == "SUCCEEDED" and seen["api_key"] == "ephemeral-secret"
+    assert "ephemeral-secret" not in json.dumps(result, ensure_ascii=False)
+    assert "#uatu-" not in seen["sql"] and "王五" in seen["sql"]
 
 
 @pytest.mark.asyncio

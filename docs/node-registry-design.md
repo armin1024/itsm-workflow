@@ -260,10 +260,9 @@ REDACTED_SNAPSHOT   经授权复制并脱敏的生产artifact快照
 ### 调试API
 
 ```http
-POST /studio/api/v1/node-debug-runs
-GET  /studio/api/v1/node-debug-runs/{debugRunId}
-POST /studio/api/v1/node-debug-runs/{debugRunId}/interrupts/{interruptId}/reply
-POST /studio/api/v1/node-debug-runs/{debugRunId}/cancel
+POST /api/v1/studio/node-debug-runs
+GET  /api/v1/studio/node-debug-runs/{debugRunId}
+POST /api/v1/studio/node-debug-runs/{debugRunId}/interrupts/reply
 ```
 
 创建请求：

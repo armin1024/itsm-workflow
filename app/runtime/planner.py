@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
-from app.crypto import canonical_hash
 from app.runtime import NODE_REGISTRY
 from app.workflow import WorkflowDefinition
+
+
+def canonical_hash(value: Any) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def normalize_workflow(value: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -33,7 +39,7 @@ def validate_workflow(value: dict[str, Any], mode: str = "DRAFT") -> dict[str, A
         "normalizedDefinition": normalized,
         "catalogDigest": catalog["catalogDigest"],
         "workflowContentHash": canonical_hash(normalized),
-        "requiredRuntimeVersion": ">=0.7.0,<1.0.0",
+        "requiredRuntimeVersion": ">=0.8.0,<1.0.0",
         "warnings": warnings,
     }
 
@@ -69,5 +75,5 @@ def render_plan(*, workflow_version_id: str, workflow_content_hash: str, workflo
         "renderedPlan": {"nodes": nodes, "edges": normalized["edges"], "riskSummary": risks, "requiredInputs": list(required.values())},
         "planMaterialHash": canonical_hash(material),
         "catalogDigest": validated["catalogDigest"],
-        "runtimeVersion": "0.7.0",
+        "runtimeVersion": "0.8.0",
     }

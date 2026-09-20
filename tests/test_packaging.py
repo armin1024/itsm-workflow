@@ -9,9 +9,16 @@ def test_installer_creates_and_renders_service_group():
     assert 'usermod --gid "$SERVICE_GROUP" "$SERVICE_USER"' in installer
     assert 's|__SERVICE_GROUP__|$SERVICE_GROUP|g' in installer
     assert "._*" in installer and ".DS_Store" in installer
-    for name in ("api", "worker", "migrate", "compiler"):
+    for name in ("api", "compiler"):
         template = (root / "packaging" / f"itsm-workflow-{name}.service.in").read_text()
         assert "Group=__SERVICE_GROUP__" in template
+    assert not (root / "packaging" / "itsm-workflow-mcp.service.in").exists()
+    assert not (root / "packaging" / "itsm-workflow-worker.service.in").exists()
+    assert not (root / "packaging" / "itsm-workflow-migrate.service.in").exists()
+    env_example = (root / "packaging" / "service.env.example").read_text()
+    for removed in ("DATABASE_URL", "LANGGRAPH_DATABASE_URL", "WORKFLOW_ADMIN_UIDS", "WORKFLOW_OPERATOR_UIDS", "MCP_PORT", "EMBEDDING_BASE_URL", "RERANK_BASE_URL"):
+        assert removed not in env_example
+    assert "ReadWritePaths=/var/lib/itsm-workflow" in (root / "packaging" / "itsm-workflow-api.service.in").read_text()
 
 
 def test_release_targets_enterprise_linux_glibc():
@@ -22,11 +29,3 @@ def test_release_targets_enterprise_linux_glibc():
     assert "COPYFILE_DISABLE=1" in builder
     assert "._*" in builder and ".DS_Store" in builder and "--no-xattrs" in builder
     assert (root / "packaging" / "verify-glibc.py").is_file()
-
-
-def test_alembic_revision_ids_fit_default_version_column():
-    root = Path(__file__).parents[1]
-    for migration in (root / "migrations" / "versions").glob("*.py"):
-        match = re.search(r'^revision\s*=\s*"([^"]+)"', migration.read_text(), re.MULTILINE)
-        assert match, f"{migration.name}缺少revision"
-        assert len(match.group(1)) <= 32, f"{migration.name}的revision超过alembic_version默认长度"
