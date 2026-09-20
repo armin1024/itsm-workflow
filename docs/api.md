@@ -316,6 +316,34 @@ GET  /metrics
 POST /api/v1/admin/retention/run
 ```
 
+## Runtime内部API与节点Studio
+
+Runtime内部接口使用独立`RUNTIME_SERVICE_TOKEN`：
+
+```text
+GET  /internal/v1/runtime/catalog
+POST /internal/v1/runtime/workflows/validate
+POST /internal/v1/runtime/workflows/plan
+POST /internal/v1/compiler/preview
+```
+
+Catalog返回Node Manifest、配置/输入/输出Schema、UI Schema、Handler版本和四种执行模式。`If-None-Match`支持Catalog摘要缓存。
+
+Studio接口仅管理员可用：
+
+```text
+GET  /api/v1/studio/catalog
+GET  /api/v1/studio/workspaces
+POST /api/v1/studio/workspaces
+POST /api/v1/studio/node-debug-runs
+GET  /api/v1/studio/node-debug-runs/{debugRunId}
+POST /api/v1/studio/node-debug-runs/{debugRunId}/interrupts/reply
+```
+
+单节点调试只允许`TEST/SIMULATION/DRY_RUN`，结果标记`testOnly=true`并写入独立TTL SQLite，不修改生产运行。
+
+生产DAG支持`llm_extract`、`hitl_select`和受控`REFINEMENT`边。REFINEMENT只能从HITL回到上游LLM，要求1至5次最大迭代和可选的反馈RUN_INPUT。
+
 ## 精确查询接口
 
 列表接口先应用身份与可见范围，再统计和分页。不同字段按 `AND` 组合；同一字段可以重复传递或用逗号分隔，按 `IN` 匹配。时间使用 ISO 8601，`From` 包含边界，`To` 不包含边界。响应中的 `appliedFilters` 表示服务实际采用的条件。

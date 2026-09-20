@@ -1,5 +1,14 @@
 # 版本说明
 
+## 0.7.0
+
+- 增加统一Node Registry、完整Manifest、节点Schema、执行模式和Catalog摘要。
+- 增加Runtime内部Catalog、Workflow校验、计划渲染和Compiler预览API。
+- 增加独立Studio页面、TEST_ONLY SQLite、TTL临时数据和单节点调试。
+- 增加`llm_extract`与`hitl_select`节点、结构化输出、候选选择和受控REFINEMENT回边。
+- 增加tec01版本化HTTP客户端和无存储Compiler Worker。
+- 保留Monolith兼容模式；未启用tec01时现有知识、MCP和Worker行为不变。
+
 ## 0.6.3
 
 - 发布流程显式排除 `._*`、`.DS_Store`、`.AppleDouble` 和 `__MACOSX`，关闭 tar xattr、ACL和 SELinux扩展元数据。

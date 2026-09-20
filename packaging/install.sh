@@ -20,7 +20,7 @@ case "$PREFIX" in /*) ;; *) echo "--prefix must be absolute" >&2; exit 2;; esac
 case "$PREFIX" in /|/opt|/usr) echo "Unsafe prefix" >&2; exit 2;; esac
 PACKAGE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
-systemctl stop itsm-workflow-mcp itsm-workflow-api itsm-workflow-worker itsm-workflow-migrate 2>/dev/null || true
+systemctl stop itsm-workflow-compiler itsm-workflow-mcp itsm-workflow-api itsm-workflow-worker itsm-workflow-migrate 2>/dev/null || true
 if ! getent group "$SERVICE_GROUP" >/dev/null 2>&1; then
   groupadd --system "$SERVICE_GROUP"
 fi
@@ -59,7 +59,7 @@ if [ ! -f "$CONFIG_DIR/mcp.env" ]; then
   chmod 0640 "$CONFIG_DIR/mcp.env"
   chown root:"$SERVICE_USER" "$CONFIG_DIR/mcp.env"
 fi
-for name in api worker migrate mcp; do
+for name in api worker migrate mcp compiler; do
   sed -e "s|__PREFIX__|$PREFIX|g" -e "s|__CONFIG_DIR__|$CONFIG_DIR|g" -e "s|__SERVICE_USER__|$SERVICE_USER|g" -e "s|__SERVICE_GROUP__|$SERVICE_GROUP|g" "$PACKAGE_DIR/itsm-workflow-$name.service.in" > "/etc/systemd/system/itsm-workflow-$name.service"
 done
 chmod 0644 /etc/systemd/system/itsm-workflow-*.service
@@ -75,5 +75,8 @@ if [ "$START" -eq 1 ]; then
   [ -x "$cli_path" ] || { echo "AOPS_CLI_PATH is not executable: $cli_path" >&2; exit 1; }
   systemctl start itsm-workflow-migrate
   systemctl start itsm-workflow-api itsm-workflow-worker itsm-workflow-mcp
+  if grep -q '^TEC01_ENABLED=true' "$CONFIG_DIR/service.env"; then
+    systemctl enable --now itsm-workflow-compiler
+  fi
 fi
 echo "Installed ITSM Workflow"

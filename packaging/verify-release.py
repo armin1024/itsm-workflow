@@ -24,7 +24,7 @@ with tempfile.TemporaryDirectory() as directory:
     assert 'groupadd --system "$SERVICE_GROUP"' in installer
     assert '"$CONFIG_DIR/mcp.env"' in installer
     assert (package_root / "mcp.env.example").is_file()
-    for unit in ("api", "worker", "migrate", "mcp"):
+    for unit in ("api", "worker", "migrate", "mcp", "compiler"):
         rendered = (package_root / f"itsm-workflow-{unit}.service.in").read_text().replace("__SERVICE_GROUP__", "itsmworkflow")
         assert "Group=itsmworkflow" in rendered and "__SERVICE_GROUP__" not in rendered
 

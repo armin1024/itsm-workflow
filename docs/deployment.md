@@ -1,6 +1,6 @@
 # Linux x86_64 非 Docker部署
 
-当前推荐部署版本为 `0.6.3`。不要继续部署 `0.6.0`：该版本的 Alembic revision超过 PostgreSQL默认版本字段长度。`0.6.1`修复迁移，`0.6.2`修复可编辑导出包的哈希策略，`0.6.3`进一步清理并阻止 macOS AppleDouble元数据进入安装目录。
+当前推荐部署版本为 `0.7.0`。不要继续部署 `0.6.0`：该版本的 Alembic revision超过 PostgreSQL默认版本字段长度。`0.6.1`修复迁移，`0.6.2`修复可编辑导出包的哈希策略，`0.6.3`进一步清理macOS元数据，`0.7.0`增加统一Node Registry、Runtime内部API、Studio单节点调试和LLM/HITL节点基础能力。
 
 ## 前置条件
 
@@ -41,11 +41,37 @@ KNOWLEDGE_ENVIRONMENT_NAME=生产
 
 未配置时仅禁止导出，不影响知识查询和工作流执行。
 
+0.7.0新增Runtime内部接口和Studio临时库：
+
+```dotenv
+RUNTIME_SERVICE_TOKEN=<与其他服务Token不同的长随机值>
+RUNTIME_INTERNAL_ENABLED=true
+STUDIO_ENABLED=true
+STUDIO_DATABASE_PATH=/var/lib/itsm-workflow/studio.db
+STUDIO_TTL_HOURS=24
+TEC01_ENABLED=false
+TEC01_BASE_URL=
+TEC01_SERVICE_TOKEN=
+TEC01_TIMEOUT_SECONDS=20
+TEC01_CLAIM_WAIT_SECONDS=15
+```
+
+未完成tec01联调前保持`TEC01_ENABLED=false`。Studio SQLite仅用于TEST_ONLY临时调试，不替代PostgreSQL生产存储。
+
+完成tec01配置后启用无存储Compiler Worker：
+
+```bash
+sudo systemctl enable --now itsm-workflow-compiler
+sudo systemctl status itsm-workflow-compiler --no-pager
+```
+
+`TEC01_ENABLED=false`时不要启动该服务。
+
 ## 安装
 
 ```bash
-tar -xzf itsm-workflow-0.6.3-linux-x86_64.tar.gz
-cd itsm-workflow-0.6.3-linux-x86_64
+tar -xzf itsm-workflow-0.7.0-linux-x86_64.tar.gz
+cd itsm-workflow-0.7.0-linux-x86_64
 sudo ./install.sh --no-start
 sudo vi /etc/itsm-workflow/service.env
 sudo systemctl start itsm-workflow-migrate

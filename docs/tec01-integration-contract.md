@@ -535,6 +535,16 @@ PUT /internal/v1/runs/{runId}/staged-checkpoints/{checkpointId}
 
 只有COMMITTED checkpoint可通过claim恢复。
 
+Remote Checkpointer读取和清理接口：
+
+```text
+GET    /internal/v1/checkpoints/{threadId}/latest
+GET    /internal/v1/checkpoints/{threadId}
+DELETE /internal/v1/checkpoints/{threadId}
+```
+
+`latest`支持`checkpointId`和`checkpointNamespace`查询参数；无记录返回204。列表支持`before/limit`，只返回COMMITTED checkpoint并保留parent chain。DELETE仅用于终态保留期清理，不能删除活跃运行依赖的祖先checkpoint。
+
 LangGraph pending writes追加接口：
 
 ```http

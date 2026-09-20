@@ -1,6 +1,6 @@
 # ITSM Workflow
 
-当前稳定版本：`0.6.3`。
+当前版本：`0.7.0`。
 
 面向 AOPS 生产操作的可观测、可中断、可恢复工作流平台。知识、不可变工作流版本、运行状态、LangGraph checkpoint、审批与审计统一保存在 PostgreSQL。
 
@@ -24,6 +24,9 @@
 - 创建运行时根据经验中的 `RUN_INPUT` 动态生成类型化表单；节点输出绑定参数不会重复向用户索要。
 - `FAILED` 节点支持人工重试；`UNKNOWN` 节点要求操作者选择重试或标记失败。
 - 独立 Streamable HTTP MCP Adapter，提供经验匹配、计划确认、紧凑事实短等待、节点结果读取、中断和恢复等13个工具。
+- 统一Node Registry管理SQL读、条件、LLM提取、HITL选择、人工输入、审批和结束节点。
+- 独立节点Studio使用TEST_ONLY SQLite支持单节点Simulation/DRY_RUN调试和HITL候选交互。
+- Runtime内部Catalog、Workflow校验、计划渲染和无存储Compiler接口为tec01并行接入预留。
 - 节点失败记录可读错误原因，并为运行发起人和管理员提供加密、脱敏的 stdout/stderr诊断。
 - 知识、运行与不可变版本支持权限感知的字段级精确筛选和生命周期时间线。
 - 原生 DAG v2跨环境导入导出支持数据库路径映射、重复检测、待审核导入、快速路径替换和迁移审计。
@@ -88,6 +91,13 @@ WORKFLOW_ADMIN_UIDS=S000001,S000002
 WORKFLOW_OPERATOR_UIDS=S000001,S000002,S000003
 WORKFLOW_BASE_PATH=
 KNOWLEDGE_ENVIRONMENT_NAME=生产
+RUNTIME_SERVICE_TOKEN=<独立内部服务Token>
+STUDIO_ENABLED=true
+STUDIO_DATABASE_PATH=/var/lib/itsm-workflow/studio.db
+STUDIO_TTL_HOURS=24
+TEC01_ENABLED=false
+TEC01_BASE_URL=
+TEC01_SERVICE_TOKEN=
 ```
 
 MCP进程实际读取独立的 `/etc/itsm-workflow/mcp.env`，其中只保留 MCP配置和 `WORKFLOW_API_TOKEN`；不要把数据库密码或 `WORKFLOW_MASTER_KEY` 写入该文件。
