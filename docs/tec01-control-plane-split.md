@@ -209,21 +209,16 @@ sequenceDiagram
 
 ### 草稿编译协议
 
-```http
-POST /internal/v1/compiler/workflow-drafts
+tec01先保存extraction job和证据，Compiler Worker使用租约领取，避免LLM长耗时占用同步HTTP请求：
+
+```text
+POST /internal/v1/compiler/claims
+POST /internal/v1/compiler/claims/{leaseToken}/heartbeat
+POST /internal/v1/compiler/extractions/{extractionId}/complete
+POST /internal/v1/compiler/extractions/{extractionId}/fail
 ```
 
-```json
-{
-  "extractionId": "ext_xxx",
-  "ticketInfo": {},
-  "auditTimeline": [],
-  "targetCatalogVersion": "2026-09-17",
-  "locale": "zh-CN"
-}
-```
-
-返回候选定义和诊断，不写数据库：
+claim返回`ticketInfo`、`auditTimeline`、evidenceHash、targetCatalogDigest和promptVersion。Compiler完成后提交候选定义和诊断，不写数据库：
 
 ```json
 {
@@ -261,7 +256,8 @@ sequenceDiagram
     T->>S: 创建QUEUED extraction job
     T->>A: 获取ticketInfo和auditTimeline
     A-->>T: 工单证据
-    T->>C: 证据 + targetCatalogVersion
+    C->>T: claim extraction job
+    T-->>C: 证据 + lease + targetCatalogVersion
     C->>C: 过滤、只读校验、去重和参数化
     alt 无有效操作
         C-->>T: NO_VALID_OPERATIONS + diagnostics
@@ -270,7 +266,7 @@ sequenceDiagram
         C->>L: 受控Prompt + 结构化证据
         L-->>C: 中文语义与依赖
         C->>C: 生成并校验DAG
-        C-->>T: DraftProposal
+        C->>T: complete DraftProposal + diagnostics
         T->>C: 按当前Catalog二次validate
         C-->>T: validated
         T->>S: 单事务创建DRAFT、生命周期和完成job
@@ -610,27 +606,31 @@ Compiler、Executor和Studio共享`workflow-schema`。Executor以`PRODUCTION`模
 ### tec01调用itsm-workflow
 
 ```text
-GET  /internal/v1/node-catalog
-POST /internal/v1/workflows/validate
-POST /internal/v1/workflows/plan
-POST /internal/v1/compiler/workflow-drafts
+GET  /internal/v1/runtime/catalog
+POST /internal/v1/runtime/workflows/validate
+POST /internal/v1/runtime/workflows/plan
+```
+
+### itsm-workflow调用tec01
+
+```text
 POST /internal/v1/execution/claims
 POST /internal/v1/execution/claims/{leaseToken}/heartbeat
 GET  /internal/v1/execution/claims/{leaseToken}/commands
+POST /internal/v1/execution/claims/{leaseToken}/commands/{commandId}/ack
+POST /internal/v1/runs/{runId}/attempts
+POST /internal/v1/runs/{runId}/staged-artifacts
+PUT  /internal/v1/runs/{runId}/staged-artifacts/{uploadId}/content
+PUT  /internal/v1/runs/{runId}/staged-checkpoints/{checkpointId}
+POST /internal/v1/runs/{runId}/staged-checkpoints/{checkpointId}/writes
+POST /internal/v1/runs/{runId}/attempts/{attemptId}/commit
+POST /internal/v1/compiler/claims
+POST /internal/v1/compiler/claims/{leaseToken}/heartbeat
+POST /internal/v1/compiler/extractions/{extractionId}/complete
+POST /internal/v1/compiler/extractions/{extractionId}/fail
 ```
 
-实际领取方向可以由Executor长轮询tec01；接口命名按最终网络方向调整，但状态和幂等语义不变。
-
-### itsm-workflow回写tec01
-
-```text
-POST /internal/v1/runs/{runId}/attempts/start
-POST /internal/v1/runs/{runId}/attempts/{attemptId}/complete
-POST /internal/v1/runs/{runId}/attempts/{attemptId}/fail
-PUT  /internal/v1/runs/{runId}/artifacts/{artifactId}
-PUT  /internal/v1/runs/{runId}/checkpoints/{checkpointId}
-POST /internal/v1/runs/{runId}/interrupts
-```
+artifact和checkpoint先以`STAGED`上传；interrupt作为WAITING attempt commit的一部分提交。只有`attempt commit`可以在tec01同一事务中转正它们，并同时完成attempt、节点状态、interrupt、事件和run revision。恢复只读取`COMMITTED` checkpoint，避免checkpoint和业务状态形成双事实源。
 
 所有生产写请求携带：
 
