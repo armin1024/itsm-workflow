@@ -153,3 +153,47 @@ async def test_failed_graph_node_can_resume_as_a_new_attempt(tmp_path, monkeypat
         assert run.node_statuses["sql-1"] == "SUCCEEDED"
     assert calls == 2
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_llm_hitl_refinement_resumes_until_single_candidate(tmp_path, monkeypatch):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'refinement.db'}")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    definition = WorkflowDefinition.model_validate({
+        "entryNodeId": "llm",
+        "nodes": [
+            {"id": "llm", "type": "llm_extract", "title": "提取", "config": {"modelProfile": "model", "promptTemplateId": "prompt", "responseSchema": {"type": "object", "required": ["candidates"], "properties": {"candidates": {"type": "array"}}}}, "inputs": [{"name": "rows", "type": "array", "source": {"kind": "RUN_INPUT", "key": "rows"}}, {"name": "user_feedback", "type": "string", "required": False, "source": {"kind": "RUN_INPUT", "key": "feedback"}}]},
+            {"id": "hitl", "type": "hitl_select", "title": "选择", "config": {"selectionMode": "SINGLE", "autoSelectSingle": True, "zeroCandidatePolicy": "FAIL", "title": "请选择"}, "inputs": [{"name": "candidates", "type": "array", "source": {"kind": "NODE_OUTPUT", "nodeId": "llm", "jsonPointer": "/candidates"}}]},
+            {"id": "done", "type": "end", "title": "完成"},
+        ],
+        "edges": [
+            {"id": "e1", "source": "llm", "target": "hitl"},
+            {"id": "e2", "source": "hitl", "target": "done"},
+            {"id": "r1", "kind": "REFINEMENT", "source": "hitl", "target": "llm", "maxIterations": 3, "feedbackInputName": "feedback"},
+        ],
+    })
+    run_id = "run_refinement"
+    async with sessions() as session:
+        session.add(WorkflowRun(id=run_id, knowledge_id="knw", workflow_version_id="wfv", ticket_id=1, initiated_by="uid", status="RUNNING", plan_hash=canonical_hash({}), workflow_snapshot=definition.model_dump(mode="json"), run_inputs={"rows": [{"id": 1}, {"id": 2}]}, node_statuses={node.id: "PENDING" for node in definition.nodes}, output_refs={}))
+        await session.commit()
+    calls = []
+    async def fake_model(**kwargs):
+        calls.append(kwargs["inputs"])
+        if kwargs["inputs"].get("user_feedback"):
+            return {"candidates": [{"id": "b", "label": "B", "value": 2}]}
+        return {"candidates": [{"id": "a", "label": "A", "value": 1}, {"id": "b", "label": "B", "value": 2}]}
+    monkeypatch.setattr("app.engine.invoke_structured", fake_model)
+    graph = WorkflowEngine(sessions, InMemorySaver()).compile(definition)
+    config = {"configurable": {"thread_id": run_id}}
+    await graph.ainvoke({"run_id": run_id, "inputs": {"rows": [{"id": 1}, {"id": 2}]}, "output_refs": {}, "routes": {}, "refinements": {}}, config=config)
+    async with sessions() as session:
+        run = await session.get(WorkflowRun, run_id)
+        assert run.status == "WAITING_INPUT"
+    await graph.ainvoke(Command(resume={"action": "REFINE", "feedback": "只选择B"}), config=config)
+    async with sessions() as session:
+        run = await session.get(WorkflowRun, run_id)
+        assert run.node_statuses == {"llm": "SUCCEEDED", "hitl": "SUCCEEDED", "done": "SUCCEEDED"}
+        assert len(calls) == 2 and calls[1]["user_feedback"] == "只选择B"
+    await engine.dispose()

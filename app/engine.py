@@ -19,6 +19,7 @@ from app.crypto import SecretBox, sha256_bytes
 from app.events import emit_event
 from app.models import EncryptedArtifact, InterruptRecord, NodeAttempt, RunCredential, WorkflowRun
 from app.workflow import WorkflowDefinition, WorkflowNode
+from app.runtime.model_client import ModelInvocationError, invoke_structured
 
 
 class RuntimeState(TypedDict):
@@ -26,6 +27,7 @@ class RuntimeState(TypedDict):
     inputs: dict[str, Any]
     output_refs: dict[str, str]
     routes: dict[str, str]
+    refinements: dict[str, int]
 
 
 class NodeExecutionError(RuntimeError):
@@ -59,6 +61,8 @@ class WorkflowEngine:
         self.handlers = handlers or {
             "sql_read": self._handle_sql,
             "condition": self._handle_condition,
+            "llm_extract": self._handle_llm_extract,
+            "hitl_select": self._handle_hitl_select,
             "human_input": self._handle_human_input,
             "approval": self._handle_noop,
             "end": self._handle_noop,
@@ -69,6 +73,95 @@ class WorkflowEngine:
 
     async def _handle_condition(self, node: WorkflowNode, state: RuntimeState, _values: dict[str, Any], outgoing, all_outgoing) -> dict[str, Any]:
         return await self._condition(node, state, outgoing, all_outgoing)
+
+    async def _handle_llm_extract(self, node: WorkflowNode, state: RuntimeState, values: dict[str, Any], _outgoing, _all_outgoing) -> dict[str, Any]:
+        attempt_id, _ = await self._mark_running(state["run_id"], node)
+        try:
+            config = node.config
+            output = await invoke_structured(prompt_template_id=str(config.get("promptTemplateId") or ""), inputs=values, response_schema=dict(config.get("responseSchema") or {}), timeout_seconds=node.timeoutSeconds)
+            artifact_id = await self._complete_output(state["run_id"], node, attempt_id, values, output, "LLM结构化提取完成")
+            return {"output_refs": {**state["output_refs"], node.id: artifact_id}}
+        except (ModelInvocationError, ValueError) as exc:
+            await self._fail_attempt(state["run_id"], node, attempt_id, "MODEL_OUTPUT_INVALID", str(exc))
+            raise NodeExecutionError(str(exc)) from exc
+
+    async def _handle_hitl_select(self, node: WorkflowNode, state: RuntimeState, values: dict[str, Any], outgoing, _all_outgoing) -> dict[str, Any]:
+        normal_edge = next((edge for edge in outgoing if edge.get("kind") != "REFINEMENT"), None)
+        refinement_edge = next((edge for edge in outgoing if edge.get("kind") == "REFINEMENT"), None)
+        candidates = values.get("candidates")
+        if not isinstance(candidates, list):
+            raise NodeExecutionError("HITL候选必须是数组")
+        if len(candidates) == 1 and bool(node.config.get("autoSelectSingle", True)):
+            attempt_id, _ = await self._mark_running(state["run_id"], node)
+            output = {"selected": candidates[0], "selectionMode": "AUTO_SELECTED_SINGLE"}
+            artifact_id = await self._complete_output(state["run_id"], node, attempt_id, values, output, "唯一候选已自动选择")
+            result = {"output_refs": {**state["output_refs"], node.id: artifact_id}}
+            if normal_edge:
+                result["routes"] = {**state["routes"], node.id: normal_edge["target"]}
+            return result
+        if not candidates:
+            raise NodeExecutionError("没有可供选择的候选")
+        async with self.sessions() as session:
+            record = await session.scalar(select(InterruptRecord).where(InterruptRecord.run_id == state["run_id"], InterruptRecord.node_id == node.id, InterruptRecord.kind == "HITL_SELECT", InterruptRecord.status == "OPEN"))
+        if record is None:
+            attempt_id, _ = await self._mark_running(state["run_id"], node)
+            actions = ["SELECT", "MANUAL_VALUE", "CANCEL"]
+            if refinement_edge:
+                actions.insert(1, "REFINE")
+            request = {"message": str(node.config.get("title") or "请选择候选"), "actions": actions, "candidates": candidates, "attemptId": attempt_id, "iteration": int((state.get("refinements") or {}).get(node.id, 0)), "maxIterations": int(refinement_edge.get("maxIterations") or 0) if refinement_edge else 0}
+            record = await self._open_interrupt(state["run_id"], node.id, "HITL_SELECT", request, "WAITING_INPUT")
+            async with self.sessions() as session:
+                attempt = await session.get(NodeAttempt, attempt_id)
+                attempt.status = "WAITING"
+                await session.commit()
+        else:
+            attempt_id = str(record.request_payload.get("attemptId") or "")
+        response = interrupt({"interruptId": record.id, "kind": "HITL_SELECT", **record.request_payload})
+        if not isinstance(response, dict):
+            raise NodeExecutionError("HITL回复格式无效")
+        action = str(response.get("action") or "")
+        if action == "SELECT":
+            selected = next((item for item in candidates if isinstance(item, dict) and item.get("id") == response.get("candidateId")), None)
+            if selected is None:
+                raise NodeExecutionError("candidateId不在候选集合中")
+        elif action == "MANUAL_VALUE":
+            selected = {"id": "manual", "value": response.get("value"), "reason": response.get("reason", "")}
+        elif action == "CANCEL":
+            await self._resolve_interrupt(record.id, response)
+            raise NodeExecutionError("用户取消HITL选择")
+        elif action == "REFINE":
+            if not refinement_edge:
+                raise NodeExecutionError("当前HITL未配置REFINEMENT边")
+            current_iteration = int((state.get("refinements") or {}).get(node.id, 0))
+            maximum = int(refinement_edge.get("maxIterations") or 0)
+            feedback = str(response.get("feedback") or "").strip()
+            if not feedback:
+                raise NodeExecutionError("REFINE必须提供feedback")
+            if current_iteration >= maximum:
+                raise NodeExecutionError("REFINEMENT_LIMIT_REACHED")
+            await self._resolve_interrupt(record.id, response)
+            output = {"refinement": {"feedback": feedback, "iteration": current_iteration + 1}}
+            await self._complete_output(state["run_id"], node, attempt_id, values, output, "用户补充条件，重新执行LLM提取")
+            async with self.sessions() as session:
+                run = await session.get(WorkflowRun, state["run_id"])
+                statuses, refs = dict(run.node_statuses), dict(run.output_refs or {})
+                statuses[refinement_edge["target"]] = "PENDING"
+                statuses[node.id] = "PENDING"
+                refs.pop(refinement_edge["target"], None)
+                refs.pop(node.id, None)
+                run.node_statuses, run.output_refs = statuses, refs
+                await session.commit()
+            feedback_name = str(refinement_edge.get("feedbackInputName"))
+            return {"inputs": {**state["inputs"], feedback_name: feedback}, "output_refs": {key: value for key, value in state["output_refs"].items() if key not in {node.id, refinement_edge["target"]}}, "routes": {**state["routes"], node.id: refinement_edge["target"]}, "refinements": {**(state.get("refinements") or {}), node.id: current_iteration + 1}}
+        else:
+            raise NodeExecutionError("HITL action无效")
+        await self._resolve_interrupt(record.id, response)
+        output = {"selected": selected, "selectionMode": action}
+        artifact_id = await self._complete_output(state["run_id"], node, attempt_id, values, output, "用户已完成候选选择")
+        result = {"output_refs": {**state["output_refs"], node.id: artifact_id}}
+        if normal_edge:
+            result["routes"] = {**state["routes"], node.id: normal_edge["target"]}
+        return result
 
     async def _handle_human_input(self, node: WorkflowNode, state: RuntimeState, _values: dict[str, Any], _outgoing, _all_outgoing) -> dict[str, Any]:
         await self._mark_simple_success(state["run_id"], node, "人工输入已完成")
@@ -209,6 +302,33 @@ class WorkflowEngine:
             await emit_event(session, run, "NODE_SUCCEEDED", node_id=node.id, attempt_id=attempt_id, status="SUCCEEDED", summary=summary)
             await session.commit()
 
+    async def _complete_output(self, run_id: str, node: WorkflowNode, attempt_id: str, inputs: dict[str, Any], output: dict[str, Any], summary: str) -> str:
+        artifact_id = _id("art_")
+        payload = {"input": inputs, "output": output}
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        async with self.sessions() as session:
+            run = await session.get(WorkflowRun, run_id)
+            attempt = await session.get(NodeAttempt, attempt_id)
+            session.add(EncryptedArtifact(id=artifact_id, run_id=run_id, node_id=node.id, artifact_type="RESULT", ciphertext=SecretBox().seal(payload, purpose="artifact:" + artifact_id), content_hash=sha256_bytes(encoded), size_bytes=len(encoded), expires_at=datetime.now(UTC) + timedelta(days=settings.result_retention_days)))
+            attempt.status, attempt.artifact_id, attempt.finished_at = "SUCCEEDED", artifact_id, datetime.now(UTC)
+            statuses, refs = dict(run.node_statuses), dict(run.output_refs or {})
+            statuses[node.id], refs[node.id] = "SUCCEEDED", artifact_id
+            run.node_statuses, run.output_refs, run.current_node_id = statuses, refs, node.id
+            await emit_event(session, run, "NODE_SUCCEEDED", node_id=node.id, attempt_id=attempt_id, status="SUCCEEDED", summary=summary)
+            await session.commit()
+        return artifact_id
+
+    async def _fail_attempt(self, run_id: str, node: WorkflowNode, attempt_id: str, code: str, message: str) -> None:
+        async with self.sessions() as session:
+            run = await session.get(WorkflowRun, run_id)
+            attempt = await session.get(NodeAttempt, attempt_id)
+            attempt.status, attempt.error_code, attempt.error_message, attempt.finished_at = "FAILED", code, message[:500], datetime.now(UTC)
+            statuses = dict(run.node_statuses)
+            statuses[node.id] = "FAILED"
+            run.node_statuses, run.status, run.finished_at = statuses, "FAILED", datetime.now(UTC)
+            await emit_event(session, run, "NODE_FAILED", node_id=node.id, attempt_id=attempt_id, status="FAILED", summary=message[:500], payload={"errorCode": code, "errorMessage": message[:500]})
+            await session.commit()
+
     async def _execute_sql(self, node: WorkflowNode, state: RuntimeState, values: dict[str, Any]) -> dict[str, Any]:
         api_key = await self._credential(node, state)
         attempt_id, _ = await self._mark_running(state["run_id"], node)
@@ -334,7 +454,7 @@ class WorkflowEngine:
         builder.add_edge(START, definition.entryNodeId)
         for node in definition.nodes:
             edges = outgoing[node.id]
-            if node.type == "condition":
+            if node.type in {"condition", "hitl_select"} and len(edges) > 1:
                 targets = {edge["target"]: edge["target"] for edge in edges}
                 builder.add_conditional_edges(node.id, lambda state, node_id=node.id: state["routes"][node_id], targets)
             elif edges:

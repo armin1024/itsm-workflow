@@ -1,29 +1,23 @@
+"""Backward-compatible facade for the versioned runtime Node Registry."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from app.runtime import NODE_REGISTRY
+from app.runtime.registry import NodeManifest as NodeTypeManifest, NodeRegistration
 
 
-@dataclass(frozen=True)
-class NodeTypeManifest:
-    type: str
-    schema_version: int
-    risk_level: str
-    config_schema: dict[str, Any]
-    input_types: tuple[str, ...]
-    output_schema: dict[str, Any]
+def _latest() -> dict[str, NodeTypeManifest]:
+    result: dict[str, NodeTypeManifest] = {}
+    for (node_type, _), registration in NODE_REGISTRY._nodes.items():
+        current = result.get(node_type)
+        if current is None or registration.manifest.schema_version > current.schema_version:
+            result[node_type] = registration.manifest
+    return result
 
 
-NODE_TYPES: dict[str, NodeTypeManifest] = {
-    "sql_read": NodeTypeManifest("sql_read", 1, "LOW", {"required": ["databaseRef", "sqlTemplate"]}, ("string", "number", "integer", "boolean"), {"type": "object"}),
-    "condition": NodeTypeManifest("condition", 1, "LOW", {}, (), {"type": "object"}),
-    "human_input": NodeTypeManifest("human_input", 1, "LOW", {}, ("string", "number", "integer", "boolean", "object", "array"), {"type": "object"}),
-    "approval": NodeTypeManifest("approval", 1, "HIGH", {}, (), {"type": "object"}),
-    "end": NodeTypeManifest("end", 1, "LOW", {}, (), {"type": "object"}),
-}
+NODE_TYPES: dict[str, NodeTypeManifest] = _latest()
 
 
 def register_node_type(manifest: NodeTypeManifest) -> None:
-    if manifest.type in NODE_TYPES:
-        raise ValueError(f"节点类型已经注册：{manifest.type}")
+    NODE_REGISTRY.register(NodeRegistration(manifest))
     NODE_TYPES[manifest.type] = manifest

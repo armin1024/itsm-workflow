@@ -8,6 +8,7 @@ from app.auth import Principal, current_principal
 from app.db import Base, get_session
 from app.main import _reviewer, app
 from app.models import WorkflowRun
+from app.studio.store import studio_store
 
 
 @pytest.mark.asyncio
@@ -28,6 +29,10 @@ async def test_api_creates_versioned_plan_and_requires_hash(tmp_path, monkeypatc
     app.dependency_overrides[current_principal] = principal_override
     app.dependency_overrides[_reviewer] = principal_override
     monkeypatch.setattr("app.main.SessionLocal", sessions)
+    monkeypatch.setattr("app.main.settings.studio_enabled", True)
+    monkeypatch.setattr("app.main.settings.runtime_internal_enabled", True)
+    monkeypatch.setattr(studio_store, "path", tmp_path / "studio.db")
+    await studio_store.initialize()
     client = TestClient(app)
     workflow = {
         "schemaVersion": 1,
@@ -36,6 +41,12 @@ async def test_api_creates_versioned_plan_and_requires_hash(tmp_path, monkeypatc
         "edges": [],
     }
     knowledge_body = {"name": "客户查询", "summary": "按姓名查询客户", "matchPhrases": ["客户查询"], "workflowDefinition": workflow}
+    catalog = client.get("/internal/v1/runtime/catalog")
+    assert catalog.status_code == 200 and any(item["type"] == "llm_extract" for item in catalog.json()["nodes"])
+    validated = client.post("/internal/v1/runtime/workflows/validate", json={"workflowDefinition": workflow, "validationMode": "DRAFT"})
+    assert validated.status_code == 200 and validated.json()["valid"] is True
+    debugged = client.post("/api/v1/studio/node-debug-runs", json={"node": {"id": "sql", "type": "sql_read", "title": "测试查询", "config": {"databaseRef": "test/db", "sqlTemplate": "SELECT 1"}, "inputs": []}, "inputs": {}, "mode": "SIMULATION", "simulation": {"fixtureOutput": {"status": 0, "data": [{"value": 1}], "rowCount": 1}}})
+    assert debugged.status_code == 200 and debugged.json()["testOnly"] is True
     created = client.post("/api/v1/knowledge", json=knowledge_body)
     assert created.status_code == 200
     knowledge_id = created.json()["knowledgeId"]

@@ -37,6 +37,18 @@ class Settings(BaseSettings):
     workflow_api_token: str = "change-me"
     workflow_review_token: str = ""
     workflow_review_actor_uid: str = "workflow-review-service"
+    runtime_service_token: str = ""
+    runtime_internal_enabled: bool = False
+    studio_enabled: bool = False
+    studio_database_path: Path = Path("data/studio.db")
+    studio_ttl_hours: int = Field(default=24, ge=1, le=72)
+    studio_artifact_max_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=50 * 1024 * 1024)
+    studio_database_max_bytes: int = Field(default=5 * 1024 * 1024 * 1024, ge=10 * 1024 * 1024)
+    tec01_enabled: bool = False
+    tec01_base_url: str = ""
+    tec01_service_token: str = ""
+    tec01_timeout_seconds: int = Field(default=20, ge=1, le=180)
+    tec01_claim_wait_seconds: int = Field(default=15, ge=1, le=20)
     workflow_public_url: str = "http://127.0.0.1:8089"
     knowledge_environment_name: str = ""
     mcp_internal_api_url: str = "http://127.0.0.1:8089/api/v1"
@@ -106,6 +118,12 @@ class Settings(BaseSettings):
                 raise RuntimeError("生产环境必须配置管理员和操作员 UID allowlist")
             if not self.embedding_base_url or not self.rerank_base_url:
                 raise RuntimeError("生产环境必须配置 BGE-M3 embedding 和 rerank 服务")
+            if self.runtime_internal_enabled and not self.runtime_service_token:
+                raise RuntimeError("启用Runtime内部接口时必须配置RUNTIME_SERVICE_TOKEN")
+            if self.studio_enabled and not self.studio_database_path.is_absolute():
+                raise RuntimeError("生产环境启用Studio时STUDIO_DATABASE_PATH必须是绝对路径")
+            if self.tec01_enabled and (not self.tec01_base_url or not self.tec01_service_token):
+                raise RuntimeError("启用tec01时必须配置TEC01_BASE_URL和TEC01_SERVICE_TOKEN")
             self.encryption_key()
 
 

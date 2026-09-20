@@ -25,17 +25,24 @@ from app.idempotency import IdempotencyConflict, IdempotencyInProgress, claim as
 from app.listing import KNOWLEDGE_STATUSES, RUN_STATUSES, RUN_STATUS_GROUPS, paginated_knowledge, paginated_runs, paginated_versions, split_values, validate_page_size
 from app.knowledge import authorized_knowledge, create_knowledge, delete_knowledge as soft_delete_knowledge, import_legacy_package, match_knowledge, publish_knowledge, reject_knowledge_review, serialize_knowledge, submit_knowledge_review, update_knowledge
 from app.extraction import extract_ticket_draft
-from app.node_types import NODE_TYPES
 from app.models import EncryptedArtifact, InterruptRecord, Knowledge, KnowledgeLifecycleEvent, KnowledgeTransferAudit, NodeAttempt, RunCredential, WorkflowEvent, WorkflowRun, WorkflowVersion
 from app.runs import approve_plan, create_plan, get_run_for_user, serialize_run, serialize_run_facts, update_credential
-from app.schemas import ApproveRequest, CredentialRequest, KnowledgeCreate, KnowledgeExtractRequest, KnowledgeUpdate, LegacyImportRequest, MatchRequest, PlanRequest, ResumeRequest, RetryRequest, ReviewRejectRequest, SessionRequest
+from app.schemas import ApproveRequest, CompilerPreviewRequest, CredentialRequest, KnowledgeCreate, KnowledgeExtractRequest, KnowledgeUpdate, LegacyImportRequest, MatchRequest, PlanRequest, ResumeRequest, RetryRequest, ReviewRejectRequest, RuntimePlanRequest, RuntimeValidateRequest, SessionRequest, StudioInterruptReply, StudioNodeDebugRequest, StudioWorkspaceCreate
 from app.transfer import export_package, export_preview, import_package, import_preview, replace_paths, replace_preview
+from app.runtime import NODE_REGISTRY
+from app.runtime.planner import render_plan as runtime_render_plan, validate_workflow as runtime_validate_workflow
+from app.extraction import compile_ticket_evidence
+from app.studio.debug import reject_credentials, run_single_node
+from app.studio.store import studio_store
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings.validate_production()
     await initialize_database()
+    if settings.studio_enabled:
+        await studio_store.initialize()
+        await studio_store.cleanup()
     yield
 
 
@@ -65,6 +72,24 @@ async def _reviewer(
         workflow_session=request.cookies.get("workflow_session"),
     )
     return require_admin(principal)
+
+
+async def _runtime_service(authorization: str | None = Header(default=None)) -> None:
+    if not settings.runtime_internal_enabled:
+        raise HTTPException(404, "Runtime内部接口未启用")
+    if not settings.runtime_service_token:
+        if settings.environment.lower() == "production":
+            raise HTTPException(503, "RUNTIME_SERVICE_TOKEN未配置")
+        return
+    expected = "Bearer " + settings.runtime_service_token
+    if not authorization or not secrets.compare_digest(authorization, expected):
+        raise HTTPException(401, "Runtime服务身份无效")
+
+
+def _studio_admin(principal: Principal = Depends(_admin)) -> Principal:
+    if not settings.studio_enabled:
+        raise HTTPException(404, "Studio未启用")
+    return principal
 
 
 async def _idempotency(
@@ -114,7 +139,7 @@ async def login(body: SessionRequest, response: Response) -> dict[str, Any]:
     if uid not in settings.operator_uids and uid not in settings.admin_uids:
         raise HTTPException(403, "当前 UID 不在平台 allowlist")
     response.set_cookie("workflow_session", create_session_cookie(uid, body.apiKey), max_age=settings.credential_ttl_hours * 3600, httponly=True, secure=settings.session_cookie_secure, samesite="strict")
-    return {"uid": uid, "isAdmin": uid in settings.admin_uids, "isOperator": uid in settings.operator_uids}
+    return {"uid": uid, "isAdmin": uid in settings.admin_uids, "isOperator": uid in settings.operator_uids, "features": {"studio": settings.studio_enabled}}
 
 
 @app.delete("/api/v1/auth/session", status_code=204)
@@ -124,7 +149,7 @@ async def logout(response: Response) -> None:
 
 @app.get("/api/v1/auth/me")
 async def me(principal: Principal = Depends(current_principal)) -> dict[str, Any]:
-    return {"uid": principal.uid, "isAdmin": principal.is_admin, "isOperator": principal.is_operator}
+    return {"uid": principal.uid, "isAdmin": principal.is_admin, "isOperator": principal.is_operator, "features": {"studio": settings.studio_enabled}}
 
 
 @app.post("/api/v1/knowledge")
@@ -166,7 +191,99 @@ async def knowledge_delete(knowledge_id: str, principal: Principal = Depends(_op
 
 @app.get("/api/v1/node-types")
 async def node_type_list(principal: Principal = Depends(current_principal)) -> dict[str, Any]:
-    return {"items": [{"type": item.type, "schemaVersion": item.schema_version, "riskLevel": item.risk_level, "configSchema": item.config_schema, "inputTypes": list(item.input_types), "outputSchema": item.output_schema, "enabledForAuthoring": item.type in {"sql_read", "condition", "end"}} for item in NODE_TYPES.values()]}
+    return {"items": [{**item, "enabledForAuthoring": item["type"] in {"sql_read", "condition", "llm_extract", "hitl_select", "end"}} for item in NODE_REGISTRY.catalog()["nodes"]]}
+
+
+@app.get("/internal/v1/runtime/catalog", dependencies=[Depends(_runtime_service)])
+async def runtime_catalog(response: Response, if_none_match: str | None = Header(default=None, alias="If-None-Match")):
+    catalog = {**NODE_REGISTRY.catalog(), "runtimeVersion": __version__, "generatedAt": datetime.now(UTC).isoformat()}
+    etag = '"' + catalog["catalogDigest"] + '"'
+    if if_none_match == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    response.headers["ETag"] = etag
+    return catalog
+
+
+@app.post("/internal/v1/runtime/workflows/validate", dependencies=[Depends(_runtime_service)])
+async def runtime_workflow_validate(body: RuntimeValidateRequest) -> dict[str, Any]:
+    try:
+        result = runtime_validate_workflow(body.workflowDefinition, body.validationMode)
+    except ValueError as exc:
+        raise HTTPException(422, {"code": "WORKFLOW_VALIDATION_FAILED", "message": str(exc), "retryable": False}) from exc
+    if body.targetCatalogDigest and body.targetCatalogDigest != result["catalogDigest"]:
+        raise HTTPException(409, {"code": "CATALOG_DIGEST_CONFLICT", "message": "目标Catalog已变化", "retryable": True, "details": {"actualCatalogDigest": result["catalogDigest"]}})
+    return result
+
+
+@app.post("/internal/v1/runtime/workflows/plan", dependencies=[Depends(_runtime_service)])
+async def runtime_workflow_plan(body: RuntimePlanRequest) -> dict[str, Any]:
+    try:
+        return runtime_render_plan(workflow_version_id=body.workflowVersionId, workflow_content_hash=body.workflowContentHash, workflow_snapshot=body.workflowSnapshot, ticket_id=body.ticketId, parameters=body.parameters, actor_uid=body.actorUid)
+    except ValueError as exc:
+        raise HTTPException(422, {"code": "WORKFLOW_VALIDATION_FAILED", "message": str(exc), "retryable": False}) from exc
+
+
+@app.post("/internal/v1/compiler/preview", dependencies=[Depends(_runtime_service)])
+async def runtime_compiler_preview(body: CompilerPreviewRequest) -> dict[str, Any]:
+    catalog = NODE_REGISTRY.catalog()
+    if body.targetCatalogDigest and body.targetCatalogDigest != catalog["catalogDigest"]:
+        raise HTTPException(409, {"code": "CATALOG_DIGEST_CONFLICT", "message": "目标Catalog已变化", "retryable": True})
+    try:
+        proposal, diagnostics = await compile_ticket_evidence(body.ticketInfo, body.auditTimeline)
+        validated = runtime_validate_workflow(proposal["workflowDefinition"], "DRAFT")
+    except ValueError as exc:
+        raise HTTPException(422, {"code": "COMPILER_FAILED", "message": str(exc), "retryable": False}) from exc
+    proposal["workflowDefinition"] = validated["normalizedDefinition"]
+    return {"compilerVersion": __version__, "catalogDigest": catalog["catalogDigest"], "proposal": proposal, "diagnostics": diagnostics}
+
+
+@app.get("/api/v1/studio/catalog")
+async def studio_catalog(principal: Principal = Depends(_studio_admin)) -> dict[str, Any]:
+    return {**NODE_REGISTRY.catalog(), "runtimeVersion": __version__, "testOnly": True}
+
+
+@app.get("/api/v1/studio/workspaces")
+async def studio_workspace_list(principal: Principal = Depends(_studio_admin)) -> dict[str, Any]:
+    await studio_store.cleanup()
+    items = await studio_store.list_workspaces(principal.uid)
+    return {"items": items, "total": len(items)}
+
+
+@app.post("/api/v1/studio/workspaces")
+async def studio_workspace_create(body: StudioWorkspaceCreate, principal: Principal = Depends(_studio_admin)) -> dict[str, Any]:
+    try:
+        reject_credentials(body.draft)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return await studio_store.create_workspace(body.name.strip(), principal.uid, body.draft)
+
+
+@app.post("/api/v1/studio/node-debug-runs")
+async def studio_node_debug_create(body: StudioNodeDebugRequest, principal: Principal = Depends(_studio_admin)) -> dict[str, Any]:
+    try:
+        result = run_single_node(node=body.node, inputs=body.inputs, mode=body.mode, simulation=body.simulation)
+        manifest = NODE_REGISTRY.get(str(body.node.get("type") or ""), int(body.node.get("schemaVersion") or 1)).manifest
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return await studio_store.create_debug_run(creator_uid=principal.uid, workspace_id=body.workspaceId, node=body.node, inputs=body.inputs, mode=body.mode, handler_version=manifest.handler_version, status=result["status"], output=result["output"], diagnostic=result["diagnostic"], interrupt=result["interrupt"])
+
+
+@app.get("/api/v1/studio/node-debug-runs/{debug_run_id}")
+async def studio_node_debug_get(debug_run_id: str, principal: Principal = Depends(_studio_admin)) -> dict[str, Any]:
+    try:
+        return await studio_store.get_debug_run(debug_run_id, principal.uid, principal.is_admin)
+    except KeyError as exc:
+        raise HTTPException(404, "调试运行不存在") from exc
+
+
+@app.post("/api/v1/studio/node-debug-runs/{debug_run_id}/interrupts/reply")
+async def studio_node_debug_reply(debug_run_id: str, body: StudioInterruptReply, principal: Principal = Depends(_studio_admin)) -> dict[str, Any]:
+    try:
+        return await studio_store.resolve_interrupt(debug_run_id, principal.uid, body.response)
+    except KeyError as exc:
+        raise HTTPException(404, "调试运行不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.get("/api/v1/knowledge")

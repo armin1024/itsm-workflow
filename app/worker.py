@@ -65,7 +65,7 @@ class WorkflowWorker:
             await session.commit()
         graph = self.engine.compile(definition)
         config = {"configurable": {"thread_id": run_id}}
-        graph_input = {"run_id": run_id, "inputs": run.run_inputs, "output_refs": run.output_refs, "routes": {}} if is_first else (Command(resume=resume_payload or {}) if resume_payload is not None else None)
+        graph_input = {"run_id": run_id, "inputs": run.run_inputs, "output_refs": run.output_refs, "routes": {}, "refinements": {}} if is_first else (Command(resume=resume_payload or {}) if resume_payload is not None else None)
         async def heartbeat():
             while True:
                 await asyncio.sleep(max(3, settings.worker_lease_seconds // 3))

@@ -1,6 +1,6 @@
 [project]
 name = "itsm-workflow"
-version = "0.6.3"
+version = "0.7.0"
 description = "Observable and resumable AOPS production workflows"
 requires-python = ">=3.12"
 dependencies = [
@@ -11,6 +11,7 @@ dependencies = [
   "fastapi>=0.115,<1",
   "greenlet==3.2.4",
   "httpx>=0.28,<1",
+  "jsonschema>=4.23,<5",
   "langgraph>=1.0,<2",
   "langgraph-checkpoint-postgres>=3,<4",
   "mcp>=2,<3",
