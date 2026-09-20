@@ -40,6 +40,51 @@ flowchart LR
 
 ## 服务职责
 
+### 先用一句话理解两边如何协作
+
+```text
+tec01负责“记账、排队和对外展示”，itsm-workflow Executor负责“领任务和真正干活”。
+```
+
+Executor采用**主动领取（pull）**模式，而不是等待tec01反向调用：
+
+1. tec01把已确认的运行或可继续的节点放入待执行队列。
+2. Executor向tec01发起长轮询，主动领取一项任务；没有任务时等待，超时后再次领取。
+3. tec01返回运行快照、待执行节点、已提交checkpoint、恢复输入和有时限的`leaseToken`。
+4. Executor先向tec01登记“本次节点尝试已经开始”，再调用LLM、`aops-cli`或其他外部系统。
+5. Executor执行过程中发送租约心跳，并主动查询暂停/取消等控制命令；tec01不会从服务端反向连接Executor。
+6. Executor把结果、诊断和checkpoint暂存到tec01，再提交节点完成事务。
+7. tec01事务提交成功后，节点的新状态才成为事实，并通过MCP、SSE或Channel供Hermes和用户查看。
+
+因此，“任务由谁发起”需要分两层理解：用户或Hermes在tec01创建/控制运行；Executor主动从tec01领取具体执行任务。tec01决定什么可以执行，Executor决定何时有空领取并报告实际结果。
+
+### 为什么不由tec01直接推送完整任务
+
+第一版固定采用“Executor长轮询claim”，不采用`tec01 -> Executor`的HTTP回调：
+
+- Executor最清楚自己的空闲槽位、支持的Catalog/Handler版本和健康状态，可以按实际能力领取。
+- tec01无需反向访问不同网段内的Executor，减少防火墙、服务发现、负载均衡和双向证书配置。
+- 租约、心跳、幂等和过期接管都围绕claim建立；Executor宕机后其他实例可以重新领取。
+- HTTP回调“发送成功”不等于节点已经获得合法租约，更不等于节点执行成功，tec01最终仍需维护队列与领取协议。
+
+如果以后长轮询数量或调度延迟成为问题，可以增加Kafka、Redis Stream等通知通道，但采用**通知推送、任务领取**的混合模式：
+
+```text
+tec01 ──推送 RUN_AVAILABLE 唤醒信号──> Executor
+Executor ──主动 claim 并取得 leaseToken──> tec01
+```
+
+唤醒消息不携带完整Workflow、凭据或执行结果，也不改变运行状态；消息即使重复或丢失，Executor仍可通过长轮询claim恢复。tec01数据库及其claim事务继续是唯一任务事实源。暂停/取消通知也可以通过消息通道加速，但Executor最终必须使用心跳或`GET commands`读取权威命令。
+
+### 图中两个容易误解的tec01模块
+
+| 图中名称 | 通俗名称 | 做什么 | 不做什么 |
+|---|---|---|---|
+| `tec01 Control` | 运行控制中心 | 排队、分配租约、保存运行/节点状态、校验状态转换、处理中断/暂停/取消/重试 | 不执行SQL，不调用节点Handler，不保存大块结果正文 |
+| `tec01 Artifact` | 运行结果仓库 | 加密保存SQL结果、LLM候选、HITL选择、失败诊断等较大或敏感内容，返回`artifactId`供状态记录引用 | 不调度节点，不决定运行状态 |
+
+生产状态表里通常只保存“节点成功、输出引用为`artifactId=...`”；真正的多行SQL结果放在Artifact结果仓库中。这样列表、事件和MCP状态查询可以保持轻量，也能对结果单独加密、授权和按期清理。
+
 ### tec01
 
 | 模块 | 职责 |
@@ -338,53 +383,69 @@ CANCEL        取消本次交互或运行
 ```mermaid
 sequenceDiagram
     autonumber
-    participant E as itsm-workflow Executor
-    participant T as tec01 Control
-    participant S as tec01 Artifact
-    participant L as Model Gateway
-    participant M as tec01 MCP
+    participant U as 用户
     participant H as Hermes
-    participant U as AOPS用户
+    participant M as tec01 MCP入口
+    participant T as tec01运行控制中心（状态/队列）
+    participant S as tec01运行结果仓库（Artifact）
+    participant E as itsm-workflow执行器
+    participant L as tec01模型网关
+    participant X as aops-cli/外部系统
 
-    E->>T: SQL attempt STARTED
-    E->>E: aops-cli SQL读
-    E->>S: 保存多行结果
-    E->>T: SQL SUCCEEDED + checkpoint
-    E->>S: 读取受限投影
-    E->>L: llm_extract + responseSchema
-    L-->>E: candidates[]
-    E->>S: 保存LLM artifact
-    E->>T: LLM SUCCEEDED + checkpoint
+    U->>H: 确认完整执行计划
+    H->>M: 批准运行(planHash)
+    M->>T: 运行改为QUEUED并入队
+    loop 执行器空闲时主动长轮询
+        E->>T: claim：有没有我支持的待执行任务？
+        T-->>E: 返回运行快照、节点、checkpoint、leaseToken
+    end
+    E->>T: 登记SQL节点attempt=STARTED
+    T-->>E: 返回attemptId和新revision
+    E->>X: 调用aops-cli执行SQL读
+    X-->>E: 返回SSE结果
+    E->>S: 暂存多行SQL结果（STAGED）
+    E->>T: 原子提交SQL成功、结果引用和checkpoint
+    T-->>E: COMMITTED；SQL节点=SUCCEEDED
+    E->>S: 按授权读取SQL结果的受限投影
+    E->>T: 登记LLM节点attempt=STARTED
+    E->>L: 结构化提取(responseSchema)
+    L-->>E: 返回candidates[]
+    E->>S: 暂存LLM候选结果
+    E->>T: 原子提交LLM成功、结果引用和checkpoint
+    T-->>E: COMMITTED；LLM节点=SUCCEEDED
     alt 单候选
-        E->>T: HITL AUTO_SELECTED_SINGLE + checkpoint
+        E->>T: 提交HITL自动选择和checkpoint
     else 多候选
-        E->>T: OPEN interrupt，WAITING_INPUT，释放租约
+        E->>T: 提交WAITING_INPUT、候选interrupt和checkpoint，释放租约
+        H->>M: wait/status查询运行状态
         M-->>H: 返回候选选择请求
-        H-->>U: Channel展示候选
+        H-->>U: 在Channel展示候选
         alt 用户SELECT
             U-->>H: 选择candidateId
-            H->>M: workflow_interrupt_reply SELECT
-            M->>T: 保存响应并QUEUED
-            E->>T: 恢复HITL并提交selected + checkpoint
+            H->>M: 回复SELECT
+            M->>T: 保存回复，运行重新QUEUED
+            E->>T: 再次claim并取得checkpoint + resumePayload
+            E->>T: 提交HITL选择结果和新checkpoint
         else 用户REFINE
             U-->>H: 补充具体条件
-            H->>M: workflow_interrupt_reply REFINE
-            M->>T: 保存feedback，iteration+1并QUEUED
+            H->>M: 回复REFINE
+            M->>T: 保存反馈，iteration+1，重新QUEUED
+            E->>T: 再次claim恢复运行
             E->>L: 原始投影 + 旧候选 + feedback
             L-->>E: 新candidates[]
-            E->>T: 新LLM attempt完成并创建新interrupt
+            E->>T: 提交新LLM attempt和新候选interrupt
         else 用户MANUAL_VALUE
             U-->>H: 输入明确值
-            H->>M: workflow_interrupt_reply MANUAL_VALUE
-            M->>T: valueSchema校验并QUEUED
-            E->>T: 恢复HITL并提交manual selected + checkpoint
+            H->>M: 回复MANUAL_VALUE
+            M->>T: 校验valueSchema并重新QUEUED
+            E->>T: 再次claim并提交人工值
         else 用户CANCEL
             U-->>H: 取消
-            H->>M: workflow_interrupt_reply CANCEL
-            M->>T: interaction和运行按策略取消
+            H->>M: 回复CANCEL
+            M->>T: 按策略提交CANCELLED
         end
     end
-    E->>S: 下游读取selected/value
+    Note over T,S: 只有tec01提交成功的状态和Artifact才会展示给用户
 ```
 
 恢复规则：
@@ -419,9 +480,29 @@ sequenceDiagram
     U-->>H: 明确确认
     H->>M: workflow_run_approve
     M->>T: CAS为QUEUED
-    E->>T: claim兼容运行
-    T-->>E: 快照、checkpoint和leaseToken
+    loop Executor主动长轮询领取
+        E->>T: claim兼容运行
+        T-->>E: 快照、checkpoint和leaseToken
+    end
 ```
+
+这里的箭头`T-->>E`只是Executor这次HTTP长轮询的响应，不表示tec01主动向Executor推送。
+
+### 每个节点的状态由谁改变
+
+| 阶段 | 发起方 | tec01中保存的典型状态 | 说明 |
+|---|---|---|---|
+| 创建运行 | tec01 | `WAITING_PLAN_APPROVAL` | 计划已生成，尚未确认 |
+| 用户确认 | tec01 MCP/Control | 运行`QUEUED`，入口节点`READY` | 加入可领取队列 |
+| 领取任务 | Executor主动claim | 仍由tec01保存；同时产生租约 | claim不是tec01反向推送 |
+| 开始节点 | Executor请求，tec01校验后提交 | 节点`RUNNING`、attempt`STARTED` | 提交成功后才允许调用外部系统 |
+| 节点执行中 | Executor心跳/进度上报 | 节点`RUNNING` | 进度是辅助信息，不替代状态事务 |
+| 节点完成/失败 | Executor提交建议，tec01事务校验 | `SUCCEEDED`或`FAILED` | 同时提交artifact、checkpoint、事件和revision |
+| 需要用户输入 | Executor提交interrupt | `WAITING_INPUT`等 | 释放租约，不占Executor并发 |
+| 用户回复 | tec01 MCP/Control | 运行重新`QUEUED` | 下次由任意兼容Executor主动claim恢复 |
+| 暂停/取消 | 用户经tec01发起，Executor轮询到命令 | 先`*_REQUESTED`，到安全边界后变终态 | 防止把“已收到请求”误报成“已完成动作” |
+
+tec01是状态的唯一权威，但并不是所有状态变化都由tec01凭空决定：Executor报告执行事实，tec01负责验证租约、revision、幂等键和合法转换后持久化。Web、Hermes和用户只读取tec01，不读取Executor内存。
 
 ### 中断、继续、取消和重试
 
@@ -443,17 +524,19 @@ sequenceDiagram
         M->>T: 保存响应并QUEUED
     else 暂停/继续
         H->>M: pause
-        M->>T: PAUSE_REQUESTED
-        T-->>E: 控制命令
-        E->>T: 安全边界转PAUSED
+        M->>T: 保存PAUSE_REQUESTED
+        E->>T: 心跳或GET commands主动查询
+        T-->>E: 在查询响应中返回PAUSE命令
+        E->>T: 当前节点到达安全边界后提交PAUSED
         H->>M: resume
-        M->>T: PAUSED→QUEUED
+        M->>T: PAUSED直接转QUEUED，等待Executor再次claim
     else 取消
         H->>M: cancel
-        M->>T: CANCEL_REQUESTED
-        T-->>E: cancel命令
+        M->>T: 保存CANCEL_REQUESTED
+        E->>T: 心跳或GET commands主动查询
+        T-->>E: 在查询响应中返回CANCEL命令
         E->>E: 终止CLI进程组
-        E->>T: CANCELLED
+        E->>T: 提交CANCELLED或UNKNOWN
     else FAILED/UNKNOWN
         T-->>M: 错误或未知结果
         M-->>H: 禁止自动重试
@@ -462,6 +545,21 @@ sequenceDiagram
         M->>T: 新attempt或标记失败
     end
 ```
+
+### 为什么有`PAUSE_REQUESTED`，又有`PAUSED`
+
+这两个状态表达的不是“队列方式不同”，而是**请求已经受理**和**动作已经真正完成**的区别：
+
+| 状态 | 中文含义 | 此时实际发生了什么 |
+|---|---|---|
+| `PAUSE_REQUESTED` | 已请求暂停 | tec01已经记录请求，但正在执行的节点可能仍在调用CLI；用户不能被告知“已经暂停” |
+| `PAUSED` | 已暂停 | Executor已到达节点安全边界、提交checkpoint并释放租约；此时没有节点继续执行 |
+| `CANCEL_REQUESTED` | 已请求取消 | tec01已记录请求，Executor正在尝试终止本地进程；外部请求可能已经到达AOPS |
+| `CANCELLED` | 已取消 | Executor已完成本地停止和状态提交；不代表能够撤销已经送达外部系统的操作 |
+| `WAITING_INPUT` | 等待用户输入 | Executor已经安全提交interrupt/checkpoint并释放租约，因此它本身就是稳定等待状态，无需额外`INPUT_REQUESTED` |
+| `QUEUED` | 等待领取 | 运行已经可以继续，等待某个兼容Executor主动claim |
+
+`resume`没有单独设计`RESUME_REQUESTED`，是因为`PAUSED`状态下已经没有正在执行的节点。tec01可以在一个本地事务中立即把它改回`QUEUED`；真正恢复仍要等Executor下一次主动claim。若未来恢复过程包含外部异步动作，再增加`RESUME_REQUESTED`也不迟。
 
 ## 独立Studio页面
 

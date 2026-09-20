@@ -774,19 +774,27 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant E as Executor
-    participant T as tec01
-    participant X as 外部系统
-    E->>T: claim run
-    T-->>E: snapshot + lease + checkpoint
-    E->>T: start attempt
-    T-->>E: attemptId已提交
-    E->>X: 执行节点
-    X-->>E: 结果
-    E->>T: upload STAGED artifact/checkpoint
-    E->>T: atomic attempt commit
-    T-->>E: committed revision
+    participant T as tec01状态中心和任务队列
+    participant A as tec01结果仓库（Artifact）
+    participant E as itsm-workflow执行器
+    participant X as aops-cli/模型/外部系统
+    loop Executor主动长轮询领取，不是tec01反向推送
+        E->>T: claim：请求一项兼容任务
+        T-->>E: HTTP响应：snapshot + lease + checkpoint
+    end
+    E->>T: start attempt（先登记再执行）
+    T-->>E: attemptId和revision已提交
+    E->>X: 执行当前节点
+    X-->>E: 返回结果
+    E->>A: 上传STAGED结果/checkpoint
+    E->>T: 原子提交attempt和STAGED引用
+    T->>T: 校验租约、幂等键、revision和状态转换
+    T-->>E: committed revision；节点状态正式生效
 ```
+
+箭头`T-->>E`均为Executor发起的HTTP请求响应。第一版不要求tec01能访问Executor，也不使用WebSocket向Executor下发节点。暂停和取消命令同样由Executor通过心跳响应或`GET commands`主动取得。
+
+未来可以增加可选的`RUN_AVAILABLE/CONTROL_AVAILABLE`消息通知来降低领取延迟，但通知只负责唤醒Executor。Executor收到通知后仍必须调用claim或commands接口取得权威任务、租约和控制命令；消息本身不得携带明文凭据、不得直接创建attempt，也不得改变运行状态。这样消息重复、乱序或丢失时不会产生第二套事实源。
 
 ### HITL恢复
 
@@ -802,8 +810,8 @@ sequenceDiagram
     U-->>H: SELECT/REFINE/MANUAL_VALUE/CANCEL
     H->>T: interrupt reply
     T->>T: 保存响应并QUEUED
-    E->>T: claim resumed run
-    T-->>E: checkpoint + resumePayload
+    E->>T: 主动claim可恢复运行
+    T-->>E: HTTP响应：checkpoint + resumePayload
 ```
 
 ## 超时、重试和限流
