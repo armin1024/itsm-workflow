@@ -36,8 +36,9 @@ import { ListPagination, ListToolbar } from "./ListControls";
 import { useListQuery } from "./useListQuery";
 import type { KnowledgeSummary, Paginated, RunSummary } from "./types";
 import type { WorkflowVersionSummary } from "./types";
+import type { NodeCatalogItem } from "./types";
 
-type User = { uid: string; isAdmin: boolean; isOperator: boolean };
+type User = { uid: string; isAdmin: boolean; isOperator: boolean; features?: { studio?: boolean } };
 
 const statusLabel: Record<string, string> = {
   DRAFT: "草稿",
@@ -153,6 +154,7 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
           <NavLink to="/runs/new">创建运行</NavLink>
           <NavLink to="/knowledge">知识与版本</NavLink>
           {user.isAdmin && <NavLink to="/transfers">导入导出</NavLink>}
+          {user.isAdmin && user.features?.studio && <NavLink to="/studio">节点Studio</NavLink>}
         </nav>
         <div className="identity">
           <span>{user.uid}</span>
@@ -171,6 +173,7 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
           element={<EditKnowledge />}
         />
         <Route path="/transfers" element={user.isAdmin ? <TransferCenter /> : <Navigate to="/knowledge" replace />} />
+        <Route path="/studio" element={user.isAdmin && user.features?.studio ? <StudioPage /> : <Navigate to="/runs" replace />} />
         <Route
           path="/knowledge/:knowledgeId"
           element={<KnowledgeDetail user={user} />}
@@ -1449,6 +1452,62 @@ function lines(value: string) {
     .split("\n")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function StudioPage() {
+  const [catalog, setCatalog] = useState<NodeCatalogItem[]>([]);
+  const [digest, setDigest] = useState("");
+  const [selected, setSelected] = useState<NodeCatalogItem | null>(null);
+  const [mode, setMode] = useState("SIMULATION");
+  const [nodeJson, setNodeJson] = useState("");
+  const [inputsJson, setInputsJson] = useState("{}");
+  const [fixtureJson, setFixtureJson] = useState("{}");
+  const [result, setResult] = useState<Record<string, unknown> | null>(null);
+  const [manualValue, setManualValue] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const selectNode = (item: NodeCatalogItem) => {
+    const ui = item.uiSchema || {};
+    const config = (ui.debugConfig as Record<string, unknown>) || {};
+    const inputs = (ui.debugInputs as Record<string, unknown>) || {};
+    const fixture = (ui.debugFixture as Record<string, unknown>) || {};
+    setSelected(item);
+    setNodeJson(JSON.stringify({ id: "debug-node", type: item.type, schemaVersion: item.schemaVersion, handlerVersion: item.handlerVersion, title: item.name, config, inputs: [], approvalPolicy: item.approvalPolicy, timeoutSeconds: 60 }, null, 2));
+    setInputsJson(JSON.stringify(inputs, null, 2));
+    setFixtureJson(JSON.stringify({ fixtureOutput: fixture, rule: ui.debugRule }, null, 2));
+    setResult(null); setError("");
+  };
+  useEffect(() => { api.studioCatalog().then((value) => { setCatalog(value.nodes); setDigest(value.catalogDigest); const initial = value.nodes.find((item) => item.type === "sql_read") || value.nodes[0]; if (initial) selectNode(initial); }).catch((value) => setError(value.message)); }, []);
+  const run = async () => {
+    setBusy(true); setError("");
+    try {
+      const value = await api.studioDebugNode({ node: JSON.parse(nodeJson), inputs: JSON.parse(inputsJson), mode, simulation: JSON.parse(fixtureJson) });
+      setResult(value);
+    } catch (value) { setError((value as Error).message); } finally { setBusy(false); }
+  };
+  const reply = async (response: Record<string, unknown>) => {
+    if (!result?.debugRunId) return;
+    setBusy(true); setError("");
+    try { setResult(await api.studioDebugReply(String(result.debugRunId), response)); }
+    catch (value) { setError((value as Error).message); } finally { setBusy(false); }
+  };
+  const interrupt = result?.status === "WAITING_INPUT" ? result?.interrupt as Record<string, unknown> | undefined : undefined;
+  const candidates = (interrupt?.candidates as Array<Record<string, unknown>> | undefined) || [];
+  return <main className="page studio-page">
+    <header className="page-title"><div><p className="overline">NODE REGISTRY / TEST ONLY</p><h1>节点Studio</h1><p>使用正式节点定义和Simulation Adapter进行单节点调试。结果仅写入临时SQLite，不影响生产运行。</p></div><code>{digest ? digest.slice(0, 12) : "loading"}</code></header>
+    {error && <InlineNotification kind="error" title="Studio操作失败" subtitle={error} hideCloseButton />}
+    <div className="studio-layout">
+      <aside className="studio-catalog"><header><b>Node Catalog</b><span>{catalog.length} 类型</span></header>{catalog.map((item) => <button type="button" className={selected?.type === item.type ? "active" : ""} key={`${item.type}-${item.schemaVersion}`} onClick={() => selectNode(item)}><span>{item.category}</span><b>{item.name}</b><small>{item.type} · v{item.schemaVersion} · {item.handlerVersion}</small></button>)}</aside>
+      <section className="studio-editor">
+        {selected ? <><header><div><p className="overline">SINGLE NODE DEBUG</p><h2>{selected.name}</h2><p>{selected.description}</p></div><StatusTag status="READY" /></header>
+          <label className="select-label">执行模式<select value={mode} onChange={(event) => setMode(event.target.value)}>{selected.supportedModes.filter((item) => item !== "PRODUCTION").map((item) => <option key={item}>{item}</option>)}</select></label>
+          <div className="studio-json-grid"><TextArea id="studio-node" labelText="节点定义 JSON" rows={14} value={nodeJson} onChange={(event) => setNodeJson(event.target.value)} /><TextArea id="studio-inputs" labelText="节点输入 JSON" rows={14} value={inputsJson} onChange={(event) => setInputsJson(event.target.value)} /><TextArea id="studio-fixture" labelText="Simulation Adapter JSON" rows={14} value={fixtureJson} onChange={(event) => setFixtureJson(event.target.value)} /></div>
+          <div className="studio-actions"><span>仅创建TEST_ONLY调试attempt</span><Button onClick={run} disabled={busy}>{busy ? "正在运行" : "运行单节点"}</Button></div>
+        </> : <InlineLoading description="加载Node Catalog" />}
+      </section>
+      <aside className="studio-result"><header><b>调试结果</b>{result && <StatusTag status={String(result.status)} />}</header>{result ? <><dl><div><dt>Debug Run</dt><dd>{String(result.debugRunId)}</dd></div><div><dt>模式</dt><dd>{String(result.mode)}</dd></div><div><dt>Handler</dt><dd>{String(result.handlerVersion)}</dd></div></dl>{interrupt && <section className="studio-interrupt"><b>{String(interrupt.title || "请选择")}</b>{candidates.map((item) => <button type="button" key={String(item.id)} onClick={() => reply({ action: "SELECT", candidateId: item.id })}><strong>{String(item.label || item.id)}</strong><small>{String(item.value)}</small></button>)}<TextInput id="studio-manual" labelText="直接输入值" value={manualValue} onChange={(event) => setManualValue(event.target.value)} /><div><Button size="sm" onClick={() => reply({ action: "MANUAL_VALUE", value: manualValue })} disabled={!manualValue}>使用该值</Button><Button size="sm" kind="danger--ghost" onClick={() => reply({ action: "CANCEL" })}>取消</Button></div></section>}<h3>输出</h3><pre>{JSON.stringify(result.output, null, 2)}</pre></> : <div className="inspector-empty"><span>01</span><h3>等待调试</h3><p>选择节点并运行后，这里展示标准输出、HITL和诊断。</p></div>}</aside>
+    </div>
+  </main>;
 }
 
 type TransferPreview = {

@@ -24,6 +24,8 @@ type CardData = {
 const labels: Record<string, string> = {
   sql_read: "SQL READ",
   condition: "CONDITION",
+  llm_extract: "LLM EXTRACT",
+  hitl_select: "HITL SELECT",
   human_input: "INPUT",
   approval: "APPROVAL",
   end: "END",

@@ -11,7 +11,9 @@ export type NodeStatus =
 
 export type WorkflowNode = {
   id: string;
-  type: "sql_read" | "condition" | "human_input" | "approval" | "end";
+  type: string;
+  schemaVersion?: number;
+  handlerVersion?: string;
   title: string;
   config: Record<string, unknown>;
   inputs: Array<{
@@ -32,13 +34,33 @@ export type WorkflowNode = {
   uiPosition?: { x: number; y: number };
 };
 
+export type NodeCatalogItem = {
+  type: string;
+  schemaVersion: number;
+  handlerVersion: string;
+  name: string;
+  category: string;
+  description: string;
+  riskLevel: string;
+  approvalPolicy: string;
+  supportedModes: string[];
+  configSchema: Record<string, unknown>;
+  inputSchema: Record<string, unknown>;
+  outputSchema: Record<string, unknown>;
+  uiSchema: Record<string, unknown>;
+  allowSingleNodeDebug: boolean;
+};
+
 export type WorkflowEdge = {
   id: string;
   source: string;
   target: string;
+  kind?: "NORMAL" | "CONDITION" | "REFINEMENT";
   label?: string;
   default?: boolean;
   condition?: Record<string, unknown>;
+  maxIterations?: number;
+  feedbackInputName?: string;
 };
 
 export type Run = {

@@ -21,7 +21,7 @@ import { memo, useEffect, useState } from "react";
 import type { WorkflowEdge, WorkflowNode } from "./types";
 
 export type EditableWorkflow = {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   entryNodeId: string;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
@@ -31,6 +31,8 @@ type CardData = { node: WorkflowNode; entry: boolean; [key: string]: unknown };
 const labels: Record<string, string> = {
   sql_read: "SQL READ",
   condition: "CONDITION",
+  llm_extract: "LLM EXTRACT",
+  hitl_select: "HITL SELECT",
   end: "END",
 };
 const GraphCard = memo(({ data, selected }: NodeProps<Node<CardData>>) => {
@@ -53,6 +55,10 @@ const GraphCard = memo(({ data, selected }: NodeProps<Node<CardData>>) => {
           ? String(node.config.databaseRef || "待配置数据库")
           : node.type === "condition"
             ? "按前置结果选择分支"
+            : node.type === "llm_extract"
+              ? "将前置结果提取为结构化候选"
+              : node.type === "hitl_select"
+                ? "单候选自动通过，多候选等待用户"
             : "汇总并结束运行"}
       </p>
       <footer>
@@ -110,6 +116,18 @@ const endNode = (id: string, x: number, y: number): WorkflowNode => ({
   timeoutSeconds: 60,
   uiPosition: { x, y },
 });
+const llmNode = (id: string, x: number, y: number): WorkflowNode => ({
+  id, type: "llm_extract", schemaVersion: 1, title: "提取候选参数",
+  config: { modelProfile: "internal-structured-medium", promptTemplateId: "extract-parameters-v1", responseSchema: { type: "object", required: ["candidates"], properties: { candidates: { type: "array", items: { type: "object" } } } }, maxInputRows: 100, temperature: 0 },
+  inputs: [{ name: "rows", type: "array", description: "前置SQL查询结果", source: { kind: "RUN_INPUT", key: "rows" } }, { name: "user_feedback", type: "string", description: "用户补充条件", required: false, source: { kind: "RUN_INPUT", key: "user_feedback" } }],
+  approvalPolicy: "PLAN", timeoutSeconds: 90, uiPosition: { x, y },
+});
+const hitlNode = (id: string, x: number, y: number): WorkflowNode => ({
+  id, type: "hitl_select", schemaVersion: 1, title: "选择候选参数",
+  config: { selectionMode: "SINGLE", autoSelectSingle: true, zeroCandidatePolicy: "REQUEST_MANUAL_INPUT", title: "请选择用于后续步骤的参数" },
+  inputs: [{ name: "candidates", type: "array", description: "LLM生成的候选", source: { kind: "RUN_INPUT", key: "candidates" } }],
+  approvalPolicy: "NONE", timeoutSeconds: 60, uiPosition: { x, y },
+});
 
 export function newWorkflow(): EditableWorkflow {
   return {
@@ -144,7 +162,7 @@ function toFlow(definition: EditableWorkflow): {
       label: edge.default ? "默认" : edge.label || "",
       type: "bezier",
       markerEnd: arrow,
-      data: { default: edge.default, condition: edge.condition },
+      data: { default: edge.default, condition: edge.condition, kind: edge.kind, maxIterations: edge.maxIterations, feedbackInputName: edge.feedbackInputName },
     })),
   };
 }
@@ -193,6 +211,9 @@ export default function WorkflowEditor({
         label: String(item.label || ""),
         default: Boolean(item.data?.default),
         condition: item.data?.condition as Record<string, unknown> | undefined,
+        kind: item.data?.kind as WorkflowEdge["kind"],
+        maxIterations: item.data?.maxIterations as number | undefined,
+        feedbackInputName: item.data?.feedbackInputName as string | undefined,
       })),
     });
   };
@@ -219,23 +240,29 @@ export default function WorkflowEditor({
       .node;
     if (!source || source.type === "end") return;
     if (
-      source.type !== "condition" &&
+      source.type !== "condition" && source.type !== "hitl_select" &&
       edges.some((edge) => edge.source === source.id)
     ) {
       setMessage("普通节点只能连接一个后续节点；请插入条件判断节点进行分支。");
       return;
     }
     const outgoing = edges.filter((edge) => edge.source === source.id);
+    const targetType = nodes.find((node) => node.id === connection.target)?.data.node.type;
+    const refinement = source.type === "hitl_select" && outgoing.length > 0 && targetType === "llm_extract";
+    if (source.type === "hitl_select" && outgoing.length > 0 && !refinement) {
+      setMessage("HITL第二条出线只能作为REFINEMENT连接到上游LLM节点。");
+      return;
+    }
     const edge: Edge = {
       ...connection,
       id: `edge-${Date.now()}`,
       type: "bezier",
       markerEnd: arrow,
-      label:
+      label: refinement ? "补充条件后重新提取" :
         source.type === "condition" && outgoing.length === 0
           ? "默认"
           : "条件分支",
-      data:
+      data: refinement ? { kind: "REFINEMENT", maxIterations: 3, feedbackInputName: "user_feedback" } :
         source.type === "condition"
           ? outgoing.length === 0
             ? { default: true }
@@ -257,8 +284,9 @@ export default function WorkflowEditor({
     setSelectedEdge(edge.id);
     setSelectedNode("");
   };
-  const add = (type: "sql_read" | "condition" | "end") => {
-    const id = `${type === "sql_read" ? "sql" : type === "condition" ? "condition" : "end"}-${Date.now()}`,
+  const add = (type: "sql_read" | "condition" | "llm_extract" | "hitl_select" | "end") => {
+    const prefix = type === "sql_read" ? "sql" : type === "condition" ? "condition" : type === "llm_extract" ? "llm" : type === "hitl_select" ? "hitl" : "end",
+      id = `${prefix}-${Date.now()}`,
       position = {
         x: 120 + (nodes.length % 3) * 320,
         y: 100 + Math.floor(nodes.length / 3) * 220,
@@ -268,6 +296,10 @@ export default function WorkflowEditor({
           ? sqlNode(id, position.x, position.y)
           : type === "condition"
             ? conditionNode(id, position.x, position.y)
+            : type === "llm_extract"
+              ? llmNode(id, position.x, position.y)
+              : type === "hitl_select"
+                ? hitlNode(id, position.x, position.y)
             : endNode(id, position.x, position.y),
       flow: Node<CardData> = {
         id,
@@ -323,6 +355,9 @@ export default function WorkflowEditor({
     label?: string;
     default?: boolean;
     condition?: Record<string, unknown>;
+    kind?: WorkflowEdge["kind"];
+    maxIterations?: number;
+    feedbackInputName?: string;
   }) =>
     setEdges((currentEdges) => {
       let next = currentEdges.map((item) =>
@@ -381,6 +416,12 @@ export default function WorkflowEditor({
           </Button>
           <Button type="button" size="sm" kind="tertiary" onClick={() => add("condition")}>
             ◇ 条件判断
+          </Button>
+          <Button type="button" size="sm" kind="tertiary" onClick={() => add("llm_extract")}>
+            ＋ LLM 提取
+          </Button>
+          <Button type="button" size="sm" kind="tertiary" onClick={() => add("hitl_select")}>
+            ＋ HITL 选择
           </Button>
           <Button type="button" size="sm" kind="ghost" onClick={() => add("end")}>
             ＋ 结束
@@ -456,6 +497,7 @@ export default function WorkflowEditor({
                 nodes.find((item) => item.id === edge.source)?.data.node.type ||
                 ""
               }
+              targetType={nodes.find((item) => item.id === edge.target)?.data.node.type || ""}
               patch={patchEdge}
               remove={() => {
                 const next = edges.filter((item) => item.id !== edge.id);
@@ -685,6 +727,33 @@ function NodeInspector({
           </p>
         </div>
       )}
+      {(node.type === "llm_extract" || node.type === "hitl_select") && (
+        <>
+          <TextArea
+            id={`${node.id}-config-json`}
+            labelText="节点配置 JSON"
+            rows={10}
+            key={`${node.id}-config-${JSON.stringify(node.config).length}`}
+            defaultValue={JSON.stringify(node.config, null, 2)}
+            onBlur={(event) => {
+              try { patch({ config: JSON.parse(event.target.value) }); } catch { /* server validation reports invalid saved value */ }
+            }}
+            helperText="配置必须符合Node Registry中的configSchema。"
+          />
+          <TextArea
+            id={`${node.id}-inputs-json`}
+            labelText="输入绑定 JSON"
+            rows={10}
+            key={`${node.id}-inputs-${node.inputs.length}`}
+            defaultValue={JSON.stringify(node.inputs, null, 2)}
+            onBlur={(event) => {
+              try { patch({ inputs: JSON.parse(event.target.value) }); } catch { /* server validation reports invalid saved value */ }
+            }}
+            helperText="可绑定RUN_INPUT或前置节点NODE_OUTPUT。"
+          />
+          {node.type === "hitl_select" && <p className="condition-help">第二条出线连接到上游LLM时自动成为受控REFINEMENT边。</p>}
+        </>
+      )}
       <div className="danger-zone">
         <Button size="sm" kind="danger--ghost" onClick={remove}>
           删除节点
@@ -697,21 +766,27 @@ function NodeInspector({
 function EdgeInspector({
   edge,
   sourceType,
+  targetType,
   patch,
   remove,
 }: {
   edge: Edge;
   sourceType: string;
+  targetType: string;
   patch: (value: {
     label?: string;
     default?: boolean;
     condition?: Record<string, unknown>;
+    kind?: WorkflowEdge["kind"];
+    maxIterations?: number;
+    feedbackInputName?: string;
   }) => void;
   remove: () => void;
 }) {
   const data = edge.data || {},
     condition = (data.condition || {}) as Record<string, unknown>,
-    isCondition = sourceType === "condition";
+    isCondition = sourceType === "condition",
+    isRefinement = sourceType === "hitl_select" && targetType === "llm_extract" && data.kind === "REFINEMENT";
   const setRule = (key: string, value: unknown) =>
     patch({ condition: { ...condition, [key]: value } });
   return (
@@ -729,7 +804,13 @@ function EdgeInspector({
         value={String(edge.label || "")}
         onChange={(event) => patch({ label: event.target.value })}
       />
-      {isCondition ? (
+      {isRefinement ? (
+        <div className="rule-form">
+          <p className="condition-help">用户选择“补充条件”时回到该LLM节点。只允许1至5轮。</p>
+          <TextInput id={`${edge.id}-iterations`} labelText="最大迭代次数" type="number" min={1} max={5} value={String(data.maxIterations || 3)} onChange={(event) => patch({ kind: "REFINEMENT", maxIterations: Number(event.target.value) })} />
+          <TextInput id={`${edge.id}-feedback`} labelText="LLM反馈输入键" value={String(data.feedbackInputName || "user_feedback")} onChange={(event) => patch({ kind: "REFINEMENT", feedbackInputName: event.target.value })} />
+        </div>
+      ) : isCondition ? (
         <>
           <label className="check-row">
             <input

@@ -5,6 +5,7 @@ import type {
   Run,
   RunSummary,
   WorkflowVersionSummary,
+  NodeCatalogItem,
 } from "./types";
 import { withBase } from "./runtime";
 
@@ -50,12 +51,12 @@ function query(
 
 export const api = {
   login: (apiKey: string) =>
-    request<{ uid: string; isAdmin: boolean; isOperator: boolean }>(
+    request<{ uid: string; isAdmin: boolean; isOperator: boolean; features?: { studio?: boolean } }>(
       "/api/v1/auth/session",
       { method: "POST", body: JSON.stringify({ apiKey }) },
     ),
   me: () =>
-    request<{ uid: string; isAdmin: boolean; isOperator: boolean }>(
+    request<{ uid: string; isAdmin: boolean; isOperator: boolean; features?: { studio?: boolean } }>(
       "/api/v1/auth/me",
     ),
   logout: () => request<void>("/api/v1/auth/session", { method: "DELETE" }),
@@ -188,4 +189,10 @@ export const api = {
     request<Record<string, unknown>>("/api/v1/database-paths/replace/preview", { method: "POST", body: JSON.stringify(body) }),
   replacePaths: (body: Record<string, unknown>) =>
     request<Record<string, unknown>>("/api/v1/database-paths/replace", { method: "POST", body: JSON.stringify(body) }),
+  studioCatalog: () => request<{ catalogDigest: string; catalogVersion: string; runtimeVersion: string; nodes: NodeCatalogItem[]; testOnly: boolean }>("/api/v1/studio/catalog"),
+  studioWorkspaces: () => request<{ items: Array<Record<string, unknown>>; total: number }>("/api/v1/studio/workspaces"),
+  createStudioWorkspace: (name: string, draft: Record<string, unknown> = {}) => request<Record<string, unknown>>("/api/v1/studio/workspaces", { method: "POST", body: JSON.stringify({ name, draft }) }),
+  studioDebugNode: (body: Record<string, unknown>) => request<Record<string, unknown>>("/api/v1/studio/node-debug-runs", { method: "POST", body: JSON.stringify(body) }),
+  studioDebugRun: (id: string) => request<Record<string, unknown>>(`/api/v1/studio/node-debug-runs/${id}`),
+  studioDebugReply: (id: string, response: Record<string, unknown>) => request<Record<string, unknown>>(`/api/v1/studio/node-debug-runs/${id}/interrupts/reply`, { method: "POST", body: JSON.stringify({ response }) }),
 };
