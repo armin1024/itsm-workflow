@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     llm_response_format: str = "auto"
 
     runtime_service_token: str = ""
+    studio_admin_token: str = "change-me"
+    studio_session_hours: int = Field(default=8, ge=1, le=72)
+    studio_cookie_secure: bool = False
     studio_database_path: Path = Path("data/studio.db")
     studio_ttl_hours: int = Field(default=24, ge=1, le=72)
     studio_artifact_max_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=50 * 1024 * 1024)
@@ -59,6 +62,8 @@ class Settings(BaseSettings):
         return value
 
     def validate_service(self) -> None:
+        if self.environment.lower() == "production" and (self.studio_admin_token in {"", "change-me"} or self.studio_admin_token.startswith("replace-")):
+            raise RuntimeError("生产环境必须配置STUDIO_ADMIN_TOKEN")
         if not self.studio_database_path.is_absolute() and self.environment.lower() == "production":
             raise RuntimeError("生产环境必须使用绝对路径 STUDIO_DATABASE_PATH")
         if self.tec01_enabled and (not self.tec01_base_url or not self.tec01_service_token):

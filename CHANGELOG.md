@@ -1,5 +1,13 @@
 # 版本说明
 
+## 0.8.1
+
+- 增加`STUDIO_ADMIN_TOKEN`登录和HttpOnly管理会话。
+- 增加Node管理页面，支持已注册节点的Studio启停、名称、说明和调试默认值维护。
+- 草稿提取后直接渲染可编辑DAG，并支持选中节点单步调试和整流程调试。
+- 增加整流程测试执行器，解析运行输入、节点输出绑定、条件分支和逐节点状态。
+- `/docs`改为本地OpenAPI渲染页面，不再依赖公网Swagger资源。
+
 ## 0.8.0
 
 - 将服务收敛为Node Registry、Compiler、Runtime Adapter、tec01 Client和独立Studio。

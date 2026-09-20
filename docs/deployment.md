@@ -10,8 +10,8 @@
 ## 安装
 
 ```bash
-tar -xzf itsm-workflow-0.8.0-linux-x86_64.tar.gz
-cd itsm-workflow-0.8.0-linux-x86_64
+tar -xzf itsm-workflow-0.8.1-linux-x86_64.tar.gz
+cd itsm-workflow-0.8.1-linux-x86_64
 sudo ./install.sh --no-start
 sudo vi /etc/itsm-workflow/service.env
 sudo systemctl start itsm-workflow-api
@@ -25,6 +25,7 @@ AOPS_BASE_URL=https://aops.internal/aops/api
 AOPS_CLI_PATH=/usr/local/bin/aops-cli
 LLM_BASE_URL=http://llm.internal/v1
 LLM_MODEL=<模型名>
+STUDIO_ADMIN_TOKEN=<随机长管理Token>
 STUDIO_DATABASE_PATH=/var/lib/itsm-workflow/studio.db
 ```
 
@@ -78,4 +79,4 @@ sudo systemctl restart itsm-workflow-api
 
 ## 安全边界
 
-Studio不提供应用层登录，应由内网ACL、VPN或Nginx统一认证限制访问。TEST模式会真实调用外部系统并产生AOPS审计记录。SQLite可能包含测试SQL结果，应将`/var/lib/itsm-workflow`限制为服务用户可读，并按TTL清理。
+Studio使用`STUDIO_ADMIN_TOKEN`建立HttpOnly会话；仍建议叠加内网ACL、VPN或Nginx统一认证。TEST模式会真实调用外部系统并产生AOPS审计记录。SQLite可能包含测试SQL结果，应将`/var/lib/itsm-workflow`限制为服务用户可读，并按TTL清理。

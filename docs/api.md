@@ -1,9 +1,25 @@
 # Runtime与Studio REST API
 
-默认地址：`http://127.0.0.1:8089`。Studio接口不要求登录；建议只在可信内网开放。若配置`RUNTIME_SERVICE_TOKEN`，`/internal/v1/*`必须携带：
+默认地址：`http://127.0.0.1:8089`。Studio接口先使用管理Token建立HttpOnly会话；若配置`RUNTIME_SERVICE_TOKEN`，`/internal/v1/*`必须携带：
 
 ```http
 Authorization: Bearer <RUNTIME_SERVICE_TOKEN>
+```
+
+Studio登录：
+
+```http
+POST /api/v1/studio/session
+Content-Type: application/json
+
+{"token":"<STUDIO_ADMIN_TOKEN>"}
+```
+
+登录成功后浏览器自动携带HttpOnly Cookie。Node管理接口为：
+
+```text
+GET   /api/v1/studio/nodes
+PATCH /api/v1/studio/nodes/{type}/{schemaVersion}
 ```
 
 ## 健康检查
@@ -56,11 +72,11 @@ Content-Type: application/json
 }
 ```
 
-模式：
+页面调试固定提交`TEST`：
 
-- `DRY_RUN`：只渲染安全计划，不访问外部系统。
-- `SIMULATION`：使用`simulation.fixtureOutput`，不访问外部系统。
 - `TEST`：使用真实Handler。`sql_read`必须同时提供工单ID和请求头API Key。
+
+协议仍接受`SIMULATION/DRY_RUN`用于自动化契约测试，但它们不属于页面上的“调试”。
 
 HITL回复：
 
@@ -112,5 +128,16 @@ POST /internal/v1/runtime/workflows/validate
 POST /internal/v1/runtime/workflows/plan
 POST /internal/v1/compiler/preview
 ```
+
+整流程调试：
+
+```http
+POST /api/v1/studio/workflow-debug-runs
+X-AOPS-Api-Key: <TEST模式且包含sql_read时需要>
+```
+
+响应包含`nodeStatuses`和逐节点`nodeResults`。条件节点只执行命中分支，其余节点标记为`SKIPPED`。
+
+页面`/docs`使用本地React组件读取`/openapi.json`，不依赖Swagger CDN，适用于隔离内网。
 
 内部API契约详见[tec01集成契约](tec01-integration-contract.md)。本服务没有`/mcp`、`/auth/session`、知识检索或生产运行控制接口。

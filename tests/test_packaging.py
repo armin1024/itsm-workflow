@@ -9,6 +9,7 @@ def test_installer_creates_and_renders_service_group():
     assert 'usermod --gid "$SERVICE_GROUP" "$SERVICE_USER"' in installer
     assert 's|__SERVICE_GROUP__|$SERVICE_GROUP|g' in installer
     assert "._*" in installer and ".DS_Store" in installer
+    assert "STUDIO_ADMIN_TOKEN=replace-with-long-random-admin-token" in installer
     for name in ("api", "compiler"):
         template = (root / "packaging" / f"itsm-workflow-{name}.service.in").read_text()
         assert "Group=__SERVICE_GROUP__" in template

@@ -39,7 +39,7 @@ def validate_workflow(value: dict[str, Any], mode: str = "DRAFT") -> dict[str, A
         "normalizedDefinition": normalized,
         "catalogDigest": catalog["catalogDigest"],
         "workflowContentHash": canonical_hash(normalized),
-        "requiredRuntimeVersion": ">=0.8.0,<1.0.0",
+        "requiredRuntimeVersion": ">=0.8.1,<1.0.0",
         "warnings": warnings,
     }
 
@@ -75,5 +75,5 @@ def render_plan(*, workflow_version_id: str, workflow_content_hash: str, workflo
         "renderedPlan": {"nodes": nodes, "edges": normalized["edges"], "riskSummary": risks, "requiredInputs": list(required.values())},
         "planMaterialHash": canonical_hash(material),
         "catalogDigest": validated["catalogDigest"],
-        "runtimeVersion": "0.8.0",
+        "runtimeVersion": "0.8.1",
     }

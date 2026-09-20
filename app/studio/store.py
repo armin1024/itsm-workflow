@@ -36,10 +36,53 @@ class StudioStore:
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL, expires_at TEXT NOT NULL,
                     test_only INTEGER NOT NULL DEFAULT 1
                 );
+                CREATE TABLE IF NOT EXISTS studio_node_settings (
+                    node_type TEXT NOT NULL, schema_version INTEGER NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1, name TEXT NOT NULL,
+                    description TEXT NOT NULL, debug_config_json TEXT NOT NULL,
+                    debug_inputs_json TEXT NOT NULL, debug_fixture_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (node_type, schema_version)
+                );
                 CREATE INDEX IF NOT EXISTS ix_studio_debug_expires ON studio_node_debug_runs(expires_at);
                 CREATE INDEX IF NOT EXISTS ix_studio_workspace_expires ON studio_workspaces(expires_at);
             """)
             await database.commit()
+
+    async def node_settings(self) -> dict[tuple[str, int], dict[str, Any]]:
+        async with aiosqlite.connect(self.path) as database:
+            database.row_factory = aiosqlite.Row
+            result = await database.execute("SELECT * FROM studio_node_settings")
+            rows = await result.fetchall()
+        return {
+            (row["node_type"], int(row["schema_version"])): {
+                "enabled": bool(row["enabled"]),
+                "name": row["name"],
+                "description": row["description"],
+                "debugConfig": json.loads(row["debug_config_json"]),
+                "debugInputs": json.loads(row["debug_inputs_json"]),
+                "debugFixture": json.loads(row["debug_fixture_json"]),
+                "updatedAt": row["updated_at"],
+            }
+            for row in rows
+        }
+
+    async def update_node_setting(self, node_type: str, schema_version: int, value: dict[str, Any]) -> dict[str, Any]:
+        self._check_capacity(value)
+        now = _now().isoformat()
+        async with aiosqlite.connect(self.path) as database:
+            await database.execute(
+                """INSERT INTO studio_node_settings
+                (node_type,schema_version,enabled,name,description,debug_config_json,debug_inputs_json,debug_fixture_json,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(node_type,schema_version) DO UPDATE SET
+                enabled=excluded.enabled,name=excluded.name,description=excluded.description,
+                debug_config_json=excluded.debug_config_json,debug_inputs_json=excluded.debug_inputs_json,
+                debug_fixture_json=excluded.debug_fixture_json,updated_at=excluded.updated_at""",
+                (node_type, schema_version, int(bool(value["enabled"])), value["name"], value["description"], json.dumps(value["debugConfig"], ensure_ascii=False), json.dumps(value["debugInputs"], ensure_ascii=False), json.dumps(value["debugFixture"], ensure_ascii=False), now),
+            )
+            await database.commit()
+        return {"type": node_type, "schemaVersion": schema_version, **value, "updatedAt": now}
 
     def _check_capacity(self, value: Any) -> None:
         size = len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))

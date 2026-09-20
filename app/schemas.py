@@ -41,9 +41,30 @@ class StudioNodeDebugRequest(BaseModel):
     ticketId: int | None = Field(default=None, gt=0)
     node: dict[str, Any]
     inputs: dict[str, Any] = Field(default_factory=dict)
-    mode: str = Field(default="SIMULATION", pattern="^(TEST|SIMULATION|DRY_RUN)$")
+    mode: str = Field(default="TEST", pattern="^(TEST|SIMULATION|DRY_RUN)$")
     simulation: dict[str, Any] = Field(default_factory=dict)
 
 
 class StudioInterruptReply(BaseModel):
     response: dict[str, Any]
+
+
+class StudioLoginRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=1000)
+
+
+class StudioNodeUpdate(BaseModel):
+    enabled: bool = True
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(min_length=1, max_length=1000)
+    debugConfig: dict[str, Any] = Field(default_factory=dict)
+    debugInputs: dict[str, Any] = Field(default_factory=dict)
+    debugFixture: dict[str, Any] = Field(default_factory=dict)
+
+
+class StudioWorkflowDebugRequest(BaseModel):
+    workflowDefinition: dict[str, Any]
+    ticketId: int | None = Field(default=None, gt=0)
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    mode: str = Field(default="TEST", pattern="^(TEST|SIMULATION|DRY_RUN)$")
+    simulation: dict[str, Any] = Field(default_factory=dict)

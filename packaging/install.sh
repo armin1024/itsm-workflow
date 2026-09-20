@@ -47,6 +47,10 @@ if [ ! -f "$CONFIG_DIR/service.env" ]; then
   chown root:"$SERVICE_GROUP" "$CONFIG_DIR/service.env"
   echo "Created $CONFIG_DIR/service.env; configure AOPS/LLM values before TEST execution." >&2
 fi
+if ! grep -q '^STUDIO_ADMIN_TOKEN=' "$CONFIG_DIR/service.env"; then
+  printf '\nSTUDIO_ADMIN_TOKEN=replace-with-long-random-admin-token\nSTUDIO_SESSION_HOURS=8\nSTUDIO_COOKIE_SECURE=false\n' >> "$CONFIG_DIR/service.env"
+  echo "Added Studio authentication settings; configure STUDIO_ADMIN_TOKEN before start." >&2
+fi
 for name in api compiler; do
   sed -e "s|__PREFIX__|$PREFIX|g" -e "s|__CONFIG_DIR__|$CONFIG_DIR|g" -e "s|__SERVICE_USER__|$SERVICE_USER|g" -e "s|__SERVICE_GROUP__|$SERVICE_GROUP|g" "$PACKAGE_DIR/itsm-workflow-$name.service.in" > "/etc/systemd/system/itsm-workflow-$name.service"
 done
@@ -55,6 +59,10 @@ chown -R "$SERVICE_USER:$SERVICE_GROUP" "$PREFIX" /var/lib/itsm-workflow
 systemctl daemon-reload
 systemctl enable itsm-workflow-api
 if [ "$START" -eq 1 ]; then
+  if grep -q '^STUDIO_ADMIN_TOKEN=replace-' "$CONFIG_DIR/service.env"; then
+    echo "Configure STUDIO_ADMIN_TOKEN in $CONFIG_DIR/service.env before start." >&2
+    exit 0
+  fi
   cli_path=$(awk -F= '/^AOPS_CLI_PATH=/{print $2}' "$CONFIG_DIR/service.env")
   [ -x "$cli_path" ] || { echo "AOPS_CLI_PATH is not executable: $cli_path" >&2; exit 1; }
   systemctl restart itsm-workflow-api

@@ -2,47 +2,33 @@
 
 ## 1. 页面功能
 
-Studio包含三个入口：
+进入页面先输入`STUDIO_ADMIN_TOKEN`。Token只用于建立HttpOnly管理会话。Studio包含五个入口：
 
 1. **节点调试**：查看Node Catalog并单步运行一个节点。
-2. **流程编排**：以卡片画布新增节点、连线、配置条件和输出绑定，再执行Registry校验。
-3. **草稿提取**：根据工单ID取证，或直接粘贴`ticketInfo`与`auditTimeline` JSON，生成DraftProposal。
+2. **Node管理**：启停Studio节点并维护名称、说明和调试默认值。
+3. **流程编排**：以卡片画布新增节点、连线、配置条件和输出绑定，再执行Registry校验。
+4. **草稿提取**：生成DraftProposal后直接渲染DAG，支持选中节点或整流程调试。
+5. **API文档**：使用本地OpenAPI渲染器，不访问公网CDN。
 
-无需登录。页面右上角始终显示`TEST_ONLY`，避免把本地结果误认为tec01生产事实。
+页面顶栏始终显示`TEST_ONLY`，避免把本地结果误认为tec01生产事实。
 
-## 2. 三种节点调试模式
+## 2. 调试固定执行真实Handler
 
-### DRY_RUN
-
-检查节点定义和输入并展示计划，不调用AOPS或LLM。适合先核对数据库路径、SQL模板和参数。
-
-### SIMULATION
-
-从`Simulation Adapter JSON`读取固定输出。适合验证：
-
-- SQL结果到LLM输入的数据形状。
-- 条件节点规则。
-- HITL单候选自动选择和多候选等待。
-- 下游节点需要的JSON Pointer。
-
-### TEST
-
-调用真实Adapter：
+页面中的“调试”固定使用`TEST`，不会用Fixture伪造节点成功：
 
 - `sql_read`调用系统`aops-cli db read`。
 - `llm_extract`调用`service.env`配置的内网LLM。
 - `condition`和`hitl_select`执行本地确定性逻辑。
 
-SQL读必须填写当前工单ID和`AOPS_API_KEY`。执行前先用DRY_RUN/SIMULATION确认配置。
+SQL读必须填写当前工单ID和`AOPS_API_KEY`，并真实执行`aops-cli db read`。底层API保留`SIMULATION/DRY_RUN`仅供自动化契约测试，不作为页面调试入口。
 
 ## 3. 调试SQL读节点
 
 1. 进入“节点调试”，选择“SQL只读查询”。
-2. 先选`DRY_RUN`，填写节点定义和输入，点击“运行单节点”。
-3. 再选`SIMULATION`，在Fixture中准备预期`status/data/rowCount`。
-4. 确认无误后选`TEST`。
-5. 填写工单ID和个人`AOPS_API_KEY`。
-6. 点击“运行单节点”，查看输出或脱敏诊断。
+2. 填写并核对节点定义、数据库路径、SQL模板和输入。
+3. 填写当前工单ID和个人`AOPS_API_KEY`。
+4. 点击“执行真实单节点调试”，服务调用系统`aops-cli db read`。
+5. 查看真实输出或脱敏诊断。
 
 凭据路径：
 
@@ -88,6 +74,13 @@ Compiler只接受`operation=sql_exec_read`、结果明确成功且SQL安全只�
 - `uatu audit_timeline`响应中的`data`数组。
 
 生成结果不会自动提交tec01或发布。审核后由调用方通过tec01契约创建DRAFT。
+
+提取成功后页面会把`workflowDefinition`直接载入可视化画布。你可以修改节点和连线，然后：
+
+- 选择某一节点进行单步调试。
+- 使用真实Handler执行整个DAG；其中SQL读节点逐个调用`aops-cli db read`。
+- 查看每个节点的`SUCCEEDED/FAILED/WAITING/SKIPPED`状态与输出。
+- 使用运行输入JSON补齐参数；运行前必须提供当前工单ID和`AOPS_API_KEY`。
 
 ## 6. 流程编排和依赖
 

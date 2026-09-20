@@ -32,12 +32,16 @@ export type NodeCatalogItem = {
   description: string;
   riskLevel: string;
   approvalPolicy: string;
+  idempotencyClass: string;
+  resumeSemantics: string;
   supportedModes: string[];
   configSchema: Record<string, unknown>;
   inputSchema: Record<string, unknown>;
   outputSchema: Record<string, unknown>;
   uiSchema: Record<string, unknown>;
   allowSingleNodeDebug: boolean;
+  studioEnabled?: boolean;
+  studioUpdatedAt?: string;
 };
 
 export type WorkflowEdge = {

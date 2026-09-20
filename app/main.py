@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Response
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Response
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -16,7 +16,9 @@ from app.config import settings
 from app.extraction import compile_ticket_evidence, compile_ticket_id
 from app.runtime import NODE_REGISTRY
 from app.runtime.planner import render_plan, validate_workflow
-from app.schemas import CompilerPreviewRequest, CompilerTicketRequest, RuntimePlanRequest, RuntimeValidateRequest, StudioInterruptReply, StudioNodeDebugRequest, StudioWorkspaceCreate
+from app.runtime.workflow_debugger import debug_workflow
+from app.schemas import CompilerPreviewRequest, CompilerTicketRequest, RuntimePlanRequest, RuntimeValidateRequest, StudioInterruptReply, StudioLoginRequest, StudioNodeDebugRequest, StudioNodeUpdate, StudioWorkflowDebugRequest, StudioWorkspaceCreate
+from app.studio.auth import COOKIE_NAME, create_session, require_studio_admin, valid_session, verify_admin_token
 from app.studio.debug import reject_credentials, run_single_node
 from app.studio.store import studio_store
 
@@ -34,6 +36,8 @@ app = FastAPI(
     description="Node Registry、Workflow Compiler、执行适配器和TEST_ONLY Studio",
     version=__version__,
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
 )
 
 
@@ -57,6 +61,32 @@ def _compile_result(proposal: dict[str, Any], diagnostics: dict[str, Any], targe
     return {"compilerVersion": __version__, "catalogDigest": catalog["catalogDigest"], "proposal": proposal, "diagnostics": diagnostics}
 
 
+async def _studio_catalog() -> dict[str, Any]:
+    catalog = NODE_REGISTRY.catalog()
+    settings_by_node = await studio_store.node_settings()
+    nodes = []
+    for source in catalog["nodes"]:
+        node = dict(source)
+        override = settings_by_node.get((node["type"], int(node["schemaVersion"])))
+        node["studioEnabled"] = True if override is None else override["enabled"]
+        if override:
+            node["name"] = override["name"]
+            node["description"] = override["description"]
+            ui = dict(node.get("uiSchema") or {})
+            ui.update({key: override[key] for key in ("debugConfig", "debugInputs", "debugFixture")})
+            node["uiSchema"] = ui
+            node["studioUpdatedAt"] = override["updatedAt"]
+        nodes.append(node)
+    return {**catalog, "nodes": nodes, "runtimeVersion": __version__, "testOnly": True}
+
+
+async def _ensure_studio_nodes_enabled(nodes: list[dict[str, Any]]) -> None:
+    overrides = await studio_store.node_settings()
+    disabled = [str(node.get("type")) for node in nodes if not overrides.get((str(node.get("type")), int(node.get("schemaVersion") or 1)), {"enabled": True})["enabled"]]
+    if disabled:
+        raise ValueError("Studio已停用节点：" + "、".join(sorted(set(disabled))))
+
+
 @app.get("/api/v1/health")
 async def health() -> dict[str, Any]:
     try:
@@ -75,19 +105,53 @@ async def health() -> dict[str, Any]:
     }
 
 
-@app.get("/api/v1/studio/catalog")
+@app.post("/api/v1/studio/session")
+async def studio_login(body: StudioLoginRequest, response: Response) -> dict[str, Any]:
+    if not verify_admin_token(body.token):
+        raise HTTPException(401, "管理Token无效")
+    response.set_cookie(COOKIE_NAME, create_session(), max_age=settings.studio_session_hours * 3600, httponly=True, secure=settings.studio_cookie_secure, samesite="strict", path="/")
+    return {"authenticated": True, "expiresInSeconds": settings.studio_session_hours * 3600}
+
+
+@app.get("/api/v1/studio/session")
+async def studio_session(itsm_runtime_studio: str | None = Cookie(default=None, alias=COOKIE_NAME)) -> dict[str, Any]:
+    return {"authenticated": valid_session(itsm_runtime_studio)}
+
+
+@app.delete("/api/v1/studio/session", status_code=204)
+async def studio_logout(response: Response) -> None:
+    response.delete_cookie(COOKIE_NAME, path="/")
+
+
+@app.get("/api/v1/studio/catalog", dependencies=[Depends(require_studio_admin)])
 async def studio_catalog() -> dict[str, Any]:
-    return {**NODE_REGISTRY.catalog(), "runtimeVersion": __version__, "testOnly": True}
+    return await _studio_catalog()
 
 
-@app.get("/api/v1/studio/workspaces")
+@app.get("/api/v1/studio/nodes", dependencies=[Depends(require_studio_admin)])
+async def studio_nodes() -> dict[str, Any]:
+    catalog = await _studio_catalog()
+    return {"items": catalog["nodes"], "total": len(catalog["nodes"]), "catalogDigest": catalog["catalogDigest"]}
+
+
+@app.patch("/api/v1/studio/nodes/{node_type}/{schema_version}", dependencies=[Depends(require_studio_admin)])
+async def studio_node_update(node_type: str, schema_version: int, body: StudioNodeUpdate) -> dict[str, Any]:
+    try:
+        NODE_REGISTRY.get(node_type, schema_version)
+        reject_credentials(body.model_dump(mode="json"))
+        return await studio_store.update_node_setting(node_type, schema_version, body.model_dump(mode="json"))
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/v1/studio/workspaces", dependencies=[Depends(require_studio_admin)])
 async def studio_workspace_list() -> dict[str, Any]:
     await studio_store.cleanup()
     items = await studio_store.list_workspaces("local-studio")
     return {"items": items, "total": len(items)}
 
 
-@app.post("/api/v1/studio/workspaces")
+@app.post("/api/v1/studio/workspaces", dependencies=[Depends(require_studio_admin)])
 async def studio_workspace_create(body: StudioWorkspaceCreate) -> dict[str, Any]:
     try:
         reject_credentials(body.draft)
@@ -96,9 +160,10 @@ async def studio_workspace_create(body: StudioWorkspaceCreate) -> dict[str, Any]
         raise HTTPException(422, str(exc)) from exc
 
 
-@app.post("/api/v1/studio/node-debug-runs")
+@app.post("/api/v1/studio/node-debug-runs", dependencies=[Depends(require_studio_admin)])
 async def studio_node_debug_create(body: StudioNodeDebugRequest, x_aops_api_key: str | None = Header(default=None, alias="X-AOPS-Api-Key")) -> dict[str, Any]:
     try:
+        await _ensure_studio_nodes_enabled([body.node])
         result = await run_single_node(node=body.node, inputs=body.inputs, mode=body.mode, simulation=body.simulation, api_key=x_aops_api_key, ticket_id=body.ticketId)
         manifest = NODE_REGISTRY.get(str(body.node.get("type")), int(body.node.get("schemaVersion") or 1)).manifest
         return await studio_store.create_debug_run(creator_uid="local-studio", workspace_id=body.workspaceId, node=body.node, inputs=body.inputs, mode=body.mode, handler_version=manifest.handler_version, status=result["status"], output=result["output"], diagnostic=result["diagnostic"], interrupt=result["interrupt"])
@@ -106,7 +171,7 @@ async def studio_node_debug_create(body: StudioNodeDebugRequest, x_aops_api_key:
         raise HTTPException(422, str(exc)) from exc
 
 
-@app.get("/api/v1/studio/node-debug-runs/{debug_run_id}")
+@app.get("/api/v1/studio/node-debug-runs/{debug_run_id}", dependencies=[Depends(require_studio_admin)])
 async def studio_node_debug_get(debug_run_id: str) -> dict[str, Any]:
     try:
         return await studio_store.get_debug_run(debug_run_id, "local-studio", True)
@@ -114,7 +179,7 @@ async def studio_node_debug_get(debug_run_id: str) -> dict[str, Any]:
         raise HTTPException(404, "调试记录不存在或已过期") from exc
 
 
-@app.post("/api/v1/studio/node-debug-runs/{debug_run_id}/interrupts/reply")
+@app.post("/api/v1/studio/node-debug-runs/{debug_run_id}/interrupts/reply", dependencies=[Depends(require_studio_admin)])
 async def studio_node_debug_reply(debug_run_id: str, body: StudioInterruptReply) -> dict[str, Any]:
     try:
         reject_credentials(body.response)
@@ -125,7 +190,7 @@ async def studio_node_debug_reply(debug_run_id: str, body: StudioInterruptReply)
         raise HTTPException(422, str(exc)) from exc
 
 
-@app.post("/api/v1/studio/compiler/preview")
+@app.post("/api/v1/studio/compiler/preview", dependencies=[Depends(require_studio_admin)])
 async def studio_compiler_preview(body: CompilerPreviewRequest) -> dict[str, Any]:
     try:
         proposal, diagnostics = await compile_ticket_evidence(body.ticketInfo, body.auditTimeline)
@@ -134,7 +199,7 @@ async def studio_compiler_preview(body: CompilerPreviewRequest) -> dict[str, Any
         raise HTTPException(422, {"code": "COMPILER_FAILED", "message": str(exc), "retryable": False}) from exc
 
 
-@app.post("/api/v1/studio/compiler/from-ticket")
+@app.post("/api/v1/studio/compiler/from-ticket", dependencies=[Depends(require_studio_admin)])
 async def studio_compiler_from_ticket(body: CompilerTicketRequest, x_aops_api_key: str | None = Header(default=None, alias="X-AOPS-Api-Key")) -> dict[str, Any]:
     if not x_aops_api_key:
         raise HTTPException(422, "从工单提取必须通过X-AOPS-Api-Key请求头提供AOPS_API_KEY")
@@ -145,12 +210,22 @@ async def studio_compiler_from_ticket(body: CompilerTicketRequest, x_aops_api_ke
         raise HTTPException(422, {"code": "COMPILER_FAILED", "message": str(exc), "retryable": False}) from exc
 
 
-@app.post("/api/v1/studio/workflows/validate")
+@app.post("/api/v1/studio/workflows/validate", dependencies=[Depends(require_studio_admin)])
 async def studio_workflow_validate(body: RuntimeValidateRequest) -> dict[str, Any]:
     try:
         return validate_workflow(body.workflowDefinition, body.validationMode)
     except ValueError as exc:
         raise HTTPException(422, {"code": "WORKFLOW_VALIDATION_FAILED", "message": str(exc), "retryable": False}) from exc
+
+
+@app.post("/api/v1/studio/workflow-debug-runs", dependencies=[Depends(require_studio_admin)])
+async def studio_workflow_debug(body: StudioWorkflowDebugRequest, x_aops_api_key: str | None = Header(default=None, alias="X-AOPS-Api-Key")) -> dict[str, Any]:
+    try:
+        reject_credentials({"workflowDefinition": body.workflowDefinition, "inputs": body.inputs, "simulation": body.simulation})
+        await _ensure_studio_nodes_enabled(list(body.workflowDefinition.get("nodes") or []))
+        return await debug_workflow(workflow=body.workflowDefinition, run_inputs=body.inputs, mode=body.mode, simulation=body.simulation, ticket_id=body.ticketId, api_key=x_aops_api_key)
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.get("/internal/v1/runtime/catalog", dependencies=[Depends(runtime_service)])

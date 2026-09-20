@@ -170,9 +170,11 @@ function toFlow(definition: EditableWorkflow): {
 export default function WorkflowEditor({
   definition,
   onChange,
+  allowedTypes,
 }: {
   definition: EditableWorkflow;
   onChange: (value: EditableWorkflow) => void;
+  allowedTypes?: Set<string>;
 }) {
   const initial = toFlow(definition),
     [nodes, setNodes] = useState(initial.nodes),
@@ -411,19 +413,19 @@ export default function WorkflowEditor({
           <h2>流程画布</h2>
         </div>
         <div>
-          <Button type="button" size="sm" kind="tertiary" onClick={() => add("sql_read")}>
+          <Button type="button" size="sm" kind="tertiary" disabled={allowedTypes ? !allowedTypes.has("sql_read") : false} onClick={() => add("sql_read")}>
             ＋ SQL 读
           </Button>
-          <Button type="button" size="sm" kind="tertiary" onClick={() => add("condition")}>
+          <Button type="button" size="sm" kind="tertiary" disabled={allowedTypes ? !allowedTypes.has("condition") : false} onClick={() => add("condition")}>
             ◇ 条件判断
           </Button>
-          <Button type="button" size="sm" kind="tertiary" onClick={() => add("llm_extract")}>
+          <Button type="button" size="sm" kind="tertiary" disabled={allowedTypes ? !allowedTypes.has("llm_extract") : false} onClick={() => add("llm_extract")}>
             ＋ LLM 提取
           </Button>
-          <Button type="button" size="sm" kind="tertiary" onClick={() => add("hitl_select")}>
+          <Button type="button" size="sm" kind="tertiary" disabled={allowedTypes ? !allowedTypes.has("hitl_select") : false} onClick={() => add("hitl_select")}>
             ＋ HITL 选择
           </Button>
-          <Button type="button" size="sm" kind="ghost" onClick={() => add("end")}>
+          <Button type="button" size="sm" kind="ghost" disabled={allowedTypes ? !allowedTypes.has("end") : false} onClick={() => add("end")}>
             ＋ 结束
           </Button>
           <Button type="button" size="sm" kind="ghost" onClick={() => setFullscreen((value) => !value)}>

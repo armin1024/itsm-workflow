@@ -1,13 +1,13 @@
 # ITSM Workflow Runtime
 
-`0.8.0`开始，本仓库只承担拆分架构中的Python计算执行侧：
+`0.8.1`开始，本仓库只承担拆分架构中的Python计算执行侧：
 
 - Node Registry与版本化Schema。
 - Workflow DAG校验和计划渲染。
 - 工单证据过滤、LLM分析和草稿编译。
 - `sql_read`、`condition`、`llm_extract`、`hitl_select`等节点执行适配器。
 - 与tec01交互的Compiler/Executor协议客户端。
-- 无需登录、可独立运行的TEST_ONLY Studio。
+- 使用管理Token登录、可独立运行的TEST_ONLY Studio。
 
 生产知识、权限、MCP、运行状态、Artifact、Checkpoint和审计属于tec01，本服务不再保存这些数据，也不再提供MCP Server。
 
@@ -26,7 +26,7 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8089
 http://127.0.0.1:8089/studio
 ```
 
-Studio无需管理员登录。只有TEST模式真实执行SQL读或按工单ID提取时才填写`AOPS_API_KEY`；浏览器只把它放入当前请求的`X-AOPS-Api-Key`头，服务端只传入本次`aops-cli`子进程环境，不写SQLite、配置或日志。
+进入Studio需要`STUDIO_ADMIN_TOKEN`。登录后可以管理Registry Node的Studio启停和调试默认值。只有TEST模式真实执行SQL读或按工单ID提取时才填写`AOPS_API_KEY`；浏览器只把它放入当前请求的`X-AOPS-Api-Key`头，服务端只传入本次`aops-cli`子进程环境，不写SQLite、配置或日志。
 
 ## 保留的进程
 
