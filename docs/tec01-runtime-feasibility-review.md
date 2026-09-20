@@ -211,3 +211,5 @@ refinement是平台级受控边，不是通用循环功能。第一版只支持`
 ## 评审结论
 
 两份设计文档的产品方向合理，核心能力均可实现。实施顺序必须是“契约与Registry优先、Studio和Compiler其次、远程生产状态最后”，不能先删除现有数据库或直接把Worker改成HTTP轮询。按本评审修正后可以进入详细实施规划。
+
+双方并行开发使用的具体调用方向、DTO、认证、幂等、租约和原子提交契约见 [tec01与itsm-workflow并行开发集成契约](tec01-integration-contract.md)。

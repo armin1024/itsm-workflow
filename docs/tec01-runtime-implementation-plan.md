@@ -187,10 +187,22 @@ itsm-workflow提供：
 GET  /internal/v1/runtime/catalog
 POST /internal/v1/runtime/workflows/validate
 POST /internal/v1/runtime/workflows/plan
-POST /internal/v1/compiler/workflow-drafts
 ```
 
 tec01保存Catalog响应的完整内容和摘要哈希。`plan`请求包含不可变workflow snapshot、ticketId和参数；返回安全计划、requiredRuntimeVersion和plan material hash。
+
+### Compiler任务领取
+
+tec01提供：
+
+```text
+POST /internal/v1/compiler/claims
+POST /internal/v1/compiler/claims/{leaseToken}/heartbeat
+POST /internal/v1/compiler/extractions/{extractionId}/complete
+POST /internal/v1/compiler/extractions/{extractionId}/fail
+```
+
+tec01创建extraction job并保存证据；Compiler长轮询领取，避免LLM请求占用同步API连接。完整字段以 [并行开发集成契约](tec01-integration-contract.md) 为准。
 
 ### Executor领取
 
@@ -200,6 +212,7 @@ tec01提供：
 POST /internal/v1/execution/claims
 POST /internal/v1/execution/claims/{leaseToken}/heartbeat
 GET  /internal/v1/execution/claims/{leaseToken}/commands
+POST /internal/v1/execution/claims/{leaseToken}/commands/{commandId}/ack
 POST /internal/v1/execution/claims/{leaseToken}/release
 ```
 
@@ -233,7 +246,8 @@ tec01先提交STARTED再返回`attemptId/revision`，Executor收到后才能调�
 ### STAGED上传
 
 ```text
-PUT  /internal/v1/runs/{runId}/staged-artifacts/{uploadId}
+POST /internal/v1/runs/{runId}/staged-artifacts
+PUT  /internal/v1/runs/{runId}/staged-artifacts/{uploadId}/content
 PUT  /internal/v1/runs/{runId}/staged-checkpoints/{checkpointId}
 POST /internal/v1/runs/{runId}/staged-checkpoints/{checkpointId}/writes
 ```
@@ -265,12 +279,7 @@ tec01单事务完成：校验租约/revision/幂等，转正STAGED对象，完�
 
 ### Interrupt
 
-```text
-POST /internal/v1/runs/{runId}/interrupts
-GET  /internal/v1/runs/{runId}/interrupts/{interruptId}/response
-```
-
-Executor创建interrupt后，通过attempt commit原子写入等待状态和checkpoint并释放租约。用户回复由tec01 MCP保存，运行重新QUEUED。
+Executor通过WAITING attempt commit原子提交interrupt、等待状态和checkpoint并释放租约。用户回复由tec01 MCP保存，运行重新QUEUED；新claim直接携带resumePayload，Runtime不单独轮询interrupt响应。
 
 ## Studio API与临时数据
 
@@ -334,6 +343,7 @@ flowchart LR
 - OpenAPI/JSON Schema和ADR。
 - tec01与itsm-workflow共同维护的错误码、状态机和幂等规则。
 - 契约测试Harness，双方CI均执行。
+- 以 [并行开发集成契约](tec01-integration-contract.md) 为初始基线生成OpenAPI和JSON Schema，不允许实现先于契约自行扩展字段语义。
 
 验收：Mock tec01完成claim → attempt start → staged upload → commit；revision冲突、租约过期和重复提交测试通过。未冻结契约前不删除现有数据库代码。
 
