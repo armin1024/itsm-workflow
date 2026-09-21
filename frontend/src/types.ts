@@ -48,10 +48,8 @@ export type WorkflowEdge = {
   id: string;
   source: string;
   target: string;
-  kind?: "NORMAL" | "CONDITION" | "REFINEMENT";
+  kind?: "NORMAL" | "CONDITION";
   label?: string;
   default?: boolean;
   condition?: Record<string, unknown>;
-  maxIterations?: number;
-  feedbackInputName?: string;
 };

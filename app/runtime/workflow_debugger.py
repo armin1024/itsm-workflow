@@ -32,7 +32,7 @@ def _resolve_inputs(node: WorkflowNode, run_inputs: dict[str, Any], outputs: dic
 
 
 def _next_edge(node: WorkflowNode, outgoing: list[WorkflowEdge], state: dict[str, Any]) -> WorkflowEdge | None:
-    normal = [edge for edge in outgoing if edge.kind != "REFINEMENT"]
+    normal = list(outgoing)
     if not normal:
         return None
     if node.type != "condition":

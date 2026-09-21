@@ -85,7 +85,7 @@ POST /api/v1/studio/node-debug-runs/{debugRunId}/interrupts/reply
 ```
 
 ```json
-{"response":{"action":"SELECT","candidateId":"candidate-1"}}
+{"response":{"action":"SELECT","candidateIds":["candidate-1"]}}
 ```
 
 ## 草稿编译
@@ -141,5 +141,18 @@ X-AOPS-Api-Key: <TEST模式且包含sql_read时需要>
 响应包含`nodeStatuses`和逐节点`nodeResults`。条件节点只执行命中分支，其余节点标记为`SKIPPED`。
 
 页面`/docs`使用本地React组件读取`/openapi.json`，不依赖Swagger CDN，适用于隔离内网。
+
+## tec01主动调度接口
+
+以下接口使用`Authorization: Bearer <RUNTIME_SERVICE_TOKEN>`：
+
+```text
+POST /internal/v1/compiler/jobs
+POST /internal/v1/executions/dispatch
+GET  /internal/v1/executions/{runId}/dispatches/{dispatchId}
+POST /internal/v1/executions/{runId}/commands
+```
+
+`dispatch`请求通过`X-AOPS-Api-Key`临时传入当前用户凭据；请求包含完整Workflow、节点状态和恢复所需的已提交节点输出。Executor返回202后后台执行，并通过`TEC01_BASE_URL`逐节点回调tec01。
 
 内部API契约详见[tec01集成契约](tec01-integration-contract.md)。本服务没有`/mcp`、`/auth/session`、知识检索或生产运行控制接口。

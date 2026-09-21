@@ -1,6 +1,6 @@
 # ITSM Workflow Runtime
 
-`0.8.1`开始，本仓库只承担拆分架构中的Python计算执行侧：
+`0.9.0`开始，本仓库按tec01主动调度架构承担Python计算执行侧：
 
 - Node Registry与版本化Schema。
 - Workflow DAG校验和计划渲染。
@@ -34,7 +34,7 @@ http://127.0.0.1:8089/studio
 |---|---:|---|
 | `itsm-workflow-api` | 启用 | Studio、Catalog、校验、计划、Compiler Preview和静态页面 |
 
-目标生产架构由tec01主动提交草稿提取任务、下发完整Workflow和暂停/取消命令；Executor逐节点返回状态和结果。tec01同时承担Hermes消息渠道、MCP和Web页面，所有入口共享同一运行事实。当前过渡代码中的旧claim客户端不作为最终接口依据。
+生产架构由tec01主动提交草稿提取任务、下发完整Workflow和暂停/取消命令；Executor逐节点返回状态和结果。tec01同时承担Hermes消息渠道、MCP和Web页面，所有入口共享同一运行事实。
 
 旧的`itsm-workflow-mcp`、`itsm-workflow-worker`和`itsm-workflow-migrate`已删除。升级安装时安装器会停用并移除这些旧unit。
 

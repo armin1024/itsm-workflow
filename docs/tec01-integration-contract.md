@@ -86,6 +86,9 @@ POST /internal/v1/executions/dispatch
   "outputRefs": {
     "sql-1": "artifact_sql_1"
   },
+  "nodeOutputs": {
+    "sql-1": {"status":0,"rowCount":2,"data":[]}
+  },
   "resumePayload": null
 }
 ```
@@ -200,7 +203,7 @@ CANCELLED
 UNKNOWN
 ```
 
-结果较大时先上传为Artifact，回调只传`artifactId`。
+第一版节点结果直接放在回调`result`中，沿用SQL读20 MiB上限；tec01收到后负责持久化。
 
 ### 运行结束和释放
 

@@ -19,7 +19,8 @@ with tempfile.TemporaryDirectory() as directory:
     assert not any(package_root.glob("itsm-workflow-mcp.service*"))
     assert not any(package_root.glob("itsm-workflow-worker.service*"))
     assert not any(package_root.glob("itsm-workflow-migrate.service*"))
-    for unit in ("api", "compiler"):
+    assert not any(package_root.glob("itsm-workflow-compiler.service*"))
+    for unit in ("api",):
         rendered = (package_root / f"itsm-workflow-{unit}.service.in").read_text().replace("__SERVICE_GROUP__", "itsmworkflow")
         assert "Group=itsmworkflow" in rendered
     with TestClient(app) as client:

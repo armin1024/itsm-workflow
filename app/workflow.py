@@ -49,12 +49,10 @@ class WorkflowEdge(BaseModel):
     id: str
     source: str
     target: str
-    kind: Literal["NORMAL", "CONDITION", "REFINEMENT"] = "NORMAL"
+    kind: Literal["NORMAL", "CONDITION"] = "NORMAL"
     label: str = ""
     condition: dict[str, Any] | None = None
     default: bool = False
-    maxIterations: int | None = Field(default=None, ge=1, le=5)
-    feedbackInputName: str | None = Field(default=None, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class WorkflowDefinition(BaseModel):
@@ -73,16 +71,12 @@ class WorkflowDefinition(BaseModel):
             raise ValueError("entryNodeId 不存在")
         node_map = {node.id: node for node in self.nodes}
         outgoing: dict[str, list[WorkflowEdge]] = {item: [] for item in ids}
-        refinement_edges: list[WorkflowEdge] = []
         indegree = {item: 0 for item in ids}
         for edge in self.edges:
             if edge.source not in node_map or edge.target not in node_map or edge.source == edge.target:
                 raise ValueError(f"边 {edge.id} 引用了无效节点")
-            if edge.kind == "REFINEMENT":
-                refinement_edges.append(edge)
-            else:
-                outgoing[edge.source].append(edge)
-                indegree[edge.target] += 1
+            outgoing[edge.source].append(edge)
+            indegree[edge.target] += 1
         for node in self.nodes:
             if node.type == "condition":
                 edges = outgoing[node.id]
@@ -131,19 +125,6 @@ class WorkflowDefinition(BaseModel):
             for item in node.inputs:
                 if item.source.kind == "NODE_OUTPUT" and not can_reach(str(item.source.nodeId), node.id):
                     raise ValueError(f"节点 {node.id} 只能绑定其前置节点输出")
-        for edge in refinement_edges:
-            source, target = node_map[edge.source], node_map[edge.target]
-            if source.type != "hitl_select" or target.type != "llm_extract":
-                raise ValueError(f"REFINEMENT边 {edge.id} 只能从hitl_select指向llm_extract")
-            if not can_reach(target.id, source.id):
-                raise ValueError(f"REFINEMENT边 {edge.id} 的目标必须是HITL上游节点")
-            if edge.maxIterations is None or not edge.feedbackInputName:
-                raise ValueError(f"REFINEMENT边 {edge.id} 缺少maxIterations或feedbackInputName")
-            feedback_input = next((item for item in target.inputs if item.source.kind == "RUN_INPUT" and item.source.key == edge.feedbackInputName), None)
-            if not feedback_input or feedback_input.required:
-                raise ValueError(f"REFINEMENT边 {edge.id} 要求目标LLM存在同名可选RUN_INPUT")
-            if sum(1 for item in refinement_edges if item.source == source.id) != 1:
-                raise ValueError(f"HITL节点 {source.id} 只能有一条REFINEMENT边")
         return self
 
     @classmethod

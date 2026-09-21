@@ -7,8 +7,10 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
+from jsonschema import Draft202012Validator
 
 from app.config import settings
+from app.runtime.executor import form_schema
 
 
 def _now() -> datetime:
@@ -140,17 +142,22 @@ class StudioStore:
             raise ValueError("调试运行当前没有可回复的HITL")
         action = str(response.get("action") or "")
         candidates = current["interrupt"].get("candidates") or []
-        if action == "SELECT":
-            selected = next((item for item in candidates if item.get("id") == response.get("candidateId")), None)
-            if not selected:
-                raise ValueError("candidateId不在候选集合中")
-            output, status = {"selected": selected}, "SUCCEEDED"
-        elif action == "MANUAL_VALUE":
-            output, status = {"selected": {"id": "manual", "value": response.get("value"), "reason": response.get("reason", "")}}, "SUCCEEDED"
+        if action == "SELECT" and current["interrupt"].get("kind") == "HITL_SELECT":
+            selected_ids = response.get("candidateIds") or ([response.get("candidateId")] if response.get("candidateId") else [])
+            selected = [item for item in candidates if item.get("candidateId") in selected_ids]
+            config = current["node"].get("config") or {}
+            minimum = int(config.get("minimumSelections") or 1); maximum = int(config.get("maximumSelections") or (1 if config.get("selectionMode") == "SINGLE" else 100))
+            if len(selected) != len(selected_ids) or not minimum <= len(selected) <= maximum: raise ValueError("candidateId不在候选集合中或选择数量无效")
+            output, status = {"selected": [{"candidateId": item["candidateId"], "values": item["values"]} for item in selected]}, "SUCCEEDED"
+        elif action == "SUBMIT" and current["interrupt"].get("kind") == "HITL_FORM":
+            values = response.get("values") or {}; fields = list((current["node"].get("config") or {}).get("fields") or [])
+            errors = sorted(Draft202012Validator(form_schema(fields)).iter_errors(values), key=lambda item: list(item.path))
+            if errors: raise ValueError(f"HITL表单输入无效：{errors[0].message}")
+            output, status = {"values": values}, "SUCCEEDED"
         elif action == "CANCEL":
             output, status = None, "CANCELLED"
         else:
-            raise ValueError("Studio单节点HITL回复只允许SELECT、MANUAL_VALUE或CANCEL")
+            raise ValueError("HITL回复操作无效")
         now = _now().isoformat()
         async with aiosqlite.connect(self.path) as database:
             await database.execute("UPDATE studio_node_debug_runs SET status=?, output_json=?, response_json=?, interrupt_json=NULL, updated_at=? WHERE id=?", (status, json.dumps(output, ensure_ascii=False) if output is not None else None, json.dumps(response, ensure_ascii=False), now, debug_id))

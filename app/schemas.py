@@ -68,3 +68,29 @@ class StudioWorkflowDebugRequest(BaseModel):
     inputs: dict[str, Any] = Field(default_factory=dict)
     mode: str = Field(default="TEST", pattern="^(TEST|SIMULATION|DRY_RUN)$")
     simulation: dict[str, Any] = Field(default_factory=dict)
+
+
+class CompilerJobRequest(BaseModel):
+    jobId: str = Field(min_length=1, max_length=160)
+    ticketId: int = Field(gt=0)
+    ticketInfo: dict[str, Any]
+    auditTimeline: list[dict[str, Any]]
+
+
+class ExecutionDispatchRequest(BaseModel):
+    dispatchId: str = Field(min_length=1, max_length=160)
+    runId: str = Field(min_length=1, max_length=160)
+    ticketId: int = Field(gt=0)
+    workflowContentHash: str = Field(min_length=1, max_length=128)
+    workflowSnapshot: dict[str, Any]
+    runInputs: dict[str, Any] = Field(default_factory=dict)
+    nodeStates: dict[str, str] = Field(default_factory=dict)
+    nodeOutputs: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    currentNodeId: str | None = None
+    selectedRoutes: dict[str, str] = Field(default_factory=dict)
+    resumePayload: dict[str, Any] | None = None
+
+
+class ExecutionCommandRequest(BaseModel):
+    commandId: str = Field(min_length=1, max_length=160)
+    type: str = Field(pattern="^(PAUSE|CANCEL)$")

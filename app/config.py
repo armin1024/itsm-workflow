@@ -35,11 +35,12 @@ class Settings(BaseSettings):
     studio_artifact_max_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=50 * 1024 * 1024)
     studio_database_max_bytes: int = Field(default=512 * 1024 * 1024, ge=10 * 1024 * 1024)
 
-    tec01_enabled: bool = False
     tec01_base_url: str = ""
     tec01_service_token: str = ""
     tec01_timeout_seconds: int = Field(default=20, ge=1, le=180)
-    tec01_claim_wait_seconds: int = Field(default=15, ge=1, le=20)
+    executor_id: str = "executor-01"
+    executor_max_active_runs: int = Field(default=32, ge=1, le=128)
+    executor_max_active_cli: int = Field(default=8, ge=1, le=64)
 
     node_timeout_seconds: int = Field(default=600, ge=1, le=7200)
     workflow_base_path: str = ""
@@ -66,8 +67,8 @@ class Settings(BaseSettings):
             raise RuntimeError("生产环境必须配置STUDIO_ADMIN_TOKEN")
         if not self.studio_database_path.is_absolute() and self.environment.lower() == "production":
             raise RuntimeError("生产环境必须使用绝对路径 STUDIO_DATABASE_PATH")
-        if self.tec01_enabled and (not self.tec01_base_url or not self.tec01_service_token):
-            raise RuntimeError("启用tec01 Worker时必须配置TEC01_BASE_URL和TEC01_SERVICE_TOKEN")
+        if self.environment.lower() == "production" and self.tec01_base_url and (not self.tec01_service_token or not self.runtime_service_token):
+            raise RuntimeError("连接tec01时必须配置TEC01_SERVICE_TOKEN和RUNTIME_SERVICE_TOKEN")
 
 
 @lru_cache

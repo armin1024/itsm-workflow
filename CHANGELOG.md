@@ -1,5 +1,14 @@
 # 版本说明
 
+## 0.9.0
+
+- tec01改为主动提交Compiler任务并主动下发完整Workflow。
+- Executor按tec01传入的节点状态继续执行，并逐节点回调状态和结果。
+- 增加暂停、取消、容量限制、重复调度保护和执行释放接口。
+- 删除旧Compiler Worker、claim客户端、LangGraph依赖和运行时LLM节点。
+- 增加SQL行映射型`hitl_select`和多字段`hitl_form`节点。
+- Studio画布、Node管理和真实调试同步支持新的HITL节点。
+
 ## 0.8.1
 
 - 增加`STUDIO_ADMIN_TOKEN`登录和HttpOnly管理会话。

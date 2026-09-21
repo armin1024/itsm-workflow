@@ -15,9 +15,11 @@ from app.cli import CliExecutionError, inspect_cli
 from app.config import settings
 from app.extraction import compile_ticket_evidence, compile_ticket_id
 from app.runtime import NODE_REGISTRY
+from app.runtime.compiler_service import compiler_service
 from app.runtime.planner import render_plan, validate_workflow
+from app.runtime.push_executor import push_executor
 from app.runtime.workflow_debugger import debug_workflow
-from app.schemas import CompilerPreviewRequest, CompilerTicketRequest, RuntimePlanRequest, RuntimeValidateRequest, StudioInterruptReply, StudioLoginRequest, StudioNodeDebugRequest, StudioNodeUpdate, StudioWorkflowDebugRequest, StudioWorkspaceCreate
+from app.schemas import CompilerJobRequest, CompilerPreviewRequest, CompilerTicketRequest, ExecutionCommandRequest, ExecutionDispatchRequest, RuntimePlanRequest, RuntimeValidateRequest, StudioInterruptReply, StudioLoginRequest, StudioNodeDebugRequest, StudioNodeUpdate, StudioWorkflowDebugRequest, StudioWorkspaceCreate
 from app.studio.auth import COOKIE_NAME, create_session, require_studio_admin, valid_session, verify_admin_token
 from app.studio.debug import reject_credentials, run_single_node
 from app.studio.store import studio_store
@@ -99,9 +101,10 @@ async def health() -> dict[str, Any]:
         "version": __version__,
         "environment": settings.environment,
         "role": "runtime-compiler-studio",
-        "authentication": "none",
+        "authentication": "studio-token",
         "cli": cli,
-        "tec01WorkerEnabled": settings.tec01_enabled,
+        "executorId": settings.executor_id,
+        "activeRuns": len(push_executor.active),
     }
 
 
@@ -257,6 +260,38 @@ async def runtime_workflow_plan(body: RuntimePlanRequest) -> dict[str, Any]:
 @app.post("/internal/v1/compiler/preview", dependencies=[Depends(runtime_service)])
 async def runtime_compiler_preview(body: CompilerPreviewRequest) -> dict[str, Any]:
     return await studio_compiler_preview(body)
+
+
+@app.post("/internal/v1/compiler/jobs", status_code=202, dependencies=[Depends(runtime_service)])
+async def runtime_compiler_job(body: CompilerJobRequest) -> dict[str, Any]:
+    created = compiler_service.submit(body.model_dump(mode="json"))
+    return {"jobId": body.jobId, "accepted": True, "duplicate": not created}
+
+
+@app.post("/internal/v1/executions/dispatch", status_code=202, dependencies=[Depends(runtime_service)])
+async def execution_dispatch(body: ExecutionDispatchRequest, x_aops_api_key: str | None = Header(default=None, alias="X-AOPS-Api-Key")) -> dict[str, Any]:
+    try:
+        if any(node.get("type") == "sql_read" for node in body.workflowSnapshot.get("nodes", [])) and not x_aops_api_key:
+            raise HTTPException(422, "包含SQL读节点时必须通过X-AOPS-Api-Key提供当前用户凭据")
+        accepted, _ = push_executor.dispatch(body.model_dump(mode="json"), x_aops_api_key)
+        return accepted
+    except RuntimeError as exc:
+        if str(exc) == "EXECUTOR_NO_CAPACITY":
+            raise HTTPException(429, "Executor当前无可用容量", headers={"Retry-After": "3"}) from exc
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/internal/v1/executions/{run_id}/dispatches/{dispatch_id}", dependencies=[Depends(runtime_service)])
+async def execution_dispatch_get(run_id: str, dispatch_id: str) -> dict[str, Any]:
+    value = push_executor.accepted.get(dispatch_id)
+    if not value or value.get("runId") != run_id: raise HTTPException(404, "调度记录不存在")
+    active = push_executor.active.get(run_id)
+    return {**value, "active": active is not None, "currentNodeId": active.current_node_id if active else None}
+
+
+@app.post("/internal/v1/executions/{run_id}/commands", dependencies=[Depends(runtime_service)])
+async def execution_command(run_id: str, body: ExecutionCommandRequest) -> dict[str, Any]:
+    return push_executor.command(run_id, body.commandId, body.type)
 
 
 static_dir = settings.static_dir.resolve()

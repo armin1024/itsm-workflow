@@ -10,8 +10,8 @@
 ## 安装
 
 ```bash
-tar -xzf itsm-workflow-0.8.1-linux-x86_64.tar.gz
-cd itsm-workflow-0.8.1-linux-x86_64
+tar -xzf itsm-workflow-0.9.0-linux-x86_64.tar.gz
+cd itsm-workflow-0.9.0-linux-x86_64
 sudo ./install.sh --no-start
 sudo vi /etc/itsm-workflow/service.env
 sudo systemctl start itsm-workflow-api
@@ -43,6 +43,11 @@ tec01通过内部API传递`ticketInfo`和`auditTimeline`，Compiler在后台处�
 
 ```dotenv
 RUNTIME_SERVICE_TOKEN=<tec01调用itsm-workflow的服务令牌>
+TEC01_BASE_URL=https://tec01.internal
+TEC01_SERVICE_TOKEN=<itsm-workflow回调tec01的服务令牌>
+EXECUTOR_ID=executor-01
+EXECUTOR_MAX_ACTIVE_RUNS=32
+EXECUTOR_MAX_ACTIVE_CLI=8
 ```
 
 ```bash

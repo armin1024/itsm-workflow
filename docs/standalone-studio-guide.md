@@ -47,18 +47,18 @@ SQL读必须填写当前工单ID和`AOPS_API_KEY`，并真实执行`aops-cli db 
 
 ## 4. 调试HITL
 
-选择`hitl_select`，在输入JSON中准备两个或更多候选：
+选择`hitl_select`，在输入JSON中准备前置SQL返回行：
 
 ```json
 {
-  "candidates": [
-    {"id":"a","label":"客户A","value":"C001"},
-    {"id":"b","label":"客户B","value":"C002"}
+  "rows": [
+    {"customer_id":"C001","customer_name":"王五"},
+    {"customer_id":"C002","customer_name":"王五"}
   ]
 }
 ```
 
-运行后状态变为`WAITING_INPUT`。在右侧选择候选、填写人工值或取消。回复和最终输出保存在TEST_ONLY SQLite中，便于刷新页面后检查。
+节点根据`displayFields`和`outputFields`生成候选。运行后状态变为`WAITING_INPUT`，可在右侧选择或取消。`hitl_form`则根据字段Schema展示一个或多个输入框。
 
 ## 5. 从工单提取草稿
 
@@ -87,7 +87,7 @@ Compiler只接受`operation=sql_exec_read`、结果明确成功且SQL安全只�
 
 ## 6. 流程编排和依赖
 
-画布支持SQL读、条件、LLM、HITL和结束节点。下游参数依赖前置输出时，在节点输入中设置：
+画布支持SQL读、条件、HITL选择、HITL表单和结束节点。下游参数依赖前置输出时，在节点输入中设置：
 
 ```json
 {
@@ -97,9 +97,7 @@ Compiler只接受`operation=sql_exec_read`、结果明确成功且SQL安全只�
 }
 ```
 
-HITL到上游LLM的第二条回边会转换为受控`REFINEMENT`，必须配置最大迭代次数和反馈输入名；普通控制边仍保持无环。
-
-点击“校验流程”后，服务检查节点Schema、只读SQL、可达性、条件默认边、输出绑定和REFINEMENT约束，并返回规范化DAG及内容哈希。
+点击“校验流程”后，服务检查节点Schema、只读SQL、可达性、条件默认边和输出绑定，并返回规范化DAG及内容哈希。运行时Workflow不允许循环。
 
 ## 7. 数据清理
 

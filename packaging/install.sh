@@ -20,8 +20,8 @@ case "$PREFIX" in /*) ;; *) echo "--prefix must be absolute" >&2; exit 2;; esac
 case "$PREFIX" in /|/opt|/usr) echo "Unsafe prefix" >&2; exit 2;; esac
 PACKAGE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
-systemctl stop itsm-workflow-compiler itsm-workflow-api 2>/dev/null || true
-for obsolete in itsm-workflow-mcp itsm-workflow-worker itsm-workflow-migrate; do
+systemctl stop itsm-workflow-api 2>/dev/null || true
+for obsolete in itsm-workflow-compiler itsm-workflow-mcp itsm-workflow-worker itsm-workflow-migrate; do
   systemctl disable --now "$obsolete" 2>/dev/null || true
   rm -f "/etc/systemd/system/$obsolete.service"
 done
@@ -51,10 +51,10 @@ if ! grep -q '^STUDIO_ADMIN_TOKEN=' "$CONFIG_DIR/service.env"; then
   printf '\nSTUDIO_ADMIN_TOKEN=replace-with-long-random-admin-token\nSTUDIO_SESSION_HOURS=8\nSTUDIO_COOKIE_SECURE=false\n' >> "$CONFIG_DIR/service.env"
   echo "Added Studio authentication settings; configure STUDIO_ADMIN_TOKEN before start." >&2
 fi
-for name in api compiler; do
+for name in api; do
   sed -e "s|__PREFIX__|$PREFIX|g" -e "s|__CONFIG_DIR__|$CONFIG_DIR|g" -e "s|__SERVICE_USER__|$SERVICE_USER|g" -e "s|__SERVICE_GROUP__|$SERVICE_GROUP|g" "$PACKAGE_DIR/itsm-workflow-$name.service.in" > "/etc/systemd/system/itsm-workflow-$name.service"
 done
-chmod 0644 /etc/systemd/system/itsm-workflow-api.service /etc/systemd/system/itsm-workflow-compiler.service
+chmod 0644 /etc/systemd/system/itsm-workflow-api.service
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$PREFIX" /var/lib/itsm-workflow
 systemctl daemon-reload
 systemctl enable itsm-workflow-api
@@ -66,6 +66,5 @@ if [ "$START" -eq 1 ]; then
   cli_path=$(awk -F= '/^AOPS_CLI_PATH=/{print $2}' "$CONFIG_DIR/service.env")
   [ -x "$cli_path" ] || { echo "AOPS_CLI_PATH is not executable: $cli_path" >&2; exit 1; }
   systemctl restart itsm-workflow-api
-  if grep -q '^TEC01_ENABLED=true' "$CONFIG_DIR/service.env"; then systemctl enable --now itsm-workflow-compiler; else systemctl disable --now itsm-workflow-compiler 2>/dev/null || true; fi
 fi
 echo "Installed ITSM Workflow Runtime Studio"
