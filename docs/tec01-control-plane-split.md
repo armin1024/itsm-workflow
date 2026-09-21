@@ -1,695 +1,231 @@
-# tec01控制面与itsm-workflow计算执行平台设计
+# tec01与itsm-workflow拆分设计
 
-## 最终结论
+## 结论
 
-取消Java执行器计划。目标架构固定为：
+采用简单的两层架构：
 
-- **tec01（Java控制面）**：AOPS Channel网关、Hermes MCP、生产身份与权限、知识和版本、计划与运行状态、中断、审批、事件、artifact、checkpoint及审计的唯一生产事实源。
-- **itsm-workflow（Python计算执行平台）**：Workflow草稿编译、节点定义与Schema、DAG校验、计划渲染、节点执行、`aops-cli`适配、LLM/HITL运行语义及节点扩展。
-- **itsm-workflow Studio**：独立开发调试页面，使用服务端轻量级SQLite保存有TTL的临时草稿和测试运行；浏览器`localStorage`只保存无敏感信息的UI偏好。
+- **tec01**：用户消息渠道、Hermes接入、MCP、知识管理、计划与运行状态、页面和生产数据。
+- **itsm-workflow**：Node Registry、草稿提取、Workflow校验、节点执行和`aops-cli`适配。
 
-这比同时维护两套Executor实现更简单，也能确保“草稿提取生成的节点”和“生产实际执行的节点”使用同一套定义、校验器和Handler。
+tec01主动把完整Workflow下发给Executor。Executor按tec01给出的节点状态继续执行，并把每个节点的开始、结果、失败或等待状态返回tec01。
 
-## 总体架构
+## 总体结构
 
 ```mermaid
 flowchart LR
-    User[AOPS Channel用户] --> Channel[tec01 Channel Gateway]
-    Channel <--> Hermes[Hermes Agent]
-    Hermes --> MCP[tec01 MCP Server]
-
-    MCP --> Control[tec01 Workflow Control]
-    MCP --> Knowledge[tec01 Knowledge/Retrieval]
-    Control --> Prod[(tec01生产存储)]
-    Knowledge --> Prod
-
-    Control -->|Compiler/Executor协议| Runtime[itsm-workflow Runtime]
-    Runtime --> Compiler[Workflow Compiler]
-    Runtime --> Registry[Node Registry]
-    Runtime --> Executor[Python Executor]
-    Executor --> CLI[aops-cli]
-    CLI --> AOPS[AOPS API/DB Read]
-
-    Developer[开发/管理员] --> Studio[itsm-workflow Studio]
-    Studio --> Registry
-    Studio --> Compiler
-    Studio --> Executor
-    Studio --> Temp[(临时SQLite)]
-    Studio -->|提交候选草稿| Knowledge
+    U[用户] <--> C[tec01消息渠道]
+    C <--> H[Hermes]
+    H --> M[tec01 MCP]
+    U --> W[tec01 Web页面]
+    M --> T[tec01运行控制]
+    W --> T
+    T --> D[(tec01生产数据)]
+    T -->|下发完整Workflow| E[itsm-workflow Executor]
+    E --> A[aops-cli / AOPS]
+    E -->|逐节点返回状态和结果| T
 ```
 
-## 服务职责
+用户无论从Hermes消息渠道还是tec01页面操作，最终都进入同一个tec01运行控制接口。Executor不直接向用户发送消息。
+
+## 职责
 
 ### tec01
 
-| 模块 | 职责 |
-|---|---|
-| Channel Gateway | AOPS用户消息接入、Channel会话和消息发送 |
-| MCP Server | 知识匹配、计划、确认、状态等待、补参、暂停、继续、取消、重试和结果读取 |
-| Identity & Policy | UID映射、管理员/操作员权限、知识可见范围和运行访问控制 |
-| Knowledge & Retrieval | 草稿、审核、发布、不可变版本、生命周期、全文/向量/rerank和导入导出 |
-| Workflow Control | `planHash`、运行状态机、revision CAS、幂等请求、审批和中断 |
-| Lease & Attempt Ledger | 任务领取、租约、心跳、attempt和UNKNOWN协调 |
-| Event & Notification | 事件sequence、MCP wait、Web SSE和Channel主动通知去重 |
-| Artifact & Checkpoint | 生产SQL结果、LLM结果、HITL选择、诊断和恢复checkpoint |
-| Credential Broker | 托管AOPS凭据并向有效Executor租约发放短期执行凭据 |
-| Production API/UI | 生产知识管理、运行中心、审核、查询和审计 |
+- 通过AOPS Channel与用户交互，并承载Hermes和MCP。
+- 保存知识、Workflow版本、执行计划和全部运行状态。
+- 向用户展示计划、节点进度、结果、失败原因和HITL表单。
+- 用户确认后主动向Executor下发完整Workflow。
+- 主动下发暂停和取消命令。
+- 保存每个节点返回的状态和结果。
 
 ### itsm-workflow
 
-| 模块 | 职责 |
-|---|---|
-| Workflow Compiler | 过滤工单操作、只读SQL分析、去重、参数化、LLM中文提炼和DAG草稿生成 |
-| Node Registry | 节点Manifest、配置/输入/输出Schema、风险级别、兼容版本和Handler注册 |
-| Plan Builder | 对不可变DAG进行二次校验，解析运行输入并生成安全计划材料 |
-| Executor | DAG调度、节点边界checkpoint、条件分支、输出绑定、interrupt和恢复 |
-| Node Handlers | `sql_read/condition/llm_extract/hitl_select/human_input/approval/end`及后续扩展 |
-| CLI Adapter | 参数数组调用`aops-cli`、SSE解析、超时、取消、输出限制和诊断脱敏 |
-| Remote State Client | 通过tec01协议提交attempt、事件、artifact、checkpoint和租约心跳 |
-| Studio API/UI | 节点浏览、DAG编排、草稿提取调试、模拟执行和测试结果查看 |
-| Temporary Store | 仅保存非生产临时草稿和测试运行，TTL到期自动清理 |
+- 管理节点类型、Schema和Handler。
+- 根据工单详情和操作记录生成Workflow草稿。
+- 校验Workflow和生成可展示计划。
+- 接收tec01下发的完整Workflow并执行。
+- 调用真实`aops-cli`，解析SSE结果。
+- 生成条件判断、HITL候选和HITL表单。
+- 每个节点结束后立即把状态和结果返回tec01。
 
-### 明确边界
+## 草稿提取
 
-- tec01拥有全部生产业务数据，itsm-workflow不建立生产业务数据库。
-- 节点定义和执行代码以itsm-workflow Node Registry为源；tec01保存发布版本所引用的Manifest快照。
-- itsm-workflow不能直接发布知识，只能向tec01提交候选草稿。
-- Studio临时测试状态不能被Hermes生产MCP匹配，也不能成为生产运行事实。
-- itsm-workflow的SQLite故障不能影响tec01中已经发布的知识或生产运行状态。
-
-## 生产计划和状态保存在哪里
-
-全部保存在tec01：
-
-| 实体 | 内容 |
-|---|---|
-| `workflow_versions` | 不可变DAG、Node Catalog版本、Manifest快照和内容哈希 |
-| `workflow_runs` | 计划快照、工单ID、输入、`planHash`、状态、revision |
-| `workflow_node_states` | 每个节点的状态、当前attempt和输出引用 |
-| `workflow_attempts` | STARTED、Handler版本、Executor、退出码、错误和完成时间 |
-| `workflow_interrupts` | HITL、补参和审批请求及用户响应 |
-| `workflow_events` | 单调sequence、进度、安全摘要和通知状态 |
-| `workflow_artifacts` | SQL输出、LLM候选、HITL选择和失败诊断 |
-| `workflow_checkpoints` | Python执行游标、pending writes和格式版本 |
-| `workflow_credentials` | 加密凭据或短期凭据引用 |
-
-计划创建时tec01保存完整快照，并初始化所有节点为`PENDING`。Executor只领取快照和短期租约。节点完成时，tec01必须在一个事务中提交：
-
-```text
-attempt完成
-节点状态变化
-artifact正式引用
-workflow event
-checkpoint引用
-run revision递增
-```
-
-Executor内存中的状态不是事实。只有tec01提交成功，Web、Hermes和Channel才能向用户展示该节点已经完成。
-
-## 节点定义由itsm-workflow管理
-
-### Node Manifest
-
-每个节点由itsm-workflow注册：
-
-```text
-type
-schemaVersion
-handlerVersion
-configSchema
-inputSchema
-outputSchema
-uiSchema
-riskLevel
-approvalPolicy
-idempotencyClass
-resumeSemantics
-resultSensitivity
-```
-
-示例：
-
-```json
-{
-  "type": "llm_extract",
-  "schemaVersion": 1,
-  "handlerVersion": "1.0.0",
-  "riskLevel": "LOW",
-  "idempotencyClass": "REPLAY_WITH_STORED_RESULT",
-  "resumeSemantics": "CHECK_RESULT_THEN_RETRY",
-  "configSchema": {},
-  "inputSchema": {},
-  "outputSchema": {},
-  "uiSchema": {}
-}
-```
-
-tec01定期同步Node Catalog并保存：
-
-```text
-catalogVersion
-nodeType
-schemaVersion
-handlerVersion范围
-Schema内容哈希
-状态：ACTIVE / DEPRECATED / DISABLED
-```
-
-知识发布时，tec01调用itsm-workflow校验完整DAG，并将使用的Catalog/Schema快照固化到工作流版本。生产执行时itsm-workflow确认自己仍支持该快照；不支持时运行不能入队。
-
-### 新节点扩展流程
+tec01取得工单详情和操作记录后，主动调用Compiler。Compiler不再自行拉取任务，也不主动访问AOPS。
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    participant D as 节点开发者
-    participant CI as 契约/故障测试
-    participant R as itsm-workflow Registry
-    participant T as tec01 Node Catalog
-    participant A as 管理员
+    participant U as 用户/管理员
+    participant T as tec01页面与数据
+    participant C as itsm-workflow Compiler
 
-    D->>CI: Handler + Manifest + Schema + UI Schema
-    CI->>CI: 成功/失败/取消/恢复/UNKNOWN测试
-    CI-->>R: 部署并注册节点版本
-    R->>T: 同步Catalog和Schema哈希
-    A->>T: 发布使用新节点的Workflow
-    T->>R: validate workflow
-    alt 版本兼容
-        R-->>T: validated + requiredRuntimeVersion
-        T->>T: 固化Manifest快照并发布
-    else 不兼容
-        R-->>T: 缺失能力或Schema错误
-        T-->>A: 阻止发布并展示原因
-    end
+    U->>T: 根据工单生成草稿
+    T->>T: 获取工单详情和操作记录
+    T->>C: 提交提取任务和工单数据
+    C-->>T: 正在过滤有效SQL
+    C-->>T: 正在参数化SQL
+    C-->>T: 正在生成并校验Workflow
+    C-->>T: 返回草稿或失败原因
+    T-->>U: 页面持续显示进度和最终草稿
 ```
 
-约束：
+提取进度由Compiler回调tec01。tec01保存进度，再通过页面SSE或Hermes消息展示。Compiler不直接连接浏览器。
 
-- 节点代码随itsm-workflow部署，禁止从数据库加载任意Python代码或Shell模板。
-- 兼容修改只能增加可选字段；破坏性修改必须增加`schemaVersion`。
-- `handlerVersion`升级不能静默改变已发布版本的输入输出语义。
-- 下线旧Handler前必须确认没有活跃或可重试运行引用它。
-- 高风险节点审批策略由平台强制，知识作者不能关闭。
-
-## Workflow草稿提取
-
-草稿提取由itsm-workflow Compiler执行，tec01负责证据获取、任务状态和草稿保存。
-
-### 职责分配
-
-| 环节 | 责任方 |
-|---|---|
-| 用户请求、权限、创建人和授权UID | tec01 |
-| 获取`ticketInfo`和`auditTimeline` | tec01 AOPS Gateway |
-| 过滤失败记录、SQL只读校验、去重与参数化 | itsm-workflow Compiler |
-| LLM结构化中文提炼和依赖识别 | Compiler通过受控Model Gateway |
-| DAG和Node Manifest校验 | Compiler第一次校验，tec01保存前再次调用Runtime校验 |
-| extraction job、DRAFT、生命周期 | tec01 |
-| 编辑、审核、发布和索引 | tec01 |
-
-### 草稿编译协议
-
-tec01先保存extraction job和证据，Compiler Worker使用租约领取，避免LLM长耗时占用同步HTTP请求：
+建议进度保持简单：
 
 ```text
-POST /internal/v1/compiler/claims
-POST /internal/v1/compiler/claims/{leaseToken}/heartbeat
-POST /internal/v1/compiler/extractions/{extractionId}/complete
-POST /internal/v1/compiler/extractions/{extractionId}/fail
+已接收
+正在过滤操作记录
+正在生成步骤和参数
+正在校验Workflow
+已完成 / 失败
 ```
 
-claim返回`ticketInfo`、`auditTimeline`、evidenceHash、targetCatalogDigest和promptVersion。Compiler完成后提交候选定义和诊断，不写数据库：
+## 生产执行
 
-```json
-{
-  "compilerVersion": "1.0.0",
-  "evidenceHash": "sha256...",
-  "name": "客户信息查询",
-  "summary": "根据工单条件查询客户信息",
-  "matchPhrases": ["客户信息查询"],
-  "negativePhrases": [],
-  "systemKeys": ["crm"],
-  "workflowDefinition": {},
-  "diagnostics": {
-    "auditOperationCount": 5,
-    "acceptedOperationCount": 2,
-    "ignoredOperations": []
-  }
-}
-```
+tec01下发：
 
-tec01保存`workflow_extraction_jobs`，相同`ticketId + evidenceHash + compilerVersion + promptVersion`使用幂等结果。LLM失败、没有有效操作或DAG不合法时只保存失败诊断，不生成兜底草稿。
+- 完整不可变Workflow。
+- 工单ID和运行参数。
+- 每个节点当前状态。
+- 已完成节点的结果引用。
+- 需要恢复的HITL输入。
 
-### 提取泳道图
+Executor返回`202 Accepted`后在后台执行，不占用tec01的HTTP请求。
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    participant U as 操作员
-    participant T as tec01
-    participant A as AOPS Gateway
-    participant C as Workflow Compiler
-    participant L as Model Gateway
-    participant S as tec01 Knowledge Store
-
-    U->>T: 从工单提取Workflow
-    T->>S: 创建QUEUED extraction job
-    T->>A: 获取ticketInfo和auditTimeline
-    A-->>T: 工单证据
-    C->>T: claim extraction job
-    T-->>C: 证据 + lease + targetCatalogVersion
-    C->>C: 过滤、只读校验、去重和参数化
-    alt 无有效操作
-        C-->>T: NO_VALID_OPERATIONS + diagnostics
-        T->>S: job FAILED
-    else 有效操作
-        C->>L: 受控Prompt + 结构化证据
-        L-->>C: 中文语义与依赖
-        C->>C: 生成并校验DAG
-        C->>T: complete DraftProposal + diagnostics
-        T->>C: 按当前Catalog二次validate
-        C-->>T: validated
-        T->>S: 单事务创建DRAFT、生命周期和完成job
-        T-->>U: 打开草稿编辑页面
-    end
-```
-
-## SQL、LLM和HITL扩展场景
-
-推荐DAG：
-
-```text
-sql_read → llm_extract → hitl_select → downstream_node
-```
-
-### `llm_extract`
-
-- 输入前置SQL artifact的受限行列投影。
-- 只引用批准的`modelProfile`和`promptTemplateId`，知识定义不能填写模型URL或凭据。
-- 使用JSON Schema强制输出`candidates[]`。
-- 保存输入哈希、模型版本、提示词版本和响应哈希。
-- 自然语言输出未经Schema校验不得传给下游。
-
-示例输出：
-
-```json
-{
-  "candidates": [
-    {"id":"candidate-1","label":"客户A / 0001","value":"0001","reason":"姓名和手机号一致"},
-    {"id":"candidate-2","label":"客户A / 0002","value":"0002","reason":"姓名一致"}
-  ]
-}
-```
-
-### `hitl_select`
-
-| 候选数量 | 行为 |
-|---:|---|
-| 0 | 根据`zeroCandidatePolicy`请求人工输入或失败 |
-| 1 | 自动选择并记录`AUTO_SELECTED_SINGLE`事件 |
-| 多个 | 在tec01创建OPEN interrupt，运行进入`WAITING_INPUT`并释放Executor租约 |
-
-用户通过Channel选择`candidateId`后，Hermes调用tec01 MCP。tec01保存interrupt response并重新入队；Executor恢复HITL checkpoint，提交：
-
-```json
-{
-  "selected": {
-    "id": "candidate-1",
-    "value": "0001"
-  }
-}
-```
-
-下游节点通过`/selected/value`读取已确认参数。
-
-HITL响应不仅支持选择：
-
-```text
-SELECT        选择候选
-REFINE        用户补充条件，重新执行声明的上游llm_extract节点
-MANUAL_VALUE  用户直接填写最终值并通过valueSchema校验
-CANCEL        取消本次交互或运行
-```
-
-`REFINE`使用Registry定义的受控迭代关系，不允许任意DAG回边。默认最多3轮，每轮创建新的LLM attempt和HITL interrupt，并在tec01保存feedback history。到达上限后只能选择、手工输入或取消。完整协议见 [统一Node Registry与节点扩展设计](node-registry-design.md)。
-
-### 运行泳道图
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant E as itsm-workflow Executor
-    participant T as tec01 Control
-    participant S as tec01 Artifact
-    participant L as Model Gateway
-    participant M as tec01 MCP
-    participant H as Hermes
-    participant U as AOPS用户
-
-    E->>T: SQL attempt STARTED
-    E->>E: aops-cli SQL读
-    E->>S: 保存多行结果
-    E->>T: SQL SUCCEEDED + checkpoint
-    E->>S: 读取受限投影
-    E->>L: llm_extract + responseSchema
-    L-->>E: candidates[]
-    E->>S: 保存LLM artifact
-    E->>T: LLM SUCCEEDED + checkpoint
-    alt 单候选
-        E->>T: HITL AUTO_SELECTED_SINGLE + checkpoint
-    else 多候选
-        E->>T: OPEN interrupt，WAITING_INPUT，释放租约
-        M-->>H: 返回候选选择请求
-        H-->>U: Channel展示候选
-        alt 用户SELECT
-            U-->>H: 选择candidateId
-            H->>M: workflow_interrupt_reply SELECT
-            M->>T: 保存响应并QUEUED
-            E->>T: 恢复HITL并提交selected + checkpoint
-        else 用户REFINE
-            U-->>H: 补充具体条件
-            H->>M: workflow_interrupt_reply REFINE
-            M->>T: 保存feedback，iteration+1并QUEUED
-            E->>L: 原始投影 + 旧候选 + feedback
-            L-->>E: 新candidates[]
-            E->>T: 新LLM attempt完成并创建新interrupt
-        else 用户MANUAL_VALUE
-            U-->>H: 输入明确值
-            H->>M: workflow_interrupt_reply MANUAL_VALUE
-            M->>T: valueSchema校验并QUEUED
-            E->>T: 恢复HITL并提交manual selected + checkpoint
-        else 用户CANCEL
-            U-->>H: 取消
-            H->>M: workflow_interrupt_reply CANCEL
-            M->>T: interaction和运行按策略取消
-        end
-    end
-    E->>S: 下游读取selected/value
-```
-
-恢复规则：
-
-- LLM使用`runId + nodeId + inputHash + promptVersion`作为幂等键。
-- 已保存模型响应时复用原结果，避免重试产生不同候选。
-- HITL interrupt和用户回复由tec01持久化，等待期间不占用Executor并发。
-- 重复回复返回原结果；过期revision或非法candidateId返回冲突。
-
-## 生产执行与控制
-
-### 计划、确认和执行
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant U as AOPS用户
-    participant H as Hermes
-    participant M as tec01 MCP
-    participant T as tec01 Control
-    participant R as itsm-workflow Runtime
-    participant E as Executor
-
-    H->>M: workflow_plan
-    M->>T: 读取不可变WorkflowVersion
-    T->>R: validate + render plan
-    R-->>T: 安全计划和requiredRuntimeVersion
-    T->>T: 保存WAITING_PLAN_APPROVAL快照
-    T-->>M: 完整计划和planHash
-    M-->>H: 展示计划
-    H-->>U: 请求确认
-    U-->>H: 明确确认
-    H->>M: workflow_run_approve
-    M->>T: CAS为QUEUED
-    E->>T: claim兼容运行
-    T-->>E: 快照、checkpoint和leaseToken
-```
-
-### 中断、继续、取消和重试
-
-```mermaid
-sequenceDiagram
-    autonumber
     participant U as 用户
-    participant H as Hermes
-    participant M as tec01 MCP
-    participant T as tec01 Control
-    participant E as Executor
+    participant T as tec01页面/Hermes
+    participant E as itsm-workflow Executor
+    participant A as AOPS
 
-    alt HITL/补参/审批
-        E->>T: OPEN interrupt并释放租约
-        M-->>H: WAITING_INPUT或WAITING_NODE_APPROVAL
-        H-->>U: 请求输入
-        U-->>H: 回复
-        H->>M: interrupt_reply
-        M->>T: 保存响应并QUEUED
-    else 暂停/继续
-        H->>M: pause
-        M->>T: PAUSE_REQUESTED
-        T-->>E: 控制命令
-        E->>T: 安全边界转PAUSED
-        H->>M: resume
-        M->>T: PAUSED→QUEUED
-    else 取消
-        H->>M: cancel
-        M->>T: CANCEL_REQUESTED
-        T-->>E: cancel命令
-        E->>E: 终止CLI进程组
-        E->>T: CANCELLED
-    else FAILED/UNKNOWN
-        T-->>M: 错误或未知结果
-        M-->>H: 禁止自动重试
-        U-->>H: 明确选择
-        H->>M: node_retry
-        M->>T: 新attempt或标记失败
-    end
+    U->>T: 确认执行计划
+    T->>E: 下发完整Workflow
+    E-->>T: 已接受
+    E->>T: 节点1开始
+    E->>A: 执行aops-cli
+    A-->>E: 返回结果
+    E->>T: 节点1完成和结果
+    T-->>U: 展示节点1完成
+    E->>T: 节点2开始
+    T-->>U: 展示当前进度
 ```
 
-## 独立Studio页面
+Executor每完成一个节点就回报，不等整个Workflow结束后再一次性返回。
 
-建议保留并独立部署itsm-workflow Studio，用于：
+## 执行一半后恢复
 
-- 查看Node Catalog和节点Schema。
-- 图形化编排临时DAG。
-- 输入`ticketInfo/auditTimeline`调试草稿提取。
-- 使用脱敏样例执行节点和条件分支。
-- 模拟LLM结构化输出和HITL候选选择。
-- 选择任意Registry节点进行单节点调试，手工输入或引用测试artifact，不启动整张DAG。
-- 查看临时事件、artifact、checkpoint和失败诊断。
-- 将审核后的候选草稿提交到tec01进入正式审核。
-
-Studio使用tec01 SSO或短期开发JWT。生产Channel用户不会访问Studio，Studio也不能直接将临时测试运行标为生产成功。“模拟LLM/HITL/SQL”表示从统一Node Registry加载正式节点Handler并注入Simulation Adapter，不是另外维护模拟节点定义。
-
-单节点调试只允许`TEST/SIMULATION/DRY_RUN`，每次创建独立`test_debug_run`和attempt并写临时SQLite。若需要分析生产失败节点，只能把经过授权和脱敏的artifact复制为临时快照；不能从Studio重试或修改tec01生产运行。正式重试仍通过tec01 MCP状态机完成。
-
-## 临时测试存储选择
-
-### 推荐：服务端SQLite为主，localStorage为辅
-
-| 方案 | 优点 | 缺点 | 使用建议 |
-|---|---|---|---|
-| 服务端SQLite | 支持多页面恢复、共享测试、事件查询、artifact和TTL清理；更接近生产状态模型 | 需要文件目录、迁移和清理任务 | **作为Studio临时测试主存储** |
-| `localStorage` | 实现简单、无需服务端表 | 容量小、同步阻塞、浏览器可读、不可共享、清理和审计弱 | 只保存UI偏好和无敏感未提交快照 |
-| IndexedDB | 容量和结构优于localStorage | 仍局限单浏览器，安全边界与localStorage相同 | 可选保存大型非敏感画布草稿，不作为运行状态源 |
-| 内存 | 无残留、速度快 | 刷新或重启即丢失 | 单次节点单元测试 |
-
-### SQLite保存内容
-
-建议表：
+完整Workflow可以已经执行了一部分。tec01再次下发时同时提供节点状态：
 
 ```text
-studio_workspaces
-studio_drafts
-studio_test_runs
-studio_test_node_states
-studio_test_events
-studio_test_artifacts
-studio_extraction_jobs
-studio_node_debug_runs
+SUCCEEDED  已完成，Executor跳过
+SKIPPED    未命中分支，Executor跳过
+READY      下一步可以执行
+PENDING    等待前置节点
+WAITING    等待用户输入
+FAILED     等待用户决定是否重试
 ```
 
-规则：
+Executor只从`READY`节点继续，不重复执行`SUCCEEDED`节点。完整计划可以缓存在Executor内存，但tec01保存的Workflow、节点状态和结果才是最终事实。
 
-- 明确标记`TEST_ONLY`，ID使用`test_`前缀。
-- 默认TTL 24小时，可配置到72小时；后台定期清理。
-- 设置单workspace、单artifact和数据库总容量限制。
-- 不保存AOPS API Key、Authorization Header或生产凭据。
-- 默认使用脱敏工单证据和模拟CLI；连接真实测试环境必须二次确认。
-- SQLite文件与tec01生产数据库没有同步或复制关系。
-- 多实例Studio不能共享单机SQLite；需要多实例时改用独立测试数据库，不影响Executor协议。
+## HITL节点
 
-### localStorage允许内容
+运行时不使用LLM节点。人工交互分成两种：
 
-```text
-画布缩放和面板布局
-最近选择的节点类型
-主题和每页数量
-未提交且确认不含敏感值的表单快照
+- `hitl_select`：从前置SQL结果中选择一条或多条。
+- `hitl_form`：用户手工填写一个或多个参数。
+
+### 从SQL结果选择
+
+SQL可以返回很多字段，但HITL只展示Workflow配置允许的字段：
+
+```json
+{
+  "sourceNodeId": "sql-1",
+  "sourcePath": "/data",
+  "idPath": "/customer_id",
+  "labelTemplate": "{{customer_name}} / {{customer_id}}",
+  "displayFields": ["customer_name", "customer_id", "status"],
+  "outputFields": ["customer_id", "account_id"]
+}
 ```
 
-禁止保存：
+用户看到姓名、编号和状态；选择后，下游只得到配置的`customer_id`和`account_id`。Agent提交`candidateId`，不能直接修改候选真实值。
 
-```text
-AOPS API Key或任何Token
-ticketInfo和auditTimeline原文
-SQL真实查询结果
-LLM输入输出中的客户数据
-生产runId对应的状态副本
-加密密钥或凭据引用
+候选很多时，tec01页面和MCP分页显示并支持关键词筛选。
+
+### 用户手工输入
+
+```json
+{
+  "type": "hitl_form",
+  "config": {
+    "title": "填写后续查询参数",
+    "fields": [
+      {"name":"customer_id","label":"客户编号","type":"string","required":true},
+      {"name":"limit","label":"返回条数","type":"integer","required":true,"minimum":1,"maximum":100}
+    ]
+  }
+}
 ```
 
-localStorage不是可信状态源；浏览器中的内容只能作为编辑便利，提交时必须由Studio API重新校验。
+用户可以在Hermes对话或tec01页面填写。两种入口使用同一个tec01接口，提交后重新下发Workflow继续执行。
 
-### Studio测试泳道图
+### HITL泳道图
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    participant D as 开发/管理员
-    participant UI as Studio页面
-    participant API as Studio API
-    participant DB as 临时SQLite
-    participant R as Compiler/Executor
-    participant T as tec01
+    participant E as Executor
+    participant T as tec01/Hermes消息渠道
+    participant U as 用户
 
-    D->>UI: 编排节点或输入脱敏工单证据
-    UI->>API: 保存临时workspace
-    API->>DB: TEST_ONLY + expiresAt
-    D->>UI: 运行提取/模拟执行
-    UI->>API: 创建test run
-    API->>R: compile或execute sandbox
-    R-->>API: 临时节点事件和artifact
-    API->>DB: 保存测试状态
-    API-->>UI: 展示画布、结果和诊断
-    D->>UI: 提交候选草稿
-    UI->>API: promote request
-    API->>R: 最终DAG校验
-    R-->>API: validated
-    API->>T: 创建正式DRAFT请求
-    T-->>UI: production knowledgeId
-    API->>DB: 标记PROMOTED，等待TTL清理
+    E->>T: 需要用户选择或输入
+    T-->>U: Hermes消息或页面展示表单
+    U->>T: 提交选择/参数
+    T->>E: 下发Workflow并携带用户输入
+    E->>T: HITL完成，继续下一节点
 ```
 
-“提交候选草稿”不是发布：tec01仍创建`DRAFT`，后续必须走正式编辑、审核和发布流程。
+等待用户期间Executor释放该运行，不占用执行槽位。
 
-## itsm-workflow内部模块结构
+## 暂停、取消和失败
 
-建议单仓库、共享Schema包、分进程运行：
+tec01主动向当前Executor发送命令：
 
-```text
-workflow-schema
-  node manifests
-  JSON schemas
-  compatibility rules
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant T as tec01页面/Hermes
+    participant E as Executor
 
-workflow-compiler
-  audit filtering
-  SQL parameterization
-  LLM draft extraction
-
-workflow-executor
-  DAG runtime
-  handlers
-  remote state client
-  aops-cli adapter
-
-workflow-studio
-  Studio API
-  React UI
-  temporary SQLite
+    U->>T: 暂停或取消
+    T->>E: 下发命令
+    E->>E: 到安全位置暂停或停止aops-cli
+    E->>T: 返回PAUSED/CANCELLED/UNKNOWN
+    T-->>U: 展示真实结果
 ```
 
-Compiler、Executor和Studio共享`workflow-schema`。Executor以`PRODUCTION`模式加载Handler；Studio调用同一Handler时只能使用`TEST/SIMULATION/DRY_RUN`模式或sandbox上下文。
+- 暂停：当前节点到达安全位置后保存状态并释放运行。
+- 取消：停止本地进程；如果请求可能已经到达AOPS，返回`UNKNOWN`。
+- 失败：返回失败原因并释放运行，等待用户决定是否重试。
+- 完成：返回最终结果并释放运行。
 
-统一Node Registry的Manifest、Handler、Port/Adapter、执行模式和版本兼容细节见 [统一Node Registry与节点扩展设计](node-registry-design.md)。
+## 页面设计
 
-## 内部接口
+tec01生产页面至少包含：
 
-### tec01调用itsm-workflow
+1. **执行计划**：节点卡片、数据库、SQL摘要、参数来源和风险说明。
+2. **执行进度**：当前节点、已完成节点、失败原因和每步结果入口。
+3. **HITL面板**：候选分页、字段表单、确认和取消。
+4. **运行控制**：暂停、继续、取消和失败重试。
+5. **消息同步**：Hermes中的状态与页面一致，用户可以在任一入口继续处理。
 
-```text
-GET  /internal/v1/runtime/catalog
-POST /internal/v1/runtime/workflows/validate
-POST /internal/v1/runtime/workflows/plan
-```
+itsm-workflow Studio只用于Node管理、草稿预览和真实调试，不承担生产运行页面。
 
-### itsm-workflow调用tec01
+## 当前规模的约束
 
-```text
-POST /internal/v1/execution/claims
-POST /internal/v1/execution/claims/{leaseToken}/heartbeat
-GET  /internal/v1/execution/claims/{leaseToken}/commands
-POST /internal/v1/execution/claims/{leaseToken}/commands/{commandId}/ack
-POST /internal/v1/runs/{runId}/attempts
-POST /internal/v1/runs/{runId}/staged-artifacts
-PUT  /internal/v1/runs/{runId}/staged-artifacts/{uploadId}/content
-PUT  /internal/v1/runs/{runId}/staged-checkpoints/{checkpointId}
-POST /internal/v1/runs/{runId}/staged-checkpoints/{checkpointId}/writes
-POST /internal/v1/runs/{runId}/attempts/{attemptId}/commit
-POST /internal/v1/compiler/claims
-POST /internal/v1/compiler/claims/{leaseToken}/heartbeat
-POST /internal/v1/compiler/extractions/{extractionId}/complete
-POST /internal/v1/compiler/extractions/{extractionId}/fail
-```
-
-artifact和checkpoint先以`STAGED`上传；interrupt作为WAITING attempt commit的一部分提交。只有`attempt commit`可以在tec01同一事务中转正它们，并同时完成attempt、节点状态、interrupt、事件和run revision。恢复只读取`COMMITTED` checkpoint，避免checkpoint和业务状态形成双事实源。
-
-所有生产写请求携带：
-
-```text
-leaseToken
-expectedRevision
-idempotencyKey
-runtimeVersion
-handlerVersion
-payloadHash
-```
-
-## 分阶段落地
-
-### 阶段1：tec01接管MCP和生产存储
-
-- 在tec01实现现有MCP工具和生产状态机。
-- Hermes只连接tec01 MCP。
-- 知识、版本、运行、事件、artifact和checkpoint迁入tec01。
-
-### 阶段2：拆分Workflow Schema与Compiler
-
-- 从当前服务提取Node Manifest和兼容校验包。
-- 将草稿提取改为无存储Compiler协议。
-- tec01保存extraction job和DRAFT。
-
-### 阶段3：Executor无数据库化
-
-- 接入tec01租约、attempt、artifact和Remote Checkpointer协议。
-- 新运行写tec01；旧运行排空并转只读。
-- 验证中断、继续、取消、重试和UNKNOWN语义。
-
-### 阶段4：Studio和临时SQLite
-
-- 保留独立编排与调试页面。
-- 实现Registry节点的单节点调试API、输入来源选择、独立attempt和诊断展示。
-- 临时数据明确`TEST_ONLY`并启用TTL和容量限制。
-- 建立“提交到tec01 DRAFT”流程，不允许直接发布。
-
-### 阶段5：扩展LLM/HITL节点
-
-- 实现`llm_extract`结构化输出、幂等和数据策略。
-- 实现`hitl_select`单候选自动选择、多候选持久化interrupt以及`SELECT/REFINE/MANUAL_VALUE/CANCEL`响应。
-- 实现最多1至5轮的受控LLM/HITL refinement loop和feedback history。
-- 通过Channel端到端验证长时间等待和恢复。
-
-## 验收标准
-
-- tec01是所有生产计划和运行状态的唯一事实源。
-- itsm-workflow删除生产数据库配置后，Compiler和Executor仍能完整工作。
-- 草稿提取、DAG校验和生产Executor引用同一Node Manifest版本。
-- SQL多行结果可以经过LLM结构化，并在多候选时通过Channel完成HITL选择。
-- 用户可以补充条件让LLM重新生成候选，直到选择、手工输入、取消或达到迭代上限。
-- 任意Registry节点都可以在Studio中单步调试，且不会改变tec01生产运行状态。
-- Hermes、Executor或Studio重启不会丢失tec01中的生产中断和运行状态。
-- SQLite删除或损坏只影响临时Studio测试，不影响生产知识和运行。
-- localStorage中搜索不到Token、工单证据、SQL结果或客户数据。
-- 新节点在契约、恢复和故障测试完成前不能进入生产Catalog。
-
-## 最终建议
-
-采用“**tec01生产控制面与唯一存储 + itsm-workflow统一计算执行平台**”。itsm-workflow同时管理Workflow Compiler、Node Registry和Python Executor，从而保证提取、定义和执行语义一致；tec01负责MCP、生产状态与数据治理。保留独立Studio页面，并使用带TTL的服务端SQLite作为临时测试主存储，localStorage只保存无敏感UI偏好。该方案比维护Java/Python双Executor更简单，也更适合持续增加LLM、HITL及其他节点类型。
+- 第一版只有一个Executor服务，最多处理几十个并发运行。
+- Executor设置最大运行数和最大`aops-cli`进程数，满载时返回“暂时无容量”，tec01稍后重试。
+- 使用`dispatchId`防止tec01重复下发同一运行。
+- 每个节点必须先回报tec01，再执行下一个节点。
+- AOPS API Key不放进Workflow；Executor按当前运行临时获取并只传给`aops-cli`。

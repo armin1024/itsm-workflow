@@ -1,24 +1,15 @@
 [project]
 name = "itsm-workflow"
-version = "0.6.3"
-description = "Observable and resumable AOPS production workflows"
+version = "0.8.1"
+description = "AOPS workflow runtime, compiler, node registry and standalone Studio"
 requires-python = ">=3.12"
 dependencies = [
   "aiosqlite>=0.20,<1",
-  "alembic>=1.14,<2",
-  "asyncpg==0.30.0",
-  "cryptography==44.0.3",
   "fastapi>=0.115,<1",
-  "greenlet==3.2.4",
   "httpx>=0.28,<1",
+  "jsonschema>=4.23,<5",
   "langgraph>=1.0,<2",
-  "langgraph-checkpoint-postgres>=3,<4",
-  "mcp>=2,<3",
-  "psycopg[binary,pool]>=3.2,<4",
   "pydantic-settings>=2.7,<3",
-  "pycryptodome>=3.21,<4",
-  "python-multipart>=0.0.20,<1",
-  "sqlalchemy>=2.0,<3",
   "sqlglot>=27,<30",
   "uvicorn[standard]>=0.34,<1",
 ]

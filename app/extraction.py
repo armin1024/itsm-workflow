@@ -3,18 +3,14 @@ from __future__ import annotations
 import base64
 import json
 import re
-import uuid
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlglot import exp, parse_one
 
 from app.cli import CliExecutionError, execute_json_command
 from app.config import settings
-from app.models import Knowledge, KnowledgeUser
-from app.knowledge import add_lifecycle
 from app.workflow import WorkflowDefinition, WorkflowEdge, WorkflowNode
 
 
@@ -229,18 +225,12 @@ def _apply_assessment(nodes: list[dict[str, Any]], assessed: dict[str, Any]) -> 
                     parameter["source"] = {"kind": "NODE_OUTPUT", "nodeId": source_id, "jsonPointer": pointer[:1000]}
 
 
-async def extract_ticket_draft(session: AsyncSession, *, ticket_id: int, uids: list[str], creator_uid: str, api_key: str) -> tuple[Knowledge, dict[str, Any]]:
-    try:
-        info = await execute_json_command(["event-center", "info", "--id", str(ticket_id)], api_key=api_key, timeout_seconds=30)
-        timeline = await execute_json_command(["event-center", "audit_timeline", "--id", str(ticket_id)], api_key=api_key, timeout_seconds=60)
-    except CliExecutionError as exc:
-        raise ValueError(f"AOPS_CLI_{exc.code}：{exc}") from exc
-    ticket = info.payload.get("data")
-    rows = timeline.payload.get("data")
+async def compile_ticket_evidence(ticket: dict[str, Any], rows: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Compile evidence into a storage-agnostic DraftProposal."""
     if not isinstance(ticket, dict):
-        raise ValueError("工单详情响应缺少 data 对象")
+        raise ValueError("ticketInfo必须是JSON对象")
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
-        raise ValueError("操作记录响应缺少 data 数组")
+        raise ValueError("auditTimeline必须是JSON对象数组")
     operations, ignored = extract_operations(rows)
     if not operations:
         raise ValueError("NO_VALID_OPERATIONS：没有成功且安全的 SQL 读操作")
@@ -268,13 +258,28 @@ async def extract_ticket_draft(session: AsyncSession, *, ticket_id: int, uids: l
     edges = [WorkflowEdge(id=f"edge-{index + 1}", source=node["id"], target=all_nodes[index + 1]["id"]) for index, node in enumerate(nodes)]
     definition = WorkflowDefinition(entryNodeId=nodes[0]["id"], nodes=[WorkflowNode.model_validate(node) for node in all_nodes], edges=edges)
     systems = [str(item.get("id") or item.get("name")) for item in ticket.get("system_list", []) if isinstance(item, dict) and (item.get("id") or item.get("name"))]
-    clean_uids = list(dict.fromkeys(value.strip() for value in uids if value.strip()))
-    record = Knowledge(id="knw_" + uuid.uuid4().hex, status="DRAFT", name=name, summary=summary, match_phrases=phrases, negative_phrases=negatives, system_keys=systems[:20], creator_uid=creator_uid, public=not clean_uids, source_type="TICKET_EXTRACTION", source_ticket_id=ticket_id, source_ticket_no=str(ticket.get("incident_id") or "").strip()[:120] or None, draft_definition=definition.model_dump(mode="json"))
-    session.add(record)
-    await session.flush()
-    add_lifecycle(session, record, "CREATED", creator_uid, "从工单证据生成知识草稿", source="TICKET_EXTRACTION")
-    for uid in clean_uids:
-        session.add(KnowledgeUser(knowledge_id=record.id, uid=uid))
-    await session.commit()
-    diagnostics = {"ticketId": ticket_id, "ticketNo": record.source_ticket_no, "auditOperationCount": len(rows), "acceptedOperationCount": len(nodes), "ignoredOperationCount": len(ignored), "ignoredOperations": ignored, "llmMode": "structured"}
-    return record, diagnostics
+    proposal = {"name": name, "summary": summary, "matchPhrases": phrases, "negativePhrases": negatives, "systemKeys": systems[:20], "workflowDefinition": definition.model_dump(mode="json")}
+    diagnostics = {"ticketNo": str(ticket.get("incident_id") or "").strip()[:120] or None, "auditOperationCount": len(rows), "acceptedOperationCount": len(nodes), "ignoredOperationCount": len(ignored), "ignoredOperations": ignored, "llmMode": "structured"}
+    return proposal, diagnostics
+
+
+async def fetch_ticket_evidence(ticket_id: int, api_key: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Fetch evidence for TEST_ONLY Studio compilation without persisting credentials."""
+    try:
+        info = await execute_json_command(["event-center", "info", "--id", str(ticket_id)], api_key=api_key, timeout_seconds=30)
+        timeline = await execute_json_command(["event-center", "audit_timeline", "--id", str(ticket_id)], api_key=api_key, timeout_seconds=60)
+    except CliExecutionError as exc:
+        raise ValueError(f"AOPS_CLI_{exc.code}：{exc}") from exc
+    ticket = info.payload.get("data")
+    rows = timeline.payload.get("data")
+    if not isinstance(ticket, dict):
+        raise ValueError("AOPS_CLI_INVALID_INFO：info响应data不是对象")
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ValueError("AOPS_CLI_INVALID_TIMELINE：audit_timeline响应data不是对象数组")
+    return ticket, rows
+
+
+async def compile_ticket_id(ticket_id: int, api_key: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    ticket, rows = await fetch_ticket_evidence(ticket_id, api_key)
+    proposal, diagnostics = await compile_ticket_evidence(ticket, rows)
+    return proposal, {"ticketId": ticket_id, **diagnostics}

@@ -1,79 +1,46 @@
-# 架构与恢复语义
+# 精简后架构
 
-各 systemd服务、外部组件职责及安装、鉴权、知识提取、执行、中断恢复、条件分支和跨环境迁移泳道图，见 [服务职责、总体架构与关键流程泳道图](services-and-swimlanes.md)。
+## 边界
 
-如需把MCP和全部生产存储迁移到tec01，并由itsm-workflow统一管理草稿编译、节点定义、Python执行器及独立Studio临时测试环境，见 [tec01控制面与itsm-workflow计算执行平台设计](tec01-control-plane-split.md)。
+```mermaid
+flowchart LR
+    U[开发或测试人员] --> S[独立Studio]
+    S --> R[Node Registry]
+    S --> C[Workflow Compiler]
+    S --> E[Node Executor]
+    E --> CLI[aops-cli]
+    CLI --> A[AOPS]
+    C --> L[内网LLM]
+    E --> L
+    S --> DB[(TEST_ONLY SQLite)]
 
-SQL读、条件、LLM、HITL等节点及其生产/测试/模拟模式统一由 [Node Registry与节点扩展设计](node-registry-design.md) 管理。
-
-架构拆分实施前的代码现状、技术风险和Go/No-Go条件见 [可行性评审](tec01-runtime-feasibility-review.md)；分阶段接口、迁移、测试和切换步骤见 [详细实施计划](tec01-runtime-implementation-plan.md)。
-
-Java与Python团队并行开发所需的调用方向、认证、接口、状态提交、错误和联调顺序见 [tec01与itsm-workflow并行开发集成契约](tec01-integration-contract.md)。
-
-## 编排模型
-
-流程画布保存节点位置、控制边和结构化配置，但不允许携带 Python代码或任意 shell命令。`sql_read`、`condition`、`human_input`、`approval`、`end` 均来自节点注册表；新增操作类型通过 Handler、配置 Schema、输入 Schema、输出 Schema和风险级别扩展，不修改调度核心。
-
-控制依赖和数据依赖分离：边决定节点何时可运行；`NODE_OUTPUT` 输入通过来源节点 ID和 JSON Pointer取值。发布校验会拒绝环、不可达节点、非法条件、无默认分支，以及引用非前置节点的数据绑定。
-
-`aops-cli db read` 的 stdout 是 SSE事件流。执行适配器以 `event:done` 和 `data:!ok` 判定成功，将 `title` 与每个 `message` 数组合并为对象行。例如标题 `user_id` 和消息 `000244` 会形成 `data[0].user_id`，后续节点可以使用 `/data/0/user_id` 绑定。
-
-## 组件
-
-```text
-Browser / REST client
-        │ AOPS identity + service token
-        ▼
-itsm-workflow-api ───── SSE ─────► run cards
-        │
-        ▼
-PostgreSQL
-  knowledge / lifecycle / immutable versions / runs / events
-  transfer provenance / transfer audits
-  encrypted credentials / encrypted artifacts
-  LangGraph encrypted checkpoints
-        ▲
-        │ lease + checkpoint
-itsm-workflow-worker
-        │ argv + minimal environment
-        ▼
-system aops-cli ─────► AOPS
+    U2[用户] <--> CH[tec01/Hermes消息渠道]
+    CH --> T[tec01控制面]
+    T -->|Catalog/Validate/Compile| API[Runtime API]
+    API --> C
+    T -->|主动下发完整Workflow| EX[Executor服务]
+    EX --> E
+    EX -->|逐节点返回状态和结果| T
 ```
 
-API之前已有独立无状态 MCP Adapter。Adapter只转换 MCP参数和 REST响应，不直接访问 checkpoint、不领取队列任务，也不执行 `aops-cli`。详细约定见 [MCP 与 Agent 接入指南](mcp-agent-integration.md)。
+itsm-workflow拥有节点定义、草稿编译、DAG校验、计划渲染、节点Handler和外部系统适配器。tec01拥有生产知识、MCP、权限、状态机、队列、Artifact、Checkpoint和审计。
 
-API和 Worker是独立 systemd进程。Worker通过 PostgreSQL领取 `QUEUED` 运行并维护租约；Worker重启后从 LangGraph checkpoint继续。
+## 保留模块
 
-## 外部操作边界
+| 模块 | 路径 | 职责 |
+|---|---|---|
+| Node Registry | `app/runtime/registry.py`、`builtin_nodes.py` | 节点Manifest、Schema、版本与能力目录 |
+| Node Executor | `app/runtime/executor.py` | 单节点统一执行入口，Studio和后续Remote Executor共用 |
+| Compiler | `app/extraction.py` | 审计过滤、SQL参数化、LLM中文提炼、DAG生成 |
+| Planner | `app/runtime/planner.py` | DAG归一化、校验、计划材料和内容哈希 |
+| CLI Adapter | `app/cli.py` | 安全argv执行、SSE解析、超时、限流和诊断脱敏 |
+| tec01 Adapter | `app/tec01_client.py` | 接收tec01调度、逐节点状态回写和控制命令 |
+| Studio | `app/studio`、`frontend` | TEST_ONLY编排和调试 |
 
-LangGraph能恢复图状态，但不能保证外部 CLI 调用 exactly-once。Worker在启动 CLI 前写入 `STARTED` attempt；如果租约过期时仍有 STARTED attempt，运行进入 `UNKNOWN`，不会自动重放。操作员必须明确选择重新执行或标记失败。
+## 已移除模块
 
-## 可观测与控制通道
+本仓库不再包含本地生产知识、全文/向量检索、MCP Server、AOPS生产用户登录与业务权限、生产运行中心、PostgreSQL模型、Alembic迁移、旧生产Worker、导入导出和生产Artifact存储。独立Studio仅使用`STUDIO_ADMIN_TOKEN`保护本地Node管理和调试页面。
 
-- Web页面通过持久化 SSE事件流展示节点开始、成功、失败、跳过、中断和恢复。
-- `Last-Event-ID` 用于断线续传，页面刷新不会丢失进度。
-- 暂停在节点安全边界生效；取消可以终止当前 CLI进程组，但不承诺撤销已经到达 AOPS 的请求。
-- Agent接入应使用短事件等待而非永久阻塞的 MCP调用，使用户指令能及时进入下一轮。
-- Web控制与 Agent控制使用相同 REST状态机，因此用户可在 Agent等待期间直接从执行详情页暂停或取消。
-- CLI失败会从 SSE错误事件、JSON错误字段或 stderr中提炼安全摘要；脱敏后的 stdout/stderr作为独立加密诊断 artifact保存，不进入普通列表或 MCP状态快照。
+SQLite仅保存临时workspace与调试输出，默认24小时清理；它不是tec01的副本，也不能承载生产恢复。
 
-## Checkpoint和敏感数据
-
-- 运行状态不包含明文 API Key，只保存 credential引用。
-- 节点结果单独 AES-GCM加密并通过 artifact引用进入图状态。
-- PostgreSQL checkpointer使用 `EncryptedSerializer`。
-- 启用 `LANGGRAPH_STRICT_MSGPACK=true`。
-- 完整运行输入、artifact和 checkpoint默认保留30天；审计元数据长期保留。
-
-## 知识生命周期与跨环境迁移
-
-- `knowledge`保存当前工作草稿和最近发布信息，`workflow_versions`保存不可变发布快照，`knowledge_lifecycle_events`保存创建、修改、提交、退回、发布、导入、路径替换和删除事件。
-- 原生迁移包只包含结构化知识定义和 DAG，不包含向量、凭据、运行结果或 checkpoint。
-- 导入始终创建待审核知识，不覆盖生产现有知识；规范化后的 `effectiveContentHash`用于重复检测，包内来源哈希只承担变更提示，不是数字签名。
-- 数据库路径在导出和导入预检中按完整字符串去重映射；修改已发布经验路径会退回待审核并生成生命周期和迁移审计。
-
-## 扩展节点
-
-节点注册表位于 `app/node_types.py`。增加操作类型时必须新增 Manifest和 Handler，实现输入输出 Schema、风险级别、校验、准备、执行、摘要和未知结果协调。数据库定义不能包含 Python代码或任意命令模板。
-
-通用节点、控制台模板、Capability安全边界和未来节点市场设计见 [通用节点与卡片扩展平台设计](node-extension-platform.md)。
+草稿提取由tec01主动提交工单数据，Compiler分阶段回调进度。生产执行由tec01主动下发完整Workflow；Executor根据tec01给出的节点状态继续执行，并逐节点返回状态和结果。tec01同时负责Web页面、Hermes消息渠道和MCP，三个入口共享同一运行状态。

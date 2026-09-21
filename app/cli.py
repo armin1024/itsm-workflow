@@ -88,6 +88,20 @@ class CliResult:
     metadata: CliMetadata
 
 
+def _cli_environment(api_key: str) -> dict[str, str]:
+    environment = {
+        "AOPS_BASE_URL": settings.aops_base_url,
+        "AOPS_API_KEY": api_key,
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+    }
+    for key in ("SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"):
+        if key in os.environ:
+            environment[key] = os.environ[key]
+    if settings.aops_ca_bundle:
+        environment["SSL_CERT_FILE"] = settings.aops_ca_bundle
+    return environment
+
+
 def parse_sql_read_output(stdout: bytes) -> dict:
     """Parse either the legacy JSON envelope or db-read's SSE transcript."""
     try:
@@ -234,14 +248,7 @@ async def execute_sql_read(
     cancel_requested: Callable[[], Awaitable[bool]] | None = None,
 ) -> CliResult:
     metadata = await inspect_cli()
-    environment = {
-        "AOPS_BASE_URL": settings.aops_base_url,
-        "AOPS_API_KEY": api_key,
-        "LANG": os.environ.get("LANG", "C.UTF-8"),
-    }
-    for key in ("SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"):
-        if key in os.environ:
-            environment[key] = os.environ[key]
+    environment = _cli_environment(api_key)
     process = await asyncio.create_subprocess_exec(
         str(settings.aops_cli_path), "db", "read",
         "--db", database_ref,
@@ -296,14 +303,7 @@ async def execute_json_command(arguments: list[str], *, api_key: str, timeout_se
     places the credential in argv or logs.
     """
     metadata = await inspect_cli()
-    environment = {
-        "AOPS_BASE_URL": settings.aops_base_url,
-        "AOPS_API_KEY": api_key,
-        "LANG": os.environ.get("LANG", "C.UTF-8"),
-    }
-    for key in ("SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"):
-        if key in os.environ:
-            environment[key] = os.environ[key]
+    environment = _cli_environment(api_key)
     process = await asyncio.create_subprocess_exec(
         str(settings.aops_cli_path), *arguments,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,

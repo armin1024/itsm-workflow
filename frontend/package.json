@@ -1,7 +1,7 @@
 {
   "name": "itsm-workflow-ui",
   "private": true,
-  "version": "0.6.3",
+  "version": "0.8.1",
   "type": "module",
   "scripts": {
     "dev": "vite",

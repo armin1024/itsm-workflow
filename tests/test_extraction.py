@@ -1,11 +1,9 @@
 import json
 
 import pytest
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.cli import CliMetadata, CliResult
-from app.db import Base
-from app.extraction import SEMANTIC_DESCRIPTIONS, _apply_assessment, _assess, extract_operations, extract_ticket_draft, parameterize_sql
+from app.extraction import SEMANTIC_DESCRIPTIONS, _apply_assessment, _assess, compile_ticket_id, extract_operations, parameterize_sql
 
 
 def audit_row(*, operation="sql_exec_read", result='{"r":true,"e":""}', command="SELECT id FROM users WHERE name='王五'"):
@@ -33,7 +31,7 @@ def test_parameter_values_are_removed_and_descriptions_are_generic():
 
 
 @pytest.mark.asyncio
-async def test_ticket_evidence_becomes_multi_step_draft(monkeypatch, tmp_path):
+async def test_ticket_evidence_becomes_multi_step_draft(monkeypatch):
     ticket = {"status": 0, "data": {"id": 100173, "incident_id": "INC-1", "event_title": "客户查询", "system_list": [{"id": "crm"}]}}
     timeline = {"status": 0, "data": [audit_row(command="SELECT id FROM users WHERE name='王五'"), {**audit_row(command="SELECT status FROM users WHERE id=7"), "id": 20, "created_at": 20}]}
 
@@ -46,17 +44,11 @@ async def test_ticket_evidence_becomes_multi_step_draft(monkeypatch, tmp_path):
 
     monkeypatch.setattr("app.extraction.execute_json_command", fake_cli)
     monkeypatch.setattr("app.extraction._assess", fake_assess)
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'extraction.db'}")
-    sessions = async_sessionmaker(engine, expire_on_commit=False)
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    async with sessions() as session:
-        record, diagnostics = await extract_ticket_draft(session, ticket_id=100173, uids=["S2"], creator_uid="S1", api_key="secret")
-        assert record.source_ticket_no == "INC-1" and record.source_type == "TICKET_EXTRACTION"
-        assert len(record.draft_definition["nodes"]) == 3
-        assert record.draft_definition["nodes"][1]["inputs"][0]["source"]["nodeId"] == "sql-1"
-        assert diagnostics["acceptedOperationCount"] == 2
-    await engine.dispose()
+    proposal, diagnostics = await compile_ticket_id(ticket_id=100173, api_key="secret")
+    assert diagnostics["ticketNo"] == "INC-1"
+    assert len(proposal["workflowDefinition"]["nodes"]) == 3
+    assert proposal["workflowDefinition"]["nodes"][1]["inputs"][0]["source"]["nodeId"] == "sql-1"
+    assert diagnostics["acceptedOperationCount"] == 2
 
 
 @pytest.mark.asyncio

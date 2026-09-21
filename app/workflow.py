@@ -7,7 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 from sqlglot import exp, parse, parse_one
 
-from app.node_types import NODE_TYPES
+from app.runtime import NODE_REGISTRY
 
 
 NODE_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,119}$")
@@ -35,6 +35,8 @@ class NodeInput(BaseModel):
 class WorkflowNode(BaseModel):
     id: str
     type: str = Field(min_length=1, max_length=80)
+    schemaVersion: int = Field(default=1, ge=1)
+    handlerVersion: str | None = Field(default=None, max_length=40)
     title: str = Field(min_length=1, max_length=200)
     config: dict[str, Any] = Field(default_factory=dict)
     inputs: list[NodeInput] = Field(default_factory=list)
@@ -47,13 +49,17 @@ class WorkflowEdge(BaseModel):
     id: str
     source: str
     target: str
+    kind: Literal["NORMAL", "CONDITION", "REFINEMENT"] = "NORMAL"
     label: str = ""
     condition: dict[str, Any] | None = None
     default: bool = False
+    maxIterations: int | None = Field(default=None, ge=1, le=5)
+    feedbackInputName: str | None = Field(default=None, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class WorkflowDefinition(BaseModel):
-    schemaVersion: Literal[1] = 1
+    schemaVersion: Literal[1, 2] = 1
+    catalogDigest: str | None = None
     entryNodeId: str
     nodes: list[WorkflowNode] = Field(min_length=1, max_length=500)
     edges: list[WorkflowEdge] = Field(default_factory=list, max_length=1000)
@@ -67,12 +73,16 @@ class WorkflowDefinition(BaseModel):
             raise ValueError("entryNodeId 不存在")
         node_map = {node.id: node for node in self.nodes}
         outgoing: dict[str, list[WorkflowEdge]] = {item: [] for item in ids}
+        refinement_edges: list[WorkflowEdge] = []
         indegree = {item: 0 for item in ids}
         for edge in self.edges:
             if edge.source not in node_map or edge.target not in node_map or edge.source == edge.target:
                 raise ValueError(f"边 {edge.id} 引用了无效节点")
-            outgoing[edge.source].append(edge)
-            indegree[edge.target] += 1
+            if edge.kind == "REFINEMENT":
+                refinement_edges.append(edge)
+            else:
+                outgoing[edge.source].append(edge)
+                indegree[edge.target] += 1
         for node in self.nodes:
             if node.type == "condition":
                 edges = outgoing[node.id]
@@ -96,7 +106,7 @@ class WorkflowDefinition(BaseModel):
                 if indegree[edge.target] == 0:
                     queue.append(edge.target)
         if len(visited) != len(ids):
-            raise ValueError("第一版工作流不允许循环")
+            raise ValueError("普通控制边不允许循环")
         reachable = {self.entryNodeId}
         queue = deque([self.entryNodeId])
         while queue:
@@ -121,6 +131,19 @@ class WorkflowDefinition(BaseModel):
             for item in node.inputs:
                 if item.source.kind == "NODE_OUTPUT" and not can_reach(str(item.source.nodeId), node.id):
                     raise ValueError(f"节点 {node.id} 只能绑定其前置节点输出")
+        for edge in refinement_edges:
+            source, target = node_map[edge.source], node_map[edge.target]
+            if source.type != "hitl_select" or target.type != "llm_extract":
+                raise ValueError(f"REFINEMENT边 {edge.id} 只能从hitl_select指向llm_extract")
+            if not can_reach(target.id, source.id):
+                raise ValueError(f"REFINEMENT边 {edge.id} 的目标必须是HITL上游节点")
+            if edge.maxIterations is None or not edge.feedbackInputName:
+                raise ValueError(f"REFINEMENT边 {edge.id} 缺少maxIterations或feedbackInputName")
+            feedback_input = next((item for item in target.inputs if item.source.kind == "RUN_INPUT" and item.source.key == edge.feedbackInputName), None)
+            if not feedback_input or feedback_input.required:
+                raise ValueError(f"REFINEMENT边 {edge.id} 要求目标LLM存在同名可选RUN_INPUT")
+            if sum(1 for item in refinement_edges if item.source == source.id) != 1:
+                raise ValueError(f"HITL节点 {source.id} 只能有一条REFINEMENT边")
         return self
 
     @classmethod
@@ -143,8 +166,7 @@ class WorkflowDefinition(BaseModel):
 
     @staticmethod
     def _validate_node(node: WorkflowNode, nodes: dict[str, WorkflowNode]) -> None:
-        if node.type not in NODE_TYPES:
-            raise ValueError(f"不支持的节点类型：{node.type}")
+        manifest = NODE_REGISTRY.get(node.type, node.schemaVersion).manifest
         names = {item.name for item in node.inputs}
         if len(names) != len(node.inputs):
             raise ValueError(f"节点 {node.id} 输入名称重复")
@@ -155,7 +177,7 @@ class WorkflowDefinition(BaseModel):
             if item.source.kind == "RUN_INPUT" and not item.source.key:
                 raise ValueError(f"节点 {node.id} 运行输入缺少 key")
         if node.type == "sql_read":
-            if any(item.type not in NODE_TYPES["sql_read"].input_types for item in node.inputs):
+            if any(item.type not in manifest.input_types for item in node.inputs):
                 raise ValueError(f"节点 {node.id} 包含 SQL 不支持的输入类型")
             database = str(node.config.get("databaseRef") or "").strip()
             sql = str(node.config.get("sqlTemplate") or "").strip()
@@ -170,6 +192,7 @@ class WorkflowDefinition(BaseModel):
             expression = parse_one(rendered, read="mysql")
             if not isinstance(expression, READ_ROOTS) or any(expression.find_all(FORBIDDEN_NODES)):
                 raise ValueError(f"节点 {node.id} 不是只读 SQL")
+        NODE_REGISTRY.validate_node(node.model_dump(mode="json"))
 
 
 def legacy_steps_to_workflow(steps: list[dict[str, Any]]) -> WorkflowDefinition:

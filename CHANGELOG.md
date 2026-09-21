@@ -1,5 +1,30 @@
 # 版本说明
 
+## 0.8.1
+
+- 增加`STUDIO_ADMIN_TOKEN`登录和HttpOnly管理会话。
+- 增加Node管理页面，支持已注册节点的Studio启停、名称、说明和调试默认值维护。
+- 草稿提取后直接渲染可编辑DAG，并支持选中节点单步调试和整流程调试。
+- 增加整流程测试执行器，解析运行输入、节点输出绑定、条件分支和逐节点状态。
+- `/docs`改为本地OpenAPI渲染页面，不再依赖公网Swagger资源。
+
+## 0.8.0
+
+- 将服务收敛为Node Registry、Compiler、Runtime Adapter、tec01 Client和独立Studio。
+- 删除本地生产知识/检索/运行数据库、MCP、登录权限、Alembic和旧Worker。
+- Studio无需管理员登录，提供节点单步调试、可视化DAG校验和工单草稿提取。
+- SQL读TEST模式按请求接收`X-AOPS-Api-Key`，凭据不落盘、不进入调试记录。
+- 安装包只保留API与可选Compiler Worker，并在升级时停用旧MCP/Worker/Migrate unit。
+
+## 0.7.0
+
+- 增加统一Node Registry、完整Manifest、节点Schema、执行模式和Catalog摘要。
+- 增加Runtime内部Catalog、Workflow校验、计划渲染和Compiler预览API。
+- 增加独立Studio页面、TEST_ONLY SQLite、TTL临时数据和单节点调试。
+- 增加`llm_extract`与`hitl_select`节点、结构化输出、候选选择和受控REFINEMENT回边。
+- 增加tec01版本化HTTP客户端和无存储Compiler Worker。
+- 保留Monolith兼容模式；未启用tec01时现有知识、MCP和Worker行为不变。
+
 ## 0.6.3
 
 - 发布流程显式排除 `._*`、`.DS_Store`、`.AppleDouble` 和 `__MACOSX`，关闭 tar xattr、ACL和 SELinux扩展元数据。
@@ -27,6 +52,6 @@
 ## 兼容性
 
 - 目标系统：Linux x86_64、glibc 2.17及以上、systemd。
-- 持久化：生产环境使用 PostgreSQL；SQLite仅用于测试。
+- 持久化：itsm-workflow只使用TEST_ONLY SQLite；生产数据和运行状态由tec01持有。
 - `aops-cli`由目标机提供，不包含在离线包中。
 - 旧 `aops-workflow-knowledge-export/schemaVersion=1` 知识包仍可导入；新包使用 `itsm-workflow-export/schemaVersion=2`。

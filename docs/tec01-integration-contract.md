@@ -1,189 +1,23 @@
-# tec01与itsm-workflow并行开发集成契约
+# tec01与itsm-workflow接口约定
 
-## 文档目的
+本文只保留双方第一版开发需要的接口。tec01主动调用Compiler和Executor；itsm-workflow通过回调返回进度、节点状态和结果。
 
-本文冻结tec01和itsm-workflow第一版内部交互边界，供Java与Python团队并行开发。正式实现应从本文生成OpenAPI、JSON Schema和双方契约测试；任何不兼容调整必须先更新契约版本。
+## 认证和通用规则
 
-## 服务边界
+- 双方请求使用内网HTTPS和固定服务Token。
+- 所有变更请求携带唯一`requestId`，重复请求返回原结果。
+- Workflow通过`workflowContentHash`校验，执行期间不能被修改。
+- AOPS API Key不出现在Workflow、日志、节点结果或回调中。
 
-| 能力 | 提供方 | 调用方 |
-|---|---|---|
-| AOPS Channel、Hermes MCP | tec01 | Hermes/用户 |
-| 生产知识、版本、运行和审计 | tec01 | MCP、管理端、itsm-workflow |
-| Node Catalog | itsm-workflow | tec01、Studio |
-| Workflow校验和计划渲染 | itsm-workflow | tec01 |
-| Workflow草稿编译 | itsm-workflow Compiler Worker | tec01任务队列 |
-| 生产节点执行 | itsm-workflow Executor Worker | tec01任务队列 |
-| 生产artifact/checkpoint | tec01 | itsm-workflow、tec01 MCP/UI |
-| Studio临时测试 | itsm-workflow Studio + SQLite | 开发/管理员 |
-| 模型Profile、凭据和调用审计 | tec01 Model Gateway | Compiler/Executor |
+## itsm-workflow提供的接口
 
-itsm-workflow不直连tec01数据库；tec01不加载Python Handler代码。
-
-## 网络与认证
-
-### 基础地址
-
-示例：
-
-```text
-tec01 internal:          https://tec01.internal
-itsm-workflow internal:  https://workflow-runtime.internal
-```
-
-双方内部接口只允许内网服务身份访问，不通过公网或用户浏览器直接调用。
-
-### 双重服务认证
-
-推荐同时使用：
-
-1. mTLS验证调用服务实例。
-2. OAuth2 client credentials或平台签发的短期服务JWT。
-
-JWT要求：
-
-```text
-iss     内网统一身份服务
-sub     tec01-service / itsm-workflow-runtime
-aud     对端服务标识
-scope   精确接口权限
-exp     不超过15分钟
-jti     唯一Token ID
-```
-
-tec01调用itsm-workflow时`aud=itsm-workflow-runtime`；itsm-workflow调用tec01时`aud=tec01-internal`。
-
-需要表达最终用户时，tec01额外签发短期委托JWT：
-
-```http
-X-TEC01-Actor-Token: <signed-jwt>
-```
-
-包含`sub=uid`、Channel会话、权限scope和过期时间。itsm-workflow只验证和记录actor，不使用该Token访问AOPS。
-
-### 公共Header
-
-```http
-Authorization: Bearer <service-token>
-X-Request-Id: <uuid>
-traceparent: <W3C trace context>
-Idempotency-Key: <mutation request stable key>
-Content-Type: application/json
-```
-
-规则：
-
-- `X-Request-Id`缺失时接收方生成并在响应返回。
-- 所有修改接口要求`Idempotency-Key`，最长120字符。
-- 时间统一使用UTC ISO 8601。
-- JSON字段统一camelCase。
-- ID视为不透明字符串，调用方不能解析前缀推导业务。
-
-## 公共响应和错误
-
-成功响应直接返回业务JSON。异步领取无任务返回`204 No Content`。
-
-错误统一为：
-
-```json
-{
-  "code": "STATE_REVISION_CONFLICT",
-  "message": "运行状态已变化，请重新读取",
-  "requestId": "req_xxx",
-  "retryable": true,
-  "details": {
-    "expectedRevision": 18,
-    "actualRevision": 19
-  }
-}
-```
-
-HTTP映射：
-
-| HTTP | 场景 |
-|---:|---|
-| 400 | JSON或业务参数无效 |
-| 401 | 服务Token或委托Token无效 |
-| 403 | scope、UID或资源权限不足 |
-| 404 | 资源不存在或为防越权隐藏 |
-| 409 | revision、幂等、租约或状态冲突 |
-| 413 | evidence、artifact或checkpoint超过限制 |
-| 422 | Workflow/Node Schema校验失败 |
-| 429 | 并发、配额或模型限流 |
-| 503 | 对端依赖不可用 |
-
-稳定错误码至少包括：
-
-```text
-INVALID_REQUEST
-UNAUTHORIZED_SERVICE
-ACTOR_FORBIDDEN
-RESOURCE_NOT_FOUND
-IDEMPOTENCY_CONFLICT
-STATE_REVISION_CONFLICT
-LEASE_EXPIRED
-NODE_TYPE_UNSUPPORTED
-NODE_VERSION_UNSUPPORTED
-WORKFLOW_VALIDATION_FAILED
-PAYLOAD_TOO_LARGE
-CREDENTIAL_UNAVAILABLE
-MODEL_UNAVAILABLE
-MODEL_OUTPUT_INVALID
-REFINEMENT_LIMIT_REACHED
-```
-
-## Catalog同步：itsm-workflow提供
-
-### 获取Catalog
+### Node Catalog
 
 ```http
 GET /internal/v1/runtime/catalog
-If-None-Match: "<catalogDigest>"
 ```
 
-响应：
-
-```json
-{
-  "protocolVersion": 1,
-  "runtimeVersion": "1.0.0",
-  "catalogVersion": "2026-09-20.1",
-  "catalogDigest": "sha256...",
-  "generatedAt": "2026-09-20T03:00:00Z",
-  "nodes": [
-    {
-      "type": "llm_extract",
-      "schemaVersion": 1,
-      "handlerVersion": "1.0.0",
-      "display": {
-        "name": "LLM结构化提取",
-        "category": "transform",
-        "description": "将前置结果提取为结构化候选"
-      },
-      "riskLevel": "LOW",
-      "approvalPolicy": "PLAN",
-      "idempotencyClass": "REPLAY_WITH_STORED_RESULT",
-      "resumeSemantics": "CHECK_RESULT_THEN_RETRY",
-      "supportedModes": ["PRODUCTION","TEST","SIMULATION","DRY_RUN"],
-      "configSchema": {},
-      "inputSchema": {},
-      "outputSchema": {},
-      "uiSchema": {},
-      "schemaDigest": "sha256..."
-    }
-  ]
-}
-```
-
-tec01行为：
-
-- 启动时拉取，之后每60秒带ETag检查。
-- `304 Not Modified`不更新缓存。
-- 新Catalog先验证Schema与摘要，再标记可用。
-- Runtime不可用时可读取已缓存Catalog展示旧版本，但禁止发布需要重新校验的新工作流。
-- Catalog变更不自动修改已发布WorkflowVersion。
-
-## Workflow校验和计划：itsm-workflow提供
+tec01在编辑和发布Workflow时读取节点类型、配置Schema、输入输出和Handler版本。
 
 ### 校验Workflow
 
@@ -194,731 +28,302 @@ POST /internal/v1/runtime/workflows/validate
 ```json
 {
   "workflowDefinition": {},
-  "targetCatalogDigest": "sha256...",
   "validationMode": "PUBLISH"
 }
 ```
 
-`validationMode`：`DRAFT/PUBLISH/EXECUTE/TEST`。
+返回规范化Workflow、Catalog摘要和内容哈希。
 
-响应：
-
-```json
-{
-  "valid": true,
-  "normalizedDefinition": {},
-  "catalogDigest": "sha256...",
-  "workflowContentHash": "sha256...",
-  "requiredRuntimeVersion": ">=1.0.0,<2.0.0",
-  "warnings": []
-}
-```
-
-错误`422 WORKFLOW_VALIDATION_FAILED`返回字段路径、节点ID和可读原因。
-
-### 渲染计划
+### 生成执行计划
 
 ```http
 POST /internal/v1/runtime/workflows/plan
 ```
 
-```json
-{
-  "workflowVersionId": "wfv_xxx",
-  "workflowContentHash": "sha256...",
-  "workflowSnapshot": {},
-  "ticketId": 100173,
-  "parameters": {"customerName":"王五"},
-  "actorUid": "S000639"
-}
-```
+返回节点顺序、参数来源、数据库、SQL摘要和需要用户确认的风险信息。tec01保存计划并交给Hermes或Web页面展示。
 
-响应：
-
-```json
-{
-  "valid": true,
-  "renderedPlan": {
-    "nodes": [],
-    "edges": [],
-    "riskSummary": [],
-    "requiredInputs": []
-  },
-  "planMaterialHash": "sha256...",
-  "catalogDigest": "sha256...",
-  "runtimeVersion": "1.0.0"
-}
-```
-
-最终`planHash`由tec01计算：
-
-```text
-SHA-256 RFC8785-JCS(
-  workflowVersionId,
-  workflowContentHash,
-  ticketId,
-  normalized parameters,
-  planMaterialHash
-)
-```
-
-tec01保存上述材料并创建`WAITING_PLAN_APPROVAL`，批准时必须回传相同planHash。
-
-## 草稿编译任务：tec01提供队列，Compiler领取
-
-LLM分析可能耗时，第一版不使用长时间同步`POST /compiler/workflow-drafts`。tec01保存extraction job，Compiler Worker使用租约领取。
-
-### 领取编译任务
+### 提交草稿提取任务
 
 ```http
-POST /internal/v1/compiler/claims
+POST /internal/v1/compiler/jobs
 ```
 
 ```json
 {
-  "compilerId": "compiler-t1361-01",
-  "compilerVersion": "1.0.0",
-  "supportedCatalogDigests": ["sha256..."],
-  "waitSeconds": 15
-}
-```
-
-无任务返回204；有任务返回：
-
-```json
-{
-  "extractionId": "ext_xxx",
-  "leaseToken": "opaque",
-  "leaseExpiresAt": "2026-09-20T03:01:00Z",
+  "jobId": "extract_xxx",
   "ticketId": 100173,
-  "creatorUid": "S000639",
-  "uids": ["S000123"],
   "ticketInfo": {},
-  "auditTimeline": [],
-  "evidenceHash": "sha256...",
-  "targetCatalogDigest": "sha256...",
-  "promptVersion": "draft-extract-v3",
-  "locale": "zh-CN"
-}
-```
-
-限制：`ticketInfo + auditTimeline` JSON编码后最大5 MiB，超限由tec01预处理或拒绝。
-
-### 编译心跳
-
-```http
-POST /internal/v1/compiler/claims/{leaseToken}/heartbeat
-```
-
-返回续租时间和`cancelRequested`。默认租约60秒，每20秒心跳。
-
-### 完成编译
-
-```http
-POST /internal/v1/compiler/extractions/{extractionId}/complete
-```
-
-```json
-{
-  "leaseToken": "opaque",
-  "idempotencyKey": "extraction:ext_xxx:complete",
-  "compilerVersion": "1.0.0",
-  "evidenceHash": "sha256...",
-  "catalogDigest": "sha256...",
-  "proposal": {
-    "name": "客户信息查询",
-    "summary": "根据工单条件查询客户信息",
-    "matchPhrases": ["客户信息查询"],
-    "negativePhrases": [],
-    "systemKeys": ["crm"],
-    "workflowDefinition": {}
-  },
-  "diagnostics": {
-    "auditOperationCount": 5,
-    "acceptedOperationCount": 2,
-    "ignoredOperations": []
-  }
-}
-```
-
-tec01校验租约、evidenceHash和Catalog，创建DRAFT及生命周期并完成job。失败接口：
-
-```http
-POST /internal/v1/compiler/extractions/{extractionId}/fail
-```
-
-只接受稳定错误码和安全摘要，不接受完整LLM响应或敏感证据。
-
-## Executor注册与任务领取：tec01提供
-
-### 注册Executor
-
-```http
-POST /internal/v1/executors
-```
-
-```json
-{
-  "executorId": "runtime-t1361-01",
-  "runtimeVersion": "1.0.0",
-  "protocolVersion": 1,
-  "maxConcurrency": 2,
-  "supportedCatalogDigests": ["sha256..."],
-  "credentialEncryptionJwk": {
-    "kty": "RSA",
-    "kid": "runtime-t1361-01-20260920",
-    "alg": "RSA-OAEP-256",
-    "use": "enc",
-    "n": "...",
-    "e": "AQAB"
-  }
-}
-```
-
-tec01返回注册ID和心跳策略。JWK仅用于加密短期凭据，私钥只存在Executor内存或受保护本地密钥库。
-
-### 领取运行
-
-```http
-POST /internal/v1/execution/claims
-```
-
-```json
-{
-  "executorId": "runtime-t1361-01",
-  "runtimeVersion": "1.0.0",
-  "availableSlots": 1,
-  "waitSeconds": 15
+  "auditTimeline": []
 }
 ```
 
 响应：
 
+```http
+202 Accepted
+```
+
+Compiler在后台处理，并通过tec01回调接口报告进度和最终结果。
+
+### 下发完整Workflow
+
+```http
+POST /internal/v1/executions/dispatch
+```
+
 ```json
 {
+  "dispatchId": "dispatch_xxx",
   "runId": "run_xxx",
-  "leaseToken": "opaque",
-  "leaseExpiresAt": "2026-09-20T03:01:00Z",
-  "revision": 18,
-  "workflowVersionId": "wfv_xxx",
+  "ticketId": 100173,
   "workflowContentHash": "sha256...",
-  "catalogDigest": "sha256...",
   "workflowSnapshot": {},
   "runInputs": {},
-  "nodeStatuses": {},
-  "outputRefs": {},
-  "checkpoint": {
-    "checkpointId": "cp_xxx",
-    "checkpointFormatVersion": 1,
-    "runtimeVersion": "1.0.0",
-    "contentBase64": "..."
+  "nodeStates": {
+    "sql-1": "SUCCEEDED",
+    "sql-2": "READY"
+  },
+  "outputRefs": {
+    "sql-1": "artifact_sql_1"
   },
   "resumePayload": null
 }
 ```
 
-只分配Runtime兼容的运行。无任务返回204。
+Executor返回：
 
-### 运行心跳与控制命令
+```json
+{
+  "dispatchId": "dispatch_xxx",
+  "accepted": true,
+  "executorId": "executor-01"
+}
+```
+
+响应只表示已经接受。真实进度以节点回调为准。
+
+容量不足时返回：
 
 ```http
-POST /internal/v1/execution/claims/{leaseToken}/heartbeat
+429 Too Many Requests
+Retry-After: 3
+```
+
+tec01保持运行排队并稍后重试。
+
+### 暂停和取消
+
+```http
+POST /internal/v1/executions/{runId}/commands
+```
+
+暂停：
+
+```json
+{"commandId":"cmd_xxx","type":"PAUSE"}
+```
+
+取消：
+
+```json
+{"commandId":"cmd_xxx","type":"CANCEL"}
+```
+
+Executor先返回已接收，再在安全处理完成后通过运行回调返回`PAUSED`、`CANCELLED`或`UNKNOWN`。
+
+## tec01提供的回调接口
+
+### 提取进度
+
+```http
+POST /internal/v1/compiler/jobs/{jobId}/progress
 ```
 
 ```json
 {
-  "executorId": "runtime-t1361-01",
-  "runId": "run_xxx",
-  "observedRevision": 18,
-  "activeAttemptId": "att_xxx"
+  "stage": "FILTERING_OPERATIONS",
+  "message": "正在过滤有效SQL",
+  "current": 3,
+  "total": 8
 }
 ```
 
-响应：
-
-```json
-{
-  "leaseExpiresAt": "2026-09-20T03:01:20Z",
-  "revision": 19,
-  "commands": [
-    {"commandId":"cmd_xxx","type":"CANCEL","createdAt":"2026-09-20T03:00:20Z"}
-  ]
-}
-```
-
-支持命令：`PAUSE_AT_SAFE_POINT/CANCEL/CREDENTIAL_REVOKED`。命令确认：
-
-```http
-POST /internal/v1/execution/claims/{leaseToken}/commands/{commandId}/ack
-```
-
-释放租约：
-
-```http
-POST /internal/v1/execution/claims/{leaseToken}/release
-```
-
-## Attempt与原子状态提交：tec01提供
-
-### 创建STARTED attempt
-
-```http
-POST /internal/v1/runs/{runId}/attempts
-```
-
-```json
-{
-  "leaseToken": "opaque",
-  "expectedRevision": 18,
-  "idempotencyKey": "run_xxx:sql-read:1",
-  "nodeId": "sql-read",
-  "nodeType": "sql_read",
-  "schemaVersion": 1,
-  "handlerVersion": "1.0.0",
-  "commandSummary": "db read on crm-read"
-}
-```
-
-响应`attemptId/revision/startedAt`。该响应成功后Executor才能调用外部系统。
-
-### 上传STAGED artifact
-
-创建元数据：
-
-```http
-POST /internal/v1/runs/{runId}/staged-artifacts
-```
-
-```json
-{
-  "leaseToken": "opaque",
-  "attemptId": "att_xxx",
-  "artifactType": "NODE_RESULT",
-  "sensitivity": "BUSINESS_DATA",
-  "contentType": "application/json",
-  "contentLength": 10240,
-  "contentSha256": "sha256...",
-  "expiresAt": "2026-10-20T03:00:00Z"
-}
-```
-
-返回`uploadId`。上传内容：
-
-```http
-PUT /internal/v1/runs/{runId}/staged-artifacts/{uploadId}/content
-Content-Type: application/octet-stream
-X-Content-SHA256: <sha256>
-X-Lease-Token: <leaseToken>
-```
-
-第一版单artifact最大20 MiB；以后切对象存储时保持元数据和commit协议不变，只把上传响应扩展为presigned URL。
-
-### 上传STAGED checkpoint
-
-```http
-PUT /internal/v1/runs/{runId}/staged-checkpoints/{checkpointId}
-```
-
-```json
-{
-  "leaseToken": "opaque",
-  "attemptId": "att_xxx",
-  "runtimeVersion": "1.0.0",
-  "checkpointFormatVersion": 1,
-  "checkpointNamespace": "",
-  "parentCheckpointId": "cp_parent",
-  "contentBase64": "...",
-  "contentSha256": "sha256...",
-  "pendingWrites": []
-}
-```
-
-只有COMMITTED checkpoint可通过claim恢复。
-
-LangGraph pending writes追加接口：
-
-```http
-POST /internal/v1/runs/{runId}/staged-checkpoints/{checkpointId}/writes
-```
-
-要求相同leaseToken、attemptId和checkpointFormatVersion；以`taskId + writeIndex`幂等。
-
-### 原子commit
-
-```http
-POST /internal/v1/runs/{runId}/attempts/{attemptId}/commit
-```
-
-```json
-{
-  "leaseToken": "opaque",
-  "expectedRevision": 19,
-  "idempotencyKey": "attempt:att_xxx:commit",
-  "requestHash": "sha256...",
-  "attemptStatus": "SUCCEEDED",
-  "nodeTransition": {
-    "nodeId": "sql-read",
-    "from": "RUNNING",
-    "to": "SUCCEEDED"
-  },
-  "artifactUploads": [
-    {"uploadId":"upl_xxx","role":"NODE_RESULT","contentSha256":"sha256..."}
-  ],
-  "checkpointId": "cp_xxx",
-  "outputRef": {"nodeId":"sql-read","artifactUploadId":"upl_xxx"},
-  "event": {
-    "type": "NODE_SUCCEEDED",
-    "safeSummary": "查询返回2行"
-  },
-  "runTransition": null,
-  "interrupt": null
-}
-```
-
-tec01在一个事务中验证并提交全部状态。`attemptStatus`也支持`FAILED/CANCELLED/UNKNOWN/WAITING`。WAITING时必须带interrupt，runTransition为对应等待状态。
-
-### 长节点进度事件
-
-```http
-POST /internal/v1/runs/{runId}/attempts/{attemptId}/events
-```
-
-只允许安全摘要和数值进度，不改变状态；要求幂等键，tec01分配事件sequence。
-
-## Artifact读取与凭据：tec01提供
-
-下游节点读取前置结果：
-
-```http
-GET /internal/v1/runs/{runId}/artifacts/{artifactId}
-X-Lease-Token: <leaseToken>
-```
-
-tec01验证当前租约、运行和节点依赖后返回内容。支持HTTP Range作为后续扩展，第一版完整返回且不超过20 MiB。
-
-领取执行凭据：
-
-```http
-POST /internal/v1/execution/claims/{leaseToken}/credentials
-```
-
-```json
-{
-  "runId": "run_xxx",
-  "attemptId": "att_xxx",
-  "credentialType": "AOPS_API_KEY",
-  "executorId": "runtime-t1361-01"
-}
-```
-
-返回JWE compact serialization，使用注册Executor的RSA公钥，算法固定`RSA-OAEP-256 + A256GCM`，包含`expiresAt`和`oneTime=true`。Executor只在内存解密，不写checkpoint、日志或artifact。
-
-## Model Gateway：tec01提供
-
-```http
-POST /internal/v1/model/invoke
-```
-
-```json
-{
-  "idempotencyKey": "run:node:iteration:inputHash",
-  "modelProfileId": "internal-structured-medium",
-  "promptTemplateId": "extract-customer-v3",
-  "promptTemplateVersion": 3,
-  "inputs": {},
-  "responseSchema": {},
-  "dataPolicy": "CUSTOMER_QUERY_INTERNAL",
-  "timeoutSeconds": 90
-}
-```
-
-tec01管理模型URL、凭据、限流和审计。响应包含结构化output、modelVersion、promptVersion、inputHash和responseHash。相同幂等键返回原响应。
-
-## HITL与恢复
-
-Executor在attempt commit中携带interrupt：
-
-```json
-{
-  "kind": "HITL_SELECT",
-  "interactionSessionId": "intsession_xxx",
-  "iteration": 1,
-  "maxIterations": 3,
-  "title": "请选择客户",
-  "actions": ["SELECT","REFINE","MANUAL_VALUE","CANCEL"],
-  "optionsArtifactUploadId": "upl_options",
-  "valueSchema": {"type":"string"}
-}
-```
-
-tec01 MCP接收用户回复并保存：
+### 提取完成或失败
 
 ```text
-interrupt status: OPEN → RESOLVED
-run status: WAITING_INPUT → QUEUED
-resumePayload: action + candidateId/feedback/value
-revision increment
+POST /internal/v1/compiler/jobs/{jobId}/complete
+POST /internal/v1/compiler/jobs/{jobId}/fail
 ```
 
-新claim携带resumePayload，Executor恢复checkpoint。
+完成响应包含`DraftProposal`和过滤诊断；失败响应包含错误码和可读原因。
 
-`REFINE`时tec01校验iteration未超限；Executor重新运行声明的上游LLM节点并创建新attempt和新interrupt。旧interrupt回复返回409。
-
-## Studio草稿提升：tec01提供
+### 节点开始
 
 ```http
-POST /internal/v1/knowledge/draft-proposals
-X-TEC01-Actor-Token: <delegated actor jwt>
+POST /internal/v1/runs/{runId}/nodes/{nodeId}/started
 ```
 
 ```json
 {
-  "idempotencyKey": "studio:test_draft_xxx:promote",
-  "source": "ITSM_WORKFLOW_STUDIO",
-  "studioDraftId": "test_draft_xxx",
-  "catalogDigest": "sha256...",
-  "creatorUid": "S000639",
-  "uids": [],
-  "name": "客户信息查询",
-  "summary": "根据工单条件查询客户信息",
-  "matchPhrases": ["客户信息查询"],
-  "negativePhrases": [],
-  "systemKeys": ["crm"],
-  "workflowDefinition": {},
-  "sourceEvidenceHash": "sha256..."
+  "dispatchId": "dispatch_xxx",
+  "attemptId": "attempt_xxx",
+  "startedAt": "2026-09-21T14:20:00+08:00"
 }
 ```
 
-tec01重新校验actor、Catalog和Workflow，始终创建`DRAFT`，不能通过该接口直接发布。
+### 节点完成、失败或等待
 
-## 状态机
+```http
+POST /internal/v1/runs/{runId}/nodes/{nodeId}/completed
+```
 
-运行状态：
+```json
+{
+  "dispatchId": "dispatch_xxx",
+  "attemptId": "attempt_xxx",
+  "status": "SUCCEEDED",
+  "safeSummary": "查询返回2行",
+  "result": {},
+  "selectedEdgeId": "edge-next",
+  "skippedNodeIds": []
+}
+```
+
+`status`可以是：
 
 ```text
-WAITING_PLAN_APPROVAL
-QUEUED
-RUNNING
-PAUSE_REQUESTED
-PAUSED
+SUCCEEDED
+FAILED
 WAITING_INPUT
-WAITING_NODE_APPROVAL
-WAITING_CREDENTIAL
-SUCCEEDED
-FAILED
-CANCEL_REQUESTED
+PAUSED
 CANCELLED
 UNKNOWN
 ```
 
-节点状态：
+结果较大时先上传为Artifact，回调只传`artifactId`。
+
+### 运行结束和释放
+
+```http
+POST /internal/v1/runs/{runId}/released
+```
+
+```json
+{
+  "dispatchId": "dispatch_xxx",
+  "status": "FAILED",
+  "currentNodeId": "sql-2",
+  "reason": "节点执行失败"
+}
+```
+
+WAITING、PAUSED、FAILED、CANCELLED、UNKNOWN和SUCCEEDED都会释放Executor中的运行上下文。
+
+## HITL接口
+
+HITL由Executor创建，tec01保存并通过Hermes消息渠道或页面交给用户。
+
+### 打开人工交互
+
+节点完成回调使用`WAITING_INPUT`并携带：
+
+```json
+{
+  "interaction": {
+    "interactionId": "interaction_xxx",
+    "kind": "HITL_SELECT",
+    "title": "请选择客户",
+    "displayFields": ["customer_name", "customer_id", "status"],
+    "candidateArtifactId": "artifact_candidates"
+  }
+}
+```
+
+自由输入使用`HITL_FORM`和字段Schema。
+
+### 用户查询候选和提交
 
 ```text
-PENDING
-READY
-RUNNING
-WAITING
-SUCCEEDED
-FAILED
-SKIPPED
-CANCELLED
-UNKNOWN
+GET  /api/v1/runs/{runId}/interactions/{interactionId}/options
+POST /api/v1/runs/{runId}/interactions/{interactionId}/reply
 ```
 
-tec01拥有合法转换表。Executor只提交建议转换，不能直接覆盖状态。
+Hermes MCP调用同一组tec01接口。选择时只提交`candidateId`；自由表单提交`values`。
 
-## 关键交互泳道图
+提交成功后tec01重新调用`/internal/v1/executions/dispatch`，传入相同Workflow、最新节点状态和`resumePayload`。
 
-### Catalog与发布
+## 面向Hermes的MCP工具
+
+tec01提供：
+
+```text
+workflow_match
+workflow_plan
+workflow_approve
+workflow_status
+workflow_wait
+workflow_interaction_options
+workflow_interaction_reply
+workflow_pause
+workflow_resume
+workflow_cancel
+workflow_retry
+```
+
+Hermes必须：
+
+- 在执行前展示完整计划并取得用户确认。
+- 收到HITL时展示候选或字段，不自行猜测用户答案。
+- 多字段填写完成后汇总并让用户确认。
+- 持续把tec01返回的节点状态和失败原因告诉用户。
+- 用户从页面完成操作后，Hermes读取同一运行状态继续反馈。
+
+## 简洁泳道图
+
+### 提取
 
 ```mermaid
 sequenceDiagram
-    participant T as tec01
-    participant R as itsm-workflow Runtime
-    participant A as 管理员
-    T->>R: GET catalog + If-None-Match
-    R-->>T: Catalog + digest
-    A->>T: 发布Workflow
-    T->>R: validate(PUBLISH)
-    R-->>T: normalizedDefinition + hash
-    T->>T: 固化Catalog快照和WorkflowVersion
-```
-
-### 草稿编译
-
-```mermaid
-sequenceDiagram
-    participant T as tec01
-    participant C as Compiler Worker
-    participant M as tec01 Model Gateway
-    T->>T: 创建extraction job和证据
-    C->>T: claim compiler job
-    T-->>C: evidence + lease
-    C->>M: invoke structured model
-    M-->>C: structured output
-    C->>T: complete DraftProposal
-    T->>T: 校验并创建DRAFT
-```
-
-### 生产执行
-
-```mermaid
-sequenceDiagram
-    participant E as Executor
-    participant T as tec01
-    participant X as 外部系统
-    E->>T: claim run
-    T-->>E: snapshot + lease + checkpoint
-    E->>T: start attempt
-    T-->>E: attemptId已提交
-    E->>X: 执行节点
-    X-->>E: 结果
-    E->>T: upload STAGED artifact/checkpoint
-    E->>T: atomic attempt commit
-    T-->>E: committed revision
-```
-
-### HITL恢复
-
-```mermaid
-sequenceDiagram
-    participant E as Executor
-    participant T as tec01 Control/MCP
-    participant H as Hermes
     participant U as 用户
-    E->>T: commit WAITING + interrupt + checkpoint
-    T-->>H: MCP wait返回选择请求
-    H-->>U: 展示候选
-    U-->>H: SELECT/REFINE/MANUAL_VALUE/CANCEL
-    H->>T: interrupt reply
-    T->>T: 保存响应并QUEUED
-    E->>T: claim resumed run
-    T-->>E: checkpoint + resumePayload
+    participant T as tec01页面/Hermes
+    participant C as Compiler
+
+    U->>T: 生成草稿
+    T->>C: 工单详情和操作记录
+    C-->>T: 分阶段进度
+    C-->>T: 草稿或失败原因
+    T-->>U: 展示进度和结果
 ```
 
-## 超时、重试和限流
+### 执行和HITL
 
-| 调用 | 超时 | 自动重试 |
-|---|---:|---|
-| Catalog GET | 5秒 | 指数退避，使用已验证缓存 |
-| Validate/Plan | 10秒 | 仅相同请求哈希重试 |
-| Compiler/Executor claim | 最长20秒长轮询 | 连接失败后退避 |
-| Heartbeat | 5秒 | 租约有效期内重试 |
-| Artifact上传 | 60秒 | 按uploadId和哈希重试 |
-| Attempt commit | 10秒 | 必须使用相同幂等键查询原结果 |
-| Model invoke | 最大180秒 | 由Model Gateway按幂等键控制 |
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant T as tec01/Hermes消息渠道
+    participant E as Executor
+    participant A as AOPS
 
-双方时钟允许最大30秒偏差。tec01是租约到期时间的权威来源。
-
-## 版本兼容
-
-- URL主版本为`/internal/v1`。
-- 新增可选字段属于兼容修改。
-- 删除字段、改变含义或收紧枚举需要v2。
-- 请求包含未知可选字段时服务端忽略；未知枚举必须拒绝。
-- Catalog声明`protocolVersion`，tec01只调度支持版本。
-- WorkflowVersion固定catalogDigest和节点schemaVersion。
-- Checkpoint固定runtimeVersion和checkpointFormatVersion。
-
-至少提前两个发布版本标记接口或字段Deprecated。
-
-## 安全要求
-
-- mTLS和服务JWT必须同时通过。
-- Actor Token不能替代服务身份。
-- 所有日志过滤Authorization、JWE、API Key、SQL结果和用户手工值。
-- artifact/checkpoint在tec01加密存储。
-- Compiler/Executor响应不得回传完整原始凭据。
-- tec01校验leaseToken与run/attempt绑定。
-- Runtime只允许访问其租约覆盖的artifact和credential。
-- Studio Token不具备生产attempt、lease或credential scope。
-
-## 联调与契约测试
-
-双方共同维护：
-
-```text
-contracts/openapi/tec01-internal-v1.yaml
-contracts/openapi/runtime-internal-v1.yaml
-contracts/jsonschema/node-catalog.schema.json
-contracts/jsonschema/workflow-v2.schema.json
-contracts/jsonschema/draft-proposal.schema.json
-contracts/jsonschema/attempt-commit.schema.json
-contracts/examples/
+    U->>T: 确认计划
+    T->>E: 下发完整Workflow
+    E->>A: 执行SQL读
+    A-->>E: 返回结果
+    E->>T: 节点结果
+    T-->>U: 展示进度
+    E->>T: 请求用户选择/输入
+    T-->>U: Hermes消息或页面展示
+    U->>T: 提交答案
+    T->>E: 下发Workflow继续执行
+    E->>T: 最终结果
+    T-->>U: 展示完成
 ```
 
-tec01提供Mock Server覆盖：
+## 最小联调顺序
 
-- 无任务204。
-- 租约续期和过期。
-- revision冲突。
-- 幂等重复与冲突。
-- STAGED上传、commit和TTL清理。
-- interrupt回复及旧回复冲突。
-- Credential JWE。
-
-itsm-workflow提供Mock Server覆盖：
-
-- Catalog 200/304。
-- Workflow校验成功和字段错误。
-- Plan渲染。
-- Compiler成功、无有效操作、LLM失败。
-
-双方CI执行Provider和Consumer契约测试。任何Schema示例必须能通过对应JSON Schema。
-
-## 联调验收顺序
-
-1. 服务认证、Request ID和统一错误。
-2. Catalog同步和Workflow validate。
-3. Plan渲染和planHash样例对齐。
-4. Compiler claim/complete/fail。
-5. Executor register/claim/heartbeat。
-6. Attempt STARTED。
-7. STAGED artifact/checkpoint和原子commit。
-8. PAUSE/CANCEL命令。
-9. HITL SELECT/MANUAL_VALUE/CANCEL。
-10. HITL REFINE多轮。
-11. Credential JWE和过期刷新。
-12. 完整Channel端到端运行。
-
-## 双方交付清单
-
-### tec01团队
-
-- Java DTO、数据库迁移和状态转换表。
-- MCP工具兼容实现。
-- Catalog缓存、知识发布校验和运行计划存储。
-- Compiler/Executor队列、租约和commands。
-- STAGED artifact/checkpoint及attempt commit事务。
-- Event wait、Channel通知和去重。
-- Credential Broker和Model Gateway。
-- Mock Server与Provider契约测试。
-
-### itsm-workflow团队
-
-- Node Registry、Catalog和Workflow v2 Schema。
-- validate/plan内部API。
-- 无存储Compiler Worker。
-- 无数据库Executor Worker和tec01客户端。
-- Remote Checkpointer。
-- Node Handler、单节点调试和Studio SQLite。
-- Consumer契约测试和故障注入测试。
-
-## 冻结规则
-
-第一轮并行开发前必须共同确认：
-
-```text
-内部URL和调用方向
-认证与scope
-状态/错误枚举
-revision和幂等规则
-租约时长和心跳
-artifact/checkpoint大小限制
-attempt commit事务边界
-Catalog和Workflow v2 Schema
-Credential JWE算法
-HITL resumePayload格式
-```
-
-以上内容冻结后，Java与Python团队可以分别基于Mock Server开发；后续变更先修改OpenAPI和契约测试，再修改实现。
+1. Catalog、Workflow校验和计划展示。
+2. tec01下发两步SQL Workflow，确认逐节点状态返回。
+3. 条件节点根据`rowCount`选择分支。
+4. `hitl_select`通过Hermes和页面完成选择。
+5. `hitl_form`提交多个参数并绑定到下游SQL。
+6. 暂停、取消、失败和重试。
+7. Compiler进度在页面和Hermes中同步展示。

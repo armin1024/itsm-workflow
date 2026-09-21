@@ -1,5 +1,5 @@
 [Unit]
-Description=ITSM Workflow API
+Description=ITSM Workflow Compiler Worker for tec01
 After=network-online.target
 Wants=network-online.target
 
@@ -11,15 +11,13 @@ WorkingDirectory=__PREFIX__
 EnvironmentFile=__CONFIG_DIR__/service.env
 Environment=PYTHONPATH=__PREFIX__/site-packages:__PREFIX__
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=__PREFIX__/python/bin/python3 -m uvicorn app.main:app --host ${WORKFLOW_BIND_HOST} --port ${WORKFLOW_PORT}
+ExecStart=__PREFIX__/python/bin/python3 -m app.compiler_worker
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/itsm-workflow
-UMask=0077
 
 [Install]
 WantedBy=multi-user.target
