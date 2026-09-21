@@ -111,7 +111,7 @@ Executor ──主动 claim 并取得 leaseToken──> tec01
 | Node Handlers | `sql_read/condition/llm_extract/hitl_select/human_input/approval/end`及后续扩展 |
 | CLI Adapter | 参数数组调用`aops-cli`、SSE解析、超时、取消、输出限制和诊断脱敏 |
 | Remote State Client | 通过tec01协议提交attempt、事件、artifact、checkpoint和租约心跳 |
-| Studio API/UI | 节点浏览、DAG编排、草稿提取调试、模拟执行和测试结果查看 |
+| Studio API/UI | 节点浏览与管理、DAG编排、草稿提取、真实单节点/整流程调试和测试结果查看 |
 | Temporary Store | 仅保存非生产临时草稿和测试运行，TTL到期自动清理 |
 
 ### 明确边界
@@ -254,16 +254,13 @@ sequenceDiagram
 
 ### 草稿编译协议
 
-tec01先保存extraction job和证据，Compiler Worker使用租约领取，避免LLM长耗时占用同步HTTP请求：
+草稿提取采用同步内部API。tec01获取并保存证据、计算`evidenceHash`完成本地去重后，把`ticketInfo`、`auditTimeline`和目标Catalog传给itsm-workflow：
 
 ```text
-POST /internal/v1/compiler/claims
-POST /internal/v1/compiler/claims/{leaseToken}/heartbeat
-POST /internal/v1/compiler/extractions/{extractionId}/complete
-POST /internal/v1/compiler/extractions/{extractionId}/fail
+POST /internal/v1/compiler/preview
 ```
 
-claim返回`ticketInfo`、`auditTimeline`、evidenceHash、targetCatalogDigest和promptVersion。Compiler完成后提交候选定义和诊断，不写数据库：
+tec01在本地按`ticketId + evidenceHash + compilerVersion + promptVersion`去重。Compiler完成过滤、LLM提炼和DAG校验后直接返回候选定义和诊断，不写生产数据库：
 
 ```json
 {
@@ -283,7 +280,7 @@ claim返回`ticketInfo`、`auditTimeline`、evidenceHash、targetCatalogDigest�
 }
 ```
 
-tec01保存`workflow_extraction_jobs`，相同`ticketId + evidenceHash + compilerVersion + promptVersion`使用幂等结果。LLM失败、没有有效操作或DAG不合法时只保存失败诊断，不生成兜底草稿。
+tec01保存提取状态并以`ticketId + evidenceHash + compilerVersion + promptVersion`复用幂等结果。LLM失败、没有有效操作或DAG不合法时只保存失败诊断，不生成兜底草稿。默认连接超时5秒、总超时120至180秒，并限制Compiler并发；不再部署独立Compiler Worker或编译租约。
 
 ### 提取泳道图
 
@@ -298,23 +295,22 @@ sequenceDiagram
     participant S as tec01 Knowledge Store
 
     U->>T: 从工单提取Workflow
-    T->>S: 创建QUEUED extraction job
+    T->>S: 创建PROCESSING提取记录
     T->>A: 获取ticketInfo和auditTimeline
     A-->>T: 工单证据
-    C->>T: claim extraction job
-    T-->>C: 证据 + lease + targetCatalogVersion
+    T->>C: POST /internal/v1/compiler/preview + 证据 + Catalog版本
     C->>C: 过滤、只读校验、去重和参数化
     alt 无有效操作
         C-->>T: NO_VALID_OPERATIONS + diagnostics
-        T->>S: job FAILED
+        T->>S: 提取记录FAILED
     else 有效操作
         C->>L: 受控Prompt + 结构化证据
         L-->>C: 中文语义与依赖
         C->>C: 生成并校验DAG
-        C->>T: complete DraftProposal + diagnostics
+        C-->>T: DraftProposal + diagnostics
         T->>C: 按当前Catalog二次validate
         C-->>T: validated
-        T->>S: 单事务创建DRAFT、生命周期和完成job
+        T->>S: 单事务创建DRAFT、生命周期并标记SUCCEEDED
         T-->>U: 打开草稿编辑页面
     end
 ```
@@ -354,7 +350,7 @@ sql_read → llm_extract → hitl_select → downstream_node
 | 1 | 自动选择并记录`AUTO_SELECTED_SINGLE`事件 |
 | 多个 | 在tec01创建OPEN interrupt，运行进入`WAITING_INPUT`并释放Executor租约 |
 
-用户通过Channel选择`candidateId`后，Hermes调用tec01 MCP。tec01保存interrupt response并重新入队；Executor恢复HITL checkpoint，提交：
+用户可以通过Channel/Hermes、tec01页面或三方REST选择`candidateId`。所有入口调用同一个tec01 Control接口；tec01保存interrupt response并重新入队，Executor恢复HITL checkpoint后提交：
 
 ```json
 {
@@ -493,16 +489,26 @@ sequenceDiagram
 | 阶段 | 发起方 | tec01中保存的典型状态 | 说明 |
 |---|---|---|---|
 | 创建运行 | tec01 | `WAITING_PLAN_APPROVAL` | 计划已生成，尚未确认 |
-| 用户确认 | tec01 MCP/Control | 运行`QUEUED`，入口节点`READY` | 加入可领取队列 |
+| 用户确认 | Hermes/MCP、tec01页面或三方REST经Control | 运行`QUEUED`，入口节点`READY` | 加入可领取队列 |
 | 领取任务 | Executor主动claim | 仍由tec01保存；同时产生租约 | claim不是tec01反向推送 |
 | 开始节点 | Executor请求，tec01校验后提交 | 节点`RUNNING`、attempt`STARTED` | 提交成功后才允许调用外部系统 |
 | 节点执行中 | Executor心跳/进度上报 | 节点`RUNNING` | 进度是辅助信息，不替代状态事务 |
 | 节点完成/失败 | Executor提交建议，tec01事务校验 | `SUCCEEDED`或`FAILED` | 同时提交artifact、checkpoint、事件和revision |
 | 需要用户输入 | Executor提交interrupt | `WAITING_INPUT`等 | 释放租约，不占Executor并发 |
-| 用户回复 | tec01 MCP/Control | 运行重新`QUEUED` | 下次由任意兼容Executor主动claim恢复 |
-| 暂停/取消 | 用户经tec01发起，Executor轮询到命令 | 先`*_REQUESTED`，到安全边界后变终态 | 防止把“已收到请求”误报成“已完成动作” |
+| 用户回复 | Hermes/MCP、tec01页面或三方REST经Control | 运行重新`QUEUED` | 下次由任意兼容Executor主动claim恢复 |
+| 暂停/取消 | 任一用户入口调用tec01 Control，Executor轮询到命令 | 先`*_REQUESTED`，到安全边界后变终态 | 防止把“已收到请求”误报成“已完成动作” |
 
-tec01是状态的唯一权威，但并不是所有状态变化都由tec01凭空决定：Executor报告执行事实，tec01负责验证租约、revision、幂等键和合法转换后持久化。Web、Hermes和用户只读取tec01，不读取Executor内存。
+tec01是状态的唯一权威，但并不是所有状态变化都由tec01凭空决定：Executor报告执行事实，tec01负责验证租约、revision、幂等键和合法转换后持久化。Hermes、tec01 Web和三方客户端都只读取tec01，不读取Executor内存。
+
+用户控制入口统一收敛到同一组Control API：
+
+```text
+Hermes/MCP ─────┐
+tec01 Web UI ───┼──> tec01 Control状态机
+三方REST API ───┘
+```
+
+所有写请求携带用户/服务身份、`Idempotency-Key`和`expectedRevision`。任一入口先成功修改后，其他入口使用旧revision提交会收到`409 STATE_REVISION_CONFLICT`，不能覆盖已有选择。
 
 ### 中断、继续、取消和重试
 
@@ -511,38 +517,64 @@ sequenceDiagram
     autonumber
     participant U as 用户
     participant H as Hermes
-    participant M as tec01 MCP
+    participant UI as tec01页面/三方客户端
+    participant G as tec01 MCP/API入口
     participant T as tec01 Control
     participant E as Executor
 
     alt HITL/补参/审批
-        E->>T: OPEN interrupt并释放租约
-        M-->>H: WAITING_INPUT或WAITING_NODE_APPROVAL
-        H-->>U: 请求输入
-        U-->>H: 回复
-        H->>M: interrupt_reply
-        M->>T: 保存响应并QUEUED
+        E->>T: commit WAITING + interrupt + checkpoint并释放租约
+        alt Hermes交互
+            H->>G: wait/status
+            G->>T: 读取OPEN interrupt
+            T-->>G: 候选和revision
+            G-->>H: WAITING_INPUT或WAITING_NODE_APPROVAL
+            H-->>U: 请求输入
+            U-->>H: 回复
+            H->>G: interrupt_reply
+            G->>T: 提交响应
+        else 页面或三方REST
+            UI->>T: GET /runs/{runId}/interrupts
+            T-->>UI: 候选和revision
+            U-->>UI: 选择或输入
+            UI->>T: POST /interrupts/{id}/reply
+        end
+        T->>T: 校验权限、幂等键和revision后保存响应并QUEUED
+        E->>T: 主动claim恢复运行
     else 暂停/继续
-        H->>M: pause
-        M->>T: 保存PAUSE_REQUESTED
+        alt Hermes发起
+            H->>G: pause/resume
+            G->>T: 提交控制请求
+        else 页面或三方REST发起
+            UI->>T: POST /runs/{runId}/pause或resume
+        end
+        T->>T: RUNNING时保存PAUSE_REQUESTED
         E->>T: 心跳或GET commands主动查询
         T-->>E: 在查询响应中返回PAUSE命令
         E->>T: 当前节点到达安全边界后提交PAUSED
-        H->>M: resume
-        M->>T: PAUSED直接转QUEUED，等待Executor再次claim
+        T->>T: resume时PAUSED直接转QUEUED，等待Executor再次claim
     else 取消
-        H->>M: cancel
-        M->>T: 保存CANCEL_REQUESTED
-        E->>T: 心跳或GET commands主动查询
-        T-->>E: 在查询响应中返回CANCEL命令
-        E->>E: 终止CLI进程组
-        E->>T: 提交CANCELLED或UNKNOWN
+        alt Hermes发起
+            H->>G: cancel
+            G->>T: 提交取消请求
+        else 页面或三方REST发起
+            UI->>T: POST /runs/{runId}/cancel
+        end
+        alt 尚未运行或正在稳定等待
+            T->>T: 直接提交CANCELLED
+        else 正在RUNNING
+            T->>T: 保存CANCEL_REQUESTED
+            E->>T: 心跳或GET commands主动查询
+            T-->>E: 在查询响应中返回CANCEL命令
+            E->>E: 终止CLI进程组
+            E->>T: 提交CANCELLED或UNKNOWN
+        end
     else FAILED/UNKNOWN
-        T-->>M: 错误或未知结果
-        M-->>H: 禁止自动重试
-        U-->>H: 明确选择
-        H->>M: node_retry
-        M->>T: 新attempt或标记失败
+        T-->>G: 错误或未知结果
+        T-->>UI: 错误或未知结果
+        U->>H: 或在页面中明确选择重试/标记失败
+        H->>G: node_retry
+        G->>T: 新attempt或标记失败
     end
 ```
 
@@ -568,15 +600,15 @@ sequenceDiagram
 - 查看Node Catalog和节点Schema。
 - 图形化编排临时DAG。
 - 输入`ticketInfo/auditTimeline`调试草稿提取。
-- 使用脱敏样例执行节点和条件分支。
-- 模拟LLM结构化输出和HITL候选选择。
-- 选择任意Registry节点进行单节点调试，手工输入或引用测试artifact，不启动整张DAG。
+- 使用真实Handler执行单节点或整张测试DAG；SQL读必须临时提供工单ID和`AOPS_API_KEY`并调用真实`aops-cli`。
+- 自动化契约测试可以使用Simulation Adapter，但页面中的“调试”固定表示`TEST`真实执行。
+- 选择任意Registry节点进行单节点调试，手工输入或引用前置测试结果。
 - 查看临时事件、artifact、checkpoint和失败诊断。
 - 将审核后的候选草稿提交到tec01进入正式审核。
 
-Studio使用tec01 SSO或短期开发JWT。生产Channel用户不会访问Studio，Studio也不能直接将临时测试运行标为生产成功。“模拟LLM/HITL/SQL”表示从统一Node Registry加载正式节点Handler并注入Simulation Adapter，不是另外维护模拟节点定义。
+Studio当前使用`STUDIO_ADMIN_TOKEN`建立HttpOnly管理会话。生产Channel用户不会访问Studio，Studio也不能直接将临时测试运行标为生产成功。自动化Simulation表示从统一Node Registry加载正式节点Handler并注入测试Adapter，不是另外维护模拟节点定义。
 
-单节点调试只允许`TEST/SIMULATION/DRY_RUN`，每次创建独立`test_debug_run`和attempt并写临时SQLite。若需要分析生产失败节点，只能把经过授权和脱敏的artifact复制为临时快照；不能从Studio重试或修改tec01生产运行。正式重试仍通过tec01 MCP状态机完成。
+页面单节点和整流程调试固定使用`TEST`；底层`SIMULATION/DRY_RUN`仅供自动化契约测试。每次调试创建独立`test_debug_run`并写临时SQLite，但`AOPS_API_KEY`只存在于当前请求和CLI子进程环境。不能从Studio重试或修改tec01生产运行；正式重试通过统一tec01 Control状态机完成，可由Hermes、Web UI或三方REST发起。
 
 ## 临时测试存储选择
 
@@ -651,7 +683,7 @@ sequenceDiagram
     D->>UI: 编排节点或输入脱敏工单证据
     UI->>API: 保存临时workspace
     API->>DB: TEST_ONLY + expiresAt
-    D->>UI: 运行提取/模拟执行
+    D->>UI: 运行提取/真实测试执行
     UI->>API: 创建test run
     API->>R: compile或execute sandbox
     R-->>API: 临时节点事件和artifact
@@ -695,7 +727,7 @@ workflow-studio
   temporary SQLite
 ```
 
-Compiler、Executor和Studio共享`workflow-schema`。Executor以`PRODUCTION`模式加载Handler；Studio调用同一Handler时只能使用`TEST/SIMULATION/DRY_RUN`模式或sandbox上下文。
+Compiler、Executor和Studio共享`workflow-schema`。Executor以`PRODUCTION`模式加载Handler；Studio页面调试固定使用`TEST`真实Handler，底层`SIMULATION/DRY_RUN`只供自动化契约测试。
 
 统一Node Registry的Manifest、Handler、Port/Adapter、执行模式和版本兼容细节见 [统一Node Registry与节点扩展设计](node-registry-design.md)。
 
@@ -722,10 +754,12 @@ PUT  /internal/v1/runs/{runId}/staged-artifacts/{uploadId}/content
 PUT  /internal/v1/runs/{runId}/staged-checkpoints/{checkpointId}
 POST /internal/v1/runs/{runId}/staged-checkpoints/{checkpointId}/writes
 POST /internal/v1/runs/{runId}/attempts/{attemptId}/commit
-POST /internal/v1/compiler/claims
-POST /internal/v1/compiler/claims/{leaseToken}/heartbeat
-POST /internal/v1/compiler/extractions/{extractionId}/complete
-POST /internal/v1/compiler/extractions/{extractionId}/fail
+```
+
+草稿编译方向相反，由tec01调用itsm-workflow：
+
+```text
+POST /internal/v1/compiler/preview
 ```
 
 artifact和checkpoint先以`STAGED`上传；interrupt作为WAITING attempt commit的一部分提交。只有`attempt commit`可以在tec01同一事务中转正它们，并同时完成attempt、节点状态、interrupt、事件和run revision。恢复只读取`COMMITTED` checkpoint，避免checkpoint和业务状态形成双事实源。

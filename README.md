@@ -33,7 +33,8 @@ http://127.0.0.1:8089/studio
 | 服务 | 默认 | 职责 |
 |---|---:|---|
 | `itsm-workflow-api` | 启用 | Studio、Catalog、校验、计划、Compiler Preview和静态页面 |
-| `itsm-workflow-compiler` | 关闭 | 启用tec01后长轮询领取草稿编译任务 |
+
+草稿提取由tec01直接调用`itsm-workflow-api`的Compiler接口，不再要求独立Compiler Worker。生产节点执行仍由Executor主动claim；当前分支中的`compiler_worker.py`和对应unit仅作为旧协议过渡兼容，不属于最终部署拓扑。
 
 旧的`itsm-workflow-mcp`、`itsm-workflow-worker`和`itsm-workflow-migrate`已删除。升级安装时安装器会停用并移除这些旧unit。
 

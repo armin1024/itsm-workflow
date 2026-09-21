@@ -39,16 +39,15 @@ journalctl -u itsm-workflow-api -n 200 --no-pager
 curl http://127.0.0.1:8089/api/v1/health
 ```
 
-只有完成tec01接口联调后才启用Compiler Worker：
+tec01通过同步内部API传递`ticketInfo`和`auditTimeline`并取得DraftProposal，不需要启动独立Compiler Worker。为tec01配置Runtime服务认证：
 
 ```dotenv
-TEC01_ENABLED=true
-TEC01_BASE_URL=https://tec01.internal
-TEC01_SERVICE_TOKEN=<服务令牌>
+RUNTIME_SERVICE_TOKEN=<tec01调用itsm-workflow的服务令牌>
 ```
 
 ```bash
-sudo systemctl enable --now itsm-workflow-compiler
+# 旧版Compiler Worker不属于新部署拓扑
+sudo systemctl disable --now itsm-workflow-compiler
 ```
 
 ## Nginx子路径

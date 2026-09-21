@@ -129,6 +129,8 @@ POST /internal/v1/runtime/workflows/plan
 POST /internal/v1/compiler/preview
 ```
 
+生产草稿提取由tec01同步调用`/internal/v1/compiler/preview`，直接传递`ticketInfo`和`auditTimeline`。tec01在调用前保存PROCESSING状态并完成`evidenceHash`幂等去重；Runtime无生产状态，不使用独立Compiler Worker、claim或编译租约。
+
 整流程调试：
 
 ```http

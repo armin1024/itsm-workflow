@@ -12,7 +12,7 @@
 | 生产知识、版本、运行和审计 | tec01 | MCP、管理端、itsm-workflow |
 | Node Catalog | itsm-workflow | tec01、Studio |
 | Workflow校验和计划渲染 | itsm-workflow | tec01 |
-| Workflow草稿编译 | itsm-workflow Compiler Worker | tec01任务队列 |
+| Workflow草稿编译 | itsm-workflow Runtime Compiler API | tec01同步调用 |
 | 生产节点执行 | itsm-workflow Executor Worker | tec01任务队列 |
 | 生产artifact/checkpoint | tec01 | itsm-workflow、tec01 MCP/UI |
 | Studio临时测试 | itsm-workflow Studio + SQLite | 开发/管理员 |
@@ -264,90 +264,25 @@ SHA-256 RFC8785-JCS(
 
 tec01保存上述材料并创建`WAITING_PLAN_APPROVAL`，批准时必须回传相同planHash。
 
-## 草稿编译任务：tec01提供队列，Compiler领取
+## 草稿同步编译：tec01调用Runtime
 
-LLM分析可能耗时，第一版不使用长时间同步`POST /compiler/workflow-drafts`。tec01保存extraction job，Compiler Worker使用租约领取。
-
-### 领取编译任务
+正式草稿生产不使用Compiler claim、租约或独立Worker。tec01获取`ticketInfo`与`auditTimeline`并保存PROCESSING记录，然后同步调用：
 
 ```http
-POST /internal/v1/compiler/claims
+POST /internal/v1/compiler/preview
+Authorization: Bearer <RUNTIME_SERVICE_TOKEN>
+Content-Type: application/json
 ```
 
 ```json
 {
-  "compilerId": "compiler-t1361-01",
-  "compilerVersion": "1.0.0",
-  "supportedCatalogDigests": ["sha256..."],
-  "waitSeconds": 15
-}
-```
-
-无任务返回204；有任务返回：
-
-```json
-{
-  "extractionId": "ext_xxx",
-  "leaseToken": "opaque",
-  "leaseExpiresAt": "2026-09-20T03:01:00Z",
-  "ticketId": 100173,
-  "creatorUid": "S000639",
-  "uids": ["S000123"],
   "ticketInfo": {},
   "auditTimeline": [],
-  "evidenceHash": "sha256...",
-  "targetCatalogDigest": "sha256...",
-  "promptVersion": "draft-extract-v3",
-  "locale": "zh-CN"
+  "targetCatalogDigest": "sha256..."
 }
 ```
 
-限制：`ticketInfo + auditTimeline` JSON编码后最大5 MiB，超限由tec01预处理或拒绝。
-
-### 编译心跳
-
-```http
-POST /internal/v1/compiler/claims/{leaseToken}/heartbeat
-```
-
-返回续租时间和`cancelRequested`。默认租约60秒，每20秒心跳。
-
-### 完成编译
-
-```http
-POST /internal/v1/compiler/extractions/{extractionId}/complete
-```
-
-```json
-{
-  "leaseToken": "opaque",
-  "idempotencyKey": "extraction:ext_xxx:complete",
-  "compilerVersion": "1.0.0",
-  "evidenceHash": "sha256...",
-  "catalogDigest": "sha256...",
-  "proposal": {
-    "name": "客户信息查询",
-    "summary": "根据工单条件查询客户信息",
-    "matchPhrases": ["客户信息查询"],
-    "negativePhrases": [],
-    "systemKeys": ["crm"],
-    "workflowDefinition": {}
-  },
-  "diagnostics": {
-    "auditOperationCount": 5,
-    "acceptedOperationCount": 2,
-    "ignoredOperations": []
-  }
-}
-```
-
-tec01校验租约、evidenceHash和Catalog，创建DRAFT及生命周期并完成job。失败接口：
-
-```http
-POST /internal/v1/compiler/extractions/{extractionId}/fail
-```
-
-只接受稳定错误码和安全摘要，不接受完整LLM响应或敏感证据。
+成功响应直接包含`compilerVersion`、`catalogDigest`、`proposal`和`diagnostics`。tec01在调用前按`ticketId + evidenceHash + compilerVersion + promptVersion`去重，并在响应后校验Catalog、创建DRAFT及把提取记录标记为SUCCEEDED。当前Runtime接口本身无生产状态，不保存幂等记录。默认连接超时5秒、总超时120至180秒。
 
 ## Executor注册与任务领取：tec01提供
 
@@ -362,7 +297,7 @@ POST /internal/v1/executors
   "executorId": "runtime-t1361-01",
   "runtimeVersion": "1.0.0",
   "protocolVersion": 1,
-  "maxConcurrency": 2,
+  "maxConcurrency": 12,
   "supportedCatalogDigests": ["sha256..."],
   "credentialEncryptionJwk": {
     "kty": "RSA",
@@ -387,7 +322,7 @@ POST /internal/v1/execution/claims
 {
   "executorId": "runtime-t1361-01",
   "runtimeVersion": "1.0.0",
-  "availableSlots": 1,
+  "availableSlots": 7,
   "waitSeconds": 15
 }
 ```
@@ -646,6 +581,18 @@ tec01管理模型URL、凭据、限流和审计。响应包含结构化output、
 
 ## HITL与恢复
 
+Hermes、tec01 Web UI和三方系统共享以下用户控制接口；MCP工具只是这些接口的Agent适配层：
+
+```text
+POST /api/v1/runs/{runId}/pause
+POST /api/v1/runs/{runId}/resume
+POST /api/v1/runs/{runId}/cancel
+POST /api/v1/runs/{runId}/interrupts/{interruptId}/reply
+POST /api/v1/runs/{runId}/nodes/{nodeId}/retry
+```
+
+每个写请求都要求用户或服务身份、`Idempotency-Key`和请求体中的`expectedRevision`。普通用户只能操作自己有权访问的运行；服务身份必须携带受限scope和最终操作者信息。所有入口共用tec01 Control的权限、幂等和状态转换表，不允许直接调用Executor。
+
 Executor在attempt commit中携带interrupt：
 
 ```json
@@ -661,7 +608,7 @@ Executor在attempt commit中携带interrupt：
 }
 ```
 
-tec01 MCP接收用户回复并保存：
+tec01 MCP、tec01 Web UI或三方REST都可以接收用户回复，但必须调用同一个tec01 Control接口保存：
 
 ```text
 interrupt status: OPEN → RESOLVED
@@ -759,14 +706,13 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant T as tec01
-    participant C as Compiler Worker
+    participant C as itsm-workflow Compiler API
     participant M as tec01 Model Gateway
     T->>T: 创建extraction job和证据
-    C->>T: claim compiler job
-    T-->>C: evidence + lease
+    T->>C: POST /internal/v1/compiler/preview + evidence
     C->>M: invoke structured model
     M-->>C: structured output
-    C->>T: complete DraftProposal
+    C-->>T: DraftProposal + diagnostics
     T->>T: 校验并创建DRAFT
 ```
 
@@ -801,18 +747,72 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant E as Executor
-    participant T as tec01 Control/MCP
+    participant T as tec01 Control
+    participant G as tec01 MCP/API入口
     participant H as Hermes
+    participant W as tec01页面/三方REST
     participant U as 用户
     E->>T: commit WAITING + interrupt + checkpoint
-    T-->>H: MCP wait返回选择请求
-    H-->>U: 展示候选
-    U-->>H: SELECT/REFINE/MANUAL_VALUE/CANCEL
-    H->>T: interrupt reply
+    alt Hermes交互
+        H->>G: wait/status
+        G->>T: 读取OPEN interrupt
+        T-->>G: 候选和revision
+        G-->>H: 返回选择请求
+        H-->>U: 展示候选
+        U-->>H: SELECT/REFINE/MANUAL_VALUE/CANCEL
+        H->>G: interrupt reply
+        G->>T: 提交响应
+    else 页面或三方REST
+        W->>T: GET /runs/{runId}/interrupts
+        T-->>W: 候选和revision
+        U-->>W: SELECT/REFINE/MANUAL_VALUE/CANCEL
+        W->>T: POST /interrupts/{id}/reply
+    end
+    T->>T: 校验身份、幂等键和expectedRevision
     T->>T: 保存响应并QUEUED
     E->>T: 主动claim可恢复运行
     T-->>E: HTTP响应：checkpoint + resumePayload
 ```
+
+### 暂停、继续与取消
+
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant H as Hermes
+    participant W as tec01页面/三方REST
+    participant G as tec01 MCP/API入口
+    participant T as tec01 Control
+    participant E as Executor
+
+    alt Hermes发起控制
+        U->>H: 暂停/继续/取消
+        H->>G: 对应MCP工具
+        G->>T: Control请求
+    else 页面或三方REST直接调用
+        U->>W: 点击或提交控制操作
+        W->>T: POST pause、resume或cancel
+    end
+    T->>T: 校验身份、Idempotency-Key和expectedRevision
+    alt 暂停正在运行的节点
+        T->>T: RUNNING转PAUSE_REQUESTED
+        E->>T: heartbeat或GET commands
+        T-->>E: PAUSE命令
+        E->>T: 安全边界提交checkpoint和PAUSED
+    else 继续已暂停运行
+        T->>T: PAUSED直接转QUEUED
+        E->>T: 主动claim恢复
+    else 取消QUEUED/PAUSED/WAITING
+        T->>T: 直接转CANCELLED
+    else 取消RUNNING
+        T->>T: 转CANCEL_REQUESTED
+        E->>T: heartbeat或GET commands
+        T-->>E: CANCEL命令
+        E->>T: 提交CANCELLED或UNKNOWN
+    end
+```
+
+Hermes、Web UI和三方REST不得分别实现状态转换；它们只是同一Control API的不同适配入口。并发写入通过revision CAS处理，旧`expectedRevision`统一返回`409 STATE_REVISION_CONFLICT`。
 
 ## 超时、重试和限流
 
@@ -820,7 +820,8 @@ sequenceDiagram
 |---|---:|---|
 | Catalog GET | 5秒 | 指数退避，使用已验证缓存 |
 | Validate/Plan | 10秒 | 仅相同请求哈希重试 |
-| Compiler/Executor claim | 最长20秒长轮询 | 连接失败后退避 |
+| Compiler同步调用 | 120至180秒 | tec01按相同evidenceHash复用成功结果并有限重试 |
+| Executor claim | 最长20秒长轮询 | 连接失败后退避 |
 | Heartbeat | 5秒 | 租约有效期内重试 |
 | Artifact上传 | 60秒 | 按uploadId和哈希重试 |
 | Attempt commit | 10秒 | 必须使用相同幂等键查询原结果 |
@@ -889,7 +890,7 @@ itsm-workflow提供Mock Server覆盖：
 1. 服务认证、Request ID和统一错误。
 2. Catalog同步和Workflow validate。
 3. Plan渲染和planHash样例对齐。
-4. Compiler claim/complete/fail。
+4. Compiler同步preview、超时和幂等结果。
 5. Executor register/claim/heartbeat。
 6. Attempt STARTED。
 7. STAGED artifact/checkpoint和原子commit。
@@ -906,7 +907,7 @@ itsm-workflow提供Mock Server覆盖：
 - Java DTO、数据库迁移和状态转换表。
 - MCP工具兼容实现。
 - Catalog缓存、知识发布校验和运行计划存储。
-- Compiler/Executor队列、租约和commands。
+- Compiler同步调用状态、Executor队列、租约和commands。
 - STAGED artifact/checkpoint及attempt commit事务。
 - Event wait、Channel通知和去重。
 - Credential Broker和Model Gateway。
@@ -916,7 +917,7 @@ itsm-workflow提供Mock Server覆盖：
 
 - Node Registry、Catalog和Workflow v2 Schema。
 - validate/plan内部API。
-- 无存储Compiler Worker。
+- 无存储Compiler同步API。
 - 无数据库Executor Worker和tec01客户端。
 - Remote Checkpointer。
 - Node Handler、单节点调试和Studio SQLite。

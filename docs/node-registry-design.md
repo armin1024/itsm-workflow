@@ -15,7 +15,7 @@ end
 未来新增的其他生产操作节点
 ```
 
-“LLM模拟”“HITL模拟”“SQL模拟”不是新的节点类型，而是同一个节点Handler在不同执行模式下使用不同基础设施Adapter：
+底层契约测试可使用“LLM模拟”“HITL模拟”“SQL模拟”，它们不是新的节点类型，而是同一个节点Handler在不同执行模式下使用不同基础设施Adapter。Studio页面上的“调试”固定使用`TEST`真实Handler；SQL读必须提供工单ID和`AOPS_API_KEY`并执行真实`aops-cli`：
 
 ```text
 PRODUCTION  生产执行
@@ -164,7 +164,7 @@ ClockPort
 | `ModelPort` | 批准的内网模型配置 | 测试模型Profile | FixtureModelAdapter | 只校验Prompt和Schema |
 | `HumanInteractionPort` | tec01持久化interrupt + Channel | Studio测试interrupt | Studio本地候选选择 | 只展示可能的interrupt |
 
-因此Studio所谓的“LLM/HITL/SQL模拟”是节点真实Handler在`SIMULATION`上下文运行，而不是另一套模拟节点代码。
+因此自动化契约测试中的“LLM/HITL/SQL模拟”是节点真实Handler在`SIMULATION`上下文运行，而不是另一套模拟节点代码；它不等同于页面的真实调试入口。
 
 ## 内置节点定义
 
