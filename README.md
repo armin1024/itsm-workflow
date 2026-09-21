@@ -5,7 +5,7 @@
 - Node Registry与版本化Schema。
 - Workflow DAG校验和计划渲染。
 - 工单证据过滤、LLM分析和草稿编译。
-- `sql_read`、`condition`、`llm_extract`、`hitl_select`等节点执行适配器。
+- `sql_read`、`condition`、`hitl_select`、`hitl_form`等节点执行适配器。
 - 与tec01交互的Compiler/Executor协议客户端。
 - 使用管理Token登录、可独立运行的TEST_ONLY Studio。
 
@@ -34,7 +34,7 @@ http://127.0.0.1:8089/studio
 |---|---:|---|
 | `itsm-workflow-api` | 启用 | Studio、Catalog、校验、计划、Compiler Preview和静态页面 |
 
-草稿提取由tec01直接调用`itsm-workflow-api`的Compiler接口，不再要求独立Compiler Worker。生产节点执行仍由Executor主动claim；当前分支中的`compiler_worker.py`和对应unit仅作为旧协议过渡兼容，不属于最终部署拓扑。
+目标生产架构由tec01主动提交草稿提取任务、下发完整Workflow和暂停/取消命令；Executor逐节点返回状态和结果。tec01同时承担Hermes消息渠道、MCP和Web页面，所有入口共享同一运行事实。当前过渡代码中的旧claim客户端不作为最终接口依据。
 
 旧的`itsm-workflow-mcp`、`itsm-workflow-worker`和`itsm-workflow-migrate`已删除。升级安装时安装器会停用并移除这些旧unit。
 

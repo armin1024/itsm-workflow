@@ -17,8 +17,11 @@
 页面中的“调试”固定使用`TEST`，不会用Fixture伪造节点成功：
 
 - `sql_read`调用系统`aops-cli db read`。
-- `llm_extract`调用`service.env`配置的内网LLM。
-- `condition`和`hitl_select`执行本地确定性逻辑。
+- `condition`执行本地确定性规则。
+- `hitl_select`根据SQL结果映射候选。
+- `hitl_form`收集一个或多个用户参数。
+
+目标生产Workflow不使用运行时LLM节点；LLM只允许在草稿提取阶段由Compiler内部使用。
 
 SQL读必须填写当前工单ID和`AOPS_API_KEY`，并真实执行`aops-cli db read`。底层API保留`SIMULATION/DRY_RUN`仅供自动化契约测试，不作为页面调试入口。
 

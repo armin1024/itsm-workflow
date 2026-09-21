@@ -14,10 +14,13 @@ flowchart LR
     E --> L
     S --> DB[(TEST_ONLY SQLite)]
 
-    T[tec01控制面] -->|Catalog/Validate/Plan/Compile| API[Runtime API]
+    U2[用户] <--> CH[tec01/Hermes消息渠道]
+    CH --> T[tec01控制面]
+    T -->|Catalog/Validate/Compile| API[Runtime API]
     API --> C
-    EX[Executor实例池] -->|主动claim生产任务| T
+    T -->|主动下发完整Workflow| EX[Executor服务]
     EX --> E
+    EX -->|逐节点返回状态和结果| T
 ```
 
 itsm-workflow拥有节点定义、草稿编译、DAG校验、计划渲染、节点Handler和外部系统适配器。tec01拥有生产知识、MCP、权限、状态机、队列、Artifact、Checkpoint和审计。
@@ -31,7 +34,7 @@ itsm-workflow拥有节点定义、草稿编译、DAG校验、计划渲染、节�
 | Compiler | `app/extraction.py` | 审计过滤、SQL参数化、LLM中文提炼、DAG生成 |
 | Planner | `app/runtime/planner.py` | DAG归一化、校验、计划材料和内容哈希 |
 | CLI Adapter | `app/cli.py` | 安全argv执行、SSE解析、超时、限流和诊断脱敏 |
-| tec01 Adapter | `app/tec01_client.py` | Executor主动claim、租约、attempt和状态回写 |
+| tec01 Adapter | `app/tec01_client.py` | 接收tec01调度、逐节点状态回写和控制命令 |
 | Studio | `app/studio`、`frontend` | TEST_ONLY编排和调试 |
 
 ## 已移除模块
@@ -40,4 +43,4 @@ itsm-workflow拥有节点定义、草稿编译、DAG校验、计划渲染、节�
 
 SQLite仅保存临时workspace与调试输出，默认24小时清理；它不是tec01的副本，也不能承载生产恢复。
 
-草稿提取采用`tec01 -> Runtime Compiler API`同步调用；生产执行采用`Executor -> tec01`主动claim。`compiler_worker.py`仅保留为旧协议兼容代码，最终部署不启动对应服务。
+草稿提取由tec01主动提交工单数据，Compiler分阶段回调进度。生产执行由tec01主动下发完整Workflow；Executor根据tec01给出的节点状态继续执行，并逐节点返回状态和结果。tec01同时负责Web页面、Hermes消息渠道和MCP，三个入口共享同一运行状态。

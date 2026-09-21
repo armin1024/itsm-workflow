@@ -129,7 +129,7 @@ POST /internal/v1/runtime/workflows/plan
 POST /internal/v1/compiler/preview
 ```
 
-生产草稿提取由tec01同步调用`/internal/v1/compiler/preview`，直接传递`ticketInfo`和`auditTimeline`。tec01在调用前保存PROCESSING状态并完成`evidenceHash`幂等去重；Runtime无生产状态，不使用独立Compiler Worker、claim或编译租约。
+`/internal/v1/compiler/preview`仅用于Studio和接口联调。目标生产流程由tec01调用`POST /internal/v1/compiler/jobs`提交`ticketInfo`和`auditTimeline`，Compiler异步回调简洁进度与最终DraftProposal；具体约定见[tec01集成契约](tec01-integration-contract.md)。
 
 整流程调试：
 

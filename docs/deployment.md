@@ -39,7 +39,7 @@ journalctl -u itsm-workflow-api -n 200 --no-pager
 curl http://127.0.0.1:8089/api/v1/health
 ```
 
-tec01通过同步内部API传递`ticketInfo`和`auditTimeline`并取得DraftProposal，不需要启动独立Compiler Worker。为tec01配置Runtime服务认证：
+tec01通过内部API传递`ticketInfo`和`auditTimeline`，Compiler在后台处理并回调进度和DraftProposal，不需要启动旧版轮询Compiler Worker。为tec01配置Runtime服务认证：
 
 ```dotenv
 RUNTIME_SERVICE_TOKEN=<tec01调用itsm-workflow的服务令牌>
