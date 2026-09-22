@@ -842,19 +842,16 @@ function InterruptBand({
   run: Run;
   onDone: (run: Run) => void;
 }) {
-  const open = (
-    run as Run & {
-      interrupts?: Array<{
-        id?: string;
-        interruptId?: string;
-        kind: string;
-        status: string;
-        request: { fields?: string[] };
-      }>;
-    }
-  ).interrupts?.find((item) => item.status === "OPEN");
-  const [value, setValue] = useState("{}"),
-    [error, setError] = useState("");
+  type OpenInterrupt = { id?: string; interruptId?: string; kind: string; status: string; request: { title?: string; description?: string; fields?: Array<{ name: string; label: string; type: string; required?: boolean; description?: string; enum?: unknown[] }> } };
+  const open = (run as Run & { interrupts?: OpenInterrupt[] }).interrupts?.find((item) => item.status === "OPEN");
+  const interruptId = open?.interruptId || open?.id || "";
+  const [value, setValue] = useState("{}"), [error, setError] = useState(""), [keyword, setKeyword] = useState(""), [offset, setOffset] = useState(0),
+    [options, setOptions] = useState<Awaited<ReturnType<typeof api.interactionOptions>> | null>(null), [selectedIds, setSelectedIds] = useState<string[]>([]),
+    [formValues, setFormValues] = useState<Record<string, unknown>>({}), [pendingPayload, setPendingPayload] = useState<Record<string, unknown> | null>(null), [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (open?.kind !== "HITL_SELECT" || !interruptId) return;
+    api.interactionOptions(run.runId, interruptId, { offset, limit: 20, keyword }).then(setOptions).catch((reason) => setError(reason.message));
+  }, [run.runId, interruptId, open?.kind, offset, keyword]);
   if (!open)
     return (
       <section className="decision-band">
@@ -864,32 +861,40 @@ function InterruptBand({
         </div>
       </section>
     );
-  const resume = async () => {
+  const resume = async (explicitPayload?: Record<string, unknown>) => {
+    setBusy(true);
     try {
       if (open.kind === "CREDENTIAL") {
         onDone(await api.updateCredential(run.runId, value));
         setValue("");
         return;
       }
-      const payload =
+      const payload = explicitPayload || (
         open.kind === "NODE_APPROVAL"
           ? { decision: "approve" }
           : open.kind === "PAUSE"
             ? { action: "continue" }
-            : { inputs: JSON.parse(value) };
+            : { inputs: JSON.parse(value) });
       onDone(
         await api.resumeInterrupt(
           run.runId,
-          open.interruptId || open.id || "",
+          interruptId,
           payload,
+          crypto.randomUUID(),
         ),
       );
+      setPendingPayload(null);
     } catch (reason) {
       setError((reason as Error).message);
+    } finally {
+      setBusy(false);
     }
   };
+  const fields = open.request.fields || [];
+  const candidatePayload = { action: "SELECT", candidateIds: selectedIds };
+  const formPayload = { action: "SUBMIT", values: formValues };
   return (
-    <section className="decision-band">
+    <section className="decision-band hitl-band">
       <div>
         <p className="overline">{open.kind}</p>
         <h2>{run.waitingReason}</h2>
@@ -911,15 +916,18 @@ function InterruptBand({
             autoComplete="off"
           />
         )}
+        {open.kind === "HITL_SELECT" && <div className="hitl-options"><div className="hitl-search"><TextInput id="hitl-keyword" labelText="筛选候选" value={keyword} onChange={(event) => { setKeyword(event.target.value); setOffset(0); }} /><span>{options ? `共 ${options.total} 条` : "加载候选"}</span></div>{options?.items.map((item) => { const selected = selectedIds.includes(item.candidateId); return <button type="button" className={selected ? "selected" : ""} key={item.candidateId} onClick={() => setSelectedIds((current) => options.selectionMode === "SINGLE" ? [item.candidateId] : selected ? current.filter((id) => id !== item.candidateId) : [...current, item.candidateId])}><strong>{item.label}</strong><small>{Object.entries(item.display).map(([key, fieldValue]) => `${key}: ${String(fieldValue)}`).join(" · ")}</small></button>; })}<footer><Button size="sm" kind="ghost" disabled={!offset} onClick={() => setOffset(Math.max(0, offset - 20))}>上一页</Button><span>{options ? `${offset + 1}-${Math.min(offset + options.items.length, options.total)}` : "—"}</span><Button size="sm" kind="ghost" disabled={!options?.hasMore} onClick={() => setOffset(offset + 20)}>下一页</Button></footer></div>}
+        {open.kind === "HITL_FORM" && <div className="hitl-form">{open.request.description && <p>{open.request.description}</p>}{fields.map((field) => field.type === "boolean" ? <label key={field.name}>{field.label}<select value={String(formValues[field.name] ?? "")} onChange={(event) => setFormValues((current) => ({ ...current, [field.name]: event.target.value === "true" }))}><option value="">请选择</option><option value="true">是</option><option value="false">否</option></select></label> : <TextInput key={field.name} id={`hitl-field-${field.name}`} type={field.type === "integer" || field.type === "number" ? "number" : "text"} labelText={`${field.label}${field.required ? " *" : ""}`} helperText={field.description} value={String(formValues[field.name] ?? "")} onChange={(event) => setFormValues((current) => ({ ...current, [field.name]: field.type === "integer" ? Number.parseInt(event.target.value, 10) : field.type === "number" ? Number(event.target.value) : event.target.value }))} />)}</div>}
         {error && <span className="error-text">{error}</span>}
       </div>
-      <Button onClick={resume}>
+      <div className="hitl-actions">{open.kind === "HITL_SELECT" && <Button disabled={!selectedIds.length || busy} onClick={() => setPendingPayload(candidatePayload)}>确认选择</Button>}{open.kind === "HITL_FORM" && <Button disabled={busy} onClick={() => setPendingPayload(formPayload)}>检查并提交</Button>}{["HITL_SELECT", "HITL_FORM"].includes(open.kind) && <Button kind="danger--tertiary" disabled={busy} onClick={() => setPendingPayload({ action: "CANCEL" })}>取消运行</Button>}{!["HITL_SELECT", "HITL_FORM"].includes(open.kind) && <Button onClick={() => void resume()} disabled={busy}>
         {open.kind === "NODE_APPROVAL"
           ? "批准节点"
           : open.kind === "CREDENTIAL"
             ? "更新凭据并继续"
             : "提交并继续"}
-      </Button>
+      </Button>}</div>
+      <Modal open={Boolean(pendingPayload)} danger={pendingPayload?.action === "CANCEL"} modalHeading={pendingPayload?.action === "CANCEL" ? "确认取消运行" : "确认人工交互回复"} primaryButtonText={busy ? "正在提交" : "确认提交"} secondaryButtonText="返回修改" primaryButtonDisabled={busy} onRequestClose={() => !busy && setPendingPayload(null)} onRequestSubmit={() => pendingPayload && void resume(pendingPayload)}><p>提交后工作流将从当前节点恢复，不能再次回复本次交互。</p><pre>{JSON.stringify(pendingPayload, null, 2)}</pre></Modal>
     </section>
   );
 }
@@ -1692,7 +1700,7 @@ function KnowledgeDetail({ user }: { user: User }) {
     (item) => item.id === selected,
   );
   const authorable = knowledge.workflowDefinition.nodes.every((item) =>
-    ["sql_read", "condition", "end"].includes(item.type),
+    ["sql_read", "condition", "hitl_select", "hitl_form", "end"].includes(item.type),
   );
   const ownsDraft = knowledge.creatorUid === user.uid;
   const canEdit =

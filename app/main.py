@@ -4,27 +4,28 @@ import asyncio
 import json
 import secrets
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import __version__
 from app.auth import Principal, create_session_cookie, current_principal, identity, require_admin, require_operator
 from app.cli import CliExecutionError, inspect_cli
 from app.config import settings
-from app.crypto import SecretBox
+from app.crypto import SecretBox, sha256_bytes
 from app.db import SessionLocal, get_session, initialize_database
 from app.events import emit_event, event_dict, stream_events
-from app.idempotency import IdempotencyConflict, IdempotencyInProgress, claim as claim_idempotency, complete as complete_idempotency
+from app.idempotency import IdempotencyConflict, IdempotencyInProgress, abandon as abandon_idempotency, claim as claim_idempotency, complete as complete_idempotency
 from app.listing import KNOWLEDGE_STATUSES, RUN_STATUSES, RUN_STATUS_GROUPS, paginated_knowledge, paginated_runs, paginated_versions, split_values, validate_page_size
 from app.knowledge import authorized_knowledge, create_knowledge, delete_knowledge as soft_delete_knowledge, import_legacy_package, match_knowledge, publish_knowledge, reject_knowledge_review, serialize_knowledge, submit_knowledge_review, update_knowledge
 from app.extraction import extract_ticket_draft
+from app.hitl import HitlError, validate_form
 from app.node_types import NODE_TYPES
 from app.models import EncryptedArtifact, InterruptRecord, Knowledge, KnowledgeLifecycleEvent, KnowledgeTransferAudit, NodeAttempt, RunCredential, WorkflowEvent, WorkflowRun, WorkflowVersion
 from app.runs import approve_plan, create_plan, get_run_for_user, serialize_run, serialize_run_facts, update_credential
@@ -166,7 +167,7 @@ async def knowledge_delete(knowledge_id: str, principal: Principal = Depends(_op
 
 @app.get("/api/v1/node-types")
 async def node_type_list(principal: Principal = Depends(current_principal)) -> dict[str, Any]:
-    return {"items": [{"type": item.type, "schemaVersion": item.schema_version, "riskLevel": item.risk_level, "configSchema": item.config_schema, "inputTypes": list(item.input_types), "outputSchema": item.output_schema, "enabledForAuthoring": item.type in {"sql_read", "condition", "end"}} for item in NODE_TYPES.values()]}
+    return {"items": [{"type": item.type, "schemaVersion": item.schema_version, "riskLevel": item.risk_level, "configSchema": item.config_schema, "inputTypes": list(item.input_types), "outputSchema": item.output_schema, "enabledForAuthoring": item.type in {"sql_read", "condition", "hitl_select", "hitl_form", "end"}} for item in NODE_TYPES.values()]}
 
 
 @app.get("/api/v1/knowledge")
@@ -554,6 +555,13 @@ async def run_cancel(run_id: str, idempotency_key: str | None = Header(default=N
         run.status = "CANCEL_REQUESTED"
     else:
         run.status, run.finished_at = "CANCELLED", datetime.now(UTC)
+        open_interrupts = list((await session.execute(select(InterruptRecord).where(InterruptRecord.run_id == run.id, InterruptRecord.status.in_({"OPEN", "RESUME_PENDING"})))).scalars())
+        statuses = dict(run.node_statuses)
+        for record in open_interrupts:
+            record.status, record.response_payload, record.resolved_by, record.resolved_at = "CANCELLED", {"action": "CANCEL", "source": "WORKFLOW_RUN_CANCEL"}, principal.uid, datetime.now(UTC)
+            if record.node_id:
+                statuses[record.node_id] = "CANCELLED"
+        run.node_statuses, run.waiting_reason = statuses, None
         credential = await session.scalar(select(RunCredential).where(RunCredential.run_id == run.id))
         if credential:
             await session.delete(credential)
@@ -568,16 +576,103 @@ async def interrupt_resume(run_id: str, interrupt_id: str, body: ResumeRequest, 
     ledger, cached = await _idempotency(session, key=idempotency_key, action="INTERRUPT_RESUME", principal=principal, run_id=run_id, payload={"runId": run_id, "interruptId": interrupt_id, **body.model_dump(mode="json")})
     if cached is not None:
         return cached
-    run = await _control_run(session, run_id, principal)
-    record = await session.get(InterruptRecord, interrupt_id)
-    if not record or record.run_id != run_id or record.status != "OPEN":
-        raise HTTPException(404, "待处理的中断不存在")
-    run.status, run.resume_payload = "QUEUED", body.payload
-    record.resolved_by = principal.uid
-    await emit_event(session, run, "INTERRUPT_RESUME_REQUESTED", node_id=record.node_id, status="QUEUED", summary=f"{principal.uid} 提交恢复输入", payload={"interruptId": interrupt_id})
+    async def reject(status_code: int, detail: str) -> None:
+        await abandon_idempotency(session, ledger)
+        raise HTTPException(status_code, detail)
+    try:
+        run = await _control_run(session, run_id, principal)
+    except HTTPException:
+        await abandon_idempotency(session, ledger)
+        raise
+    record = await session.scalar(select(InterruptRecord).where(InterruptRecord.id == interrupt_id).with_for_update())
+    if not record or record.run_id != run_id:
+        await reject(404, "待处理的中断不存在")
+    if record.status != "OPEN":
+        await reject(409, "人工交互已经处理或正在恢复")
+    payload = body.payload
+    action = str(payload.get("action") or "")
+    if action == "CANCEL" and record.kind in {"HITL_SELECT", "HITL_FORM"}:
+        record.status, record.response_payload, record.resolved_by, record.resolved_at = "CANCELLED", {"action": "CANCEL"}, principal.uid, datetime.now(UTC)
+        statuses = dict(run.node_statuses)
+        statuses[str(record.node_id)] = "CANCELLED"
+        run.node_statuses, run.status, run.waiting_reason, run.finished_at = statuses, "CANCELLED", None, datetime.now(UTC)
+        credential = await session.scalar(select(RunCredential).where(RunCredential.run_id == run.id))
+        if credential:
+            await session.delete(credential)
+        await emit_event(session, run, "INTERRUPT_CANCELLED", node_id=record.node_id, status="CANCELLED", summary=f"{principal.uid} 取消人工交互", payload={"interruptId": interrupt_id, "kind": record.kind})
+        await session.commit()
+        response = await serialize_run(session, run)
+        return await complete_idempotency(session, ledger, response)
+    node = next((item for item in (run.workflow_snapshot.get("nodes") or []) if item.get("id") == record.node_id), None)
+    if not node:
+        await reject(409, "中断对应节点不存在")
+    safe_response: dict[str, Any]
+    secret_response: dict[str, Any]
+    resume_payload: dict[str, Any]
+    if record.kind == "HITL_SELECT" and action == "SELECT":
+        selected_ids = payload.get("candidateIds")
+        if not isinstance(selected_ids, list) or not all(isinstance(value, str) for value in selected_ids) or len(selected_ids) != len(set(selected_ids)):
+            await reject(422, "candidateIds必须是无重复字符串数组")
+        option_artifact = await session.get(EncryptedArtifact, record.option_artifact_id)
+        if not option_artifact:
+            await reject(409, "候选数据不存在或已清理")
+        candidates = SecretBox().open(option_artifact.ciphertext, purpose="artifact:" + option_artifact.id).get("candidates") or []
+        known = {item.get("candidateId") for item in candidates}
+        config = node.get("config") or {}
+        minimum = int(config.get("minimumSelections") or 1)
+        maximum = int(config.get("maximumSelections") or (1 if config.get("selectionMode") == "SINGLE" else 100))
+        if any(value not in known for value in selected_ids) or not minimum <= len(selected_ids) <= maximum:
+            await reject(422, "候选不存在或选择数量无效")
+        safe_response = {"action": "SELECT", "candidateIds": selected_ids}
+        secret_response = safe_response
+        resume_payload = {"interactionId": record.id, **safe_response}
+    elif record.kind == "HITL_FORM" and action == "SUBMIT":
+        try:
+            values = validate_form(list((node.get("config") or {}).get("fields") or []), payload.get("values"))
+        except HitlError as exc:
+            await abandon_idempotency(session, ledger)
+            raise HTTPException(422, str(exc)) from exc
+        safe_response = {"action": "SUBMIT", "fieldNames": sorted(values)}
+        secret_response = {"action": "SUBMIT", "values": values}
+        resume_payload = {"interactionId": record.id, "action": "SUBMIT"}
+    elif record.kind not in {"HITL_SELECT", "HITL_FORM"}:
+        run.status, run.resume_payload = "QUEUED", payload
+        record.resolved_by = principal.uid
+        await emit_event(session, run, "INTERRUPT_RESUME_REQUESTED", node_id=record.node_id, status="QUEUED", summary=f"{principal.uid} 提交恢复输入", payload={"interruptId": interrupt_id})
+        await session.commit()
+        response = await serialize_run(session, run)
+        return await complete_idempotency(session, ledger, response)
+    else:
+        await reject(422, "HITL回复操作与中断类型不匹配")
+    artifact_id = "art_" + secrets.token_hex(16)
+    encoded = json.dumps(secret_response, ensure_ascii=False, separators=(",", ":")).encode()
+    session.add(EncryptedArtifact(id=artifact_id, run_id=run.id, node_id=str(record.node_id), artifact_type="HITL_RESPONSE", ciphertext=SecretBox().seal(secret_response, purpose="artifact:" + artifact_id), content_hash=sha256_bytes(encoded), size_bytes=len(encoded), expires_at=datetime.now(UTC) + timedelta(days=settings.result_retention_days)))
+    record.status, record.response_payload, record.response_artifact_id, record.resolved_by = "RESUME_PENDING", safe_response, artifact_id, principal.uid
+    if record.kind == "HITL_FORM":
+        resume_payload["responseArtifactId"] = artifact_id
+    run.status, run.waiting_reason, run.resume_payload = "QUEUED", None, resume_payload
+    await emit_event(session, run, "INTERRUPT_RESUME_REQUESTED", node_id=record.node_id, status="QUEUED", summary=f"{principal.uid} 提交人工交互回复", payload={"interruptId": interrupt_id, "kind": record.kind, **safe_response})
     await session.commit()
     response = await serialize_run(session, run)
     return await complete_idempotency(session, ledger, response)
+
+
+@app.get("/api/v1/runs/{run_id}/interrupts/{interrupt_id}/options")
+async def interrupt_options(run_id: str, interrupt_id: str, offset: int = Query(default=0, ge=0), limit: int = Query(default=20, ge=1, le=100), keyword: str = Query(default="", max_length=200), principal: Principal = Depends(_operator), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+    await _control_run(session, run_id, principal)
+    record = await session.get(InterruptRecord, interrupt_id)
+    if not record or record.run_id != run_id or record.kind != "HITL_SELECT" or record.status != "OPEN" or not record.option_artifact_id:
+        raise HTTPException(404, "待选择的HITL候选不存在")
+    artifact = await session.get(EncryptedArtifact, record.option_artifact_id)
+    if not artifact:
+        raise HTTPException(409, "候选数据不存在或已清理")
+    candidates = SecretBox().open(artifact.ciphertext, purpose="artifact:" + artifact.id).get("candidates") or []
+    needle = keyword.strip().casefold()
+    if needle:
+        candidates = [item for item in candidates if needle in (str(item.get("label") or "") + " " + json.dumps(item.get("display") or {}, ensure_ascii=False)).casefold()]
+    total, page = len(candidates), candidates[offset:offset + limit]
+    request = record.request_payload or {}
+    return {"runId": run_id, "interruptId": record.id, "kind": record.kind, "title": request.get("title"), "selectionMode": request.get("selectionMode"), "displayFields": request.get("displayFields"), "minimumSelections": request.get("minimumSelections"), "maximumSelections": request.get("maximumSelections"), "items": [{"candidateId": item.get("candidateId"), "label": item.get("label"), "display": item.get("display")} for item in page], "total": total, "offset": offset, "limit": limit, "hasMore": offset + len(page) < total, "keyword": keyword}
 
 
 @app.post("/api/v1/runs/{run_id}/credential")
@@ -643,7 +738,8 @@ async def attempt_diagnostic(run_id: str, attempt_id: str, principal: Principal 
 @app.post("/api/v1/admin/retention/run")
 async def retention_cleanup(principal: Principal = Depends(_admin), session: AsyncSession = Depends(get_session)) -> dict[str, int]:
     now = datetime.now(UTC)
-    artifact_result = await session.execute(delete(EncryptedArtifact).where(EncryptedArtifact.expires_at <= now))
+    protected = exists(select(InterruptRecord.id).where(InterruptRecord.status.in_({"OPEN", "RESUME_PENDING"}), or_(InterruptRecord.option_artifact_id == EncryptedArtifact.id, InterruptRecord.response_artifact_id == EncryptedArtifact.id)))
+    artifact_result = await session.execute(delete(EncryptedArtifact).where(EncryptedArtifact.expires_at <= now, ~protected))
     credential_result = await session.execute(delete(RunCredential).where(RunCredential.expires_at <= now))
     await session.commit()
     return {"artifactsDeleted": artifact_result.rowcount or 0, "credentialsDeleted": credential_result.rowcount or 0}

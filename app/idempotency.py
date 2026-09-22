@@ -85,3 +85,14 @@ async def complete(session: AsyncSession, record: WorkflowControlRequest | None,
             record.run_id = str(response.get("runId") or "") or None
         await session.commit()
     return response
+
+
+async def abandon(session: AsyncSession, record: WorkflowControlRequest | None) -> None:
+    """Release a reservation when business validation rejects the request.
+
+    A rejected call did not mutate the controlled resource and therefore must
+    not leave its idempotency key permanently stuck at response_status=102.
+    """
+    if record and record.response_status == 102:
+        await session.delete(record)
+        await session.commit()

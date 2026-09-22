@@ -6,9 +6,11 @@
 
 SQL读、条件、LLM、HITL等节点及其生产/测试/模拟模式统一由 [Node Registry与节点扩展设计](node-registry-design.md) 管理。
 
+面向知识管理员的逐节点页面配置、JSON Pointer和完整示例见 [工作流节点配置使用说明书](workflow-node-configuration-guide.md)。
+
 ## 编排模型
 
-流程画布保存节点位置、控制边和结构化配置，但不允许携带 Python代码或任意 shell命令。`sql_read`、`condition`、`human_input`、`approval`、`end` 均来自节点注册表；新增操作类型通过 Handler、配置 Schema、输入 Schema、输出 Schema和风险级别扩展，不修改调度核心。
+流程画布保存节点位置、控制边和结构化配置，但不允许携带 Python代码或任意 shell命令。`sql_read`、`condition`、`hitl_select`、`hitl_form`、`human_input`、`approval`、`end` 均来自节点注册表；新增操作类型通过 Handler、配置 Schema、输入 Schema、输出 Schema和风险级别扩展，不修改调度核心。
 
 控制依赖和数据依赖分离：边决定节点何时可运行；`NODE_OUTPUT` 输入通过来源节点 ID和 JSON Pointer取值。发布校验会拒绝环、不可达节点、非法条件、无默认分支，以及引用非前置节点的数据绑定。
 

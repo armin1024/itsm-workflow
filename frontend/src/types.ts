@@ -11,7 +11,7 @@ export type NodeStatus =
 
 export type WorkflowNode = {
   id: string;
-  type: "sql_read" | "condition" | "human_input" | "approval" | "end";
+  type: "sql_read" | "condition" | "hitl_select" | "hitl_form" | "human_input" | "approval" | "end";
   title: string;
   config: Record<string, unknown>;
   inputs: Array<{

@@ -29,7 +29,7 @@ http://127.0.0.1:8090/mcp
 http://workflow.internal:8089/mcp
 ```
 
-连接必须携带与 REST相同的 `Authorization` 和 `X-AOPS-Api-Key`。当前提供13个工具，包含紧凑增量等待和节点结果分页读取；完整 Schema、Hermes配置和操作约束见 [MCP 与 Agent 接入指南](mcp-agent-integration.md)。健康检查为 `GET http://127.0.0.1:8090/health`。
+连接必须携带与 REST相同的 `Authorization` 和 `X-AOPS-Api-Key`。当前提供16个工具，包含紧凑增量等待、强类型HITL回复、候选分页和节点结果读取；完整 Schema、Hermes配置和操作约束见 [MCP 与 Agent 接入指南](mcp-agent-integration.md)。健康检查为 `GET http://127.0.0.1:8090/health`。
 
 ## 知识与版本
 
@@ -155,9 +155,9 @@ DELETE /api/v1/knowledge/{knowledgeId}
 
 采用可审计软删除：经验从清单、审核队列、全文/向量检索和 MCP匹配中消失，但历史工作流版本与运行记录保留。管理员可删除任意经验；普通操作员只能删除自己尚未提交的 `DRAFT`。独立审核 Token没有删除权限。
 
-`GET /node-types` 返回运行时节点注册表的配置、输入和输出 Schema。`enabledForAuthoring` 表示当前 UI是否开放创建该类型。首版 UI开放 `sql_read`、`condition` 和 `end`；引擎还支持由 API 定义的 `human_input`、`approval`。
+`GET /node-types` 返回运行时节点注册表的配置、输入和输出 Schema。`enabledForAuthoring` 表示当前 UI是否开放创建该类型。管理画布开放 `sql_read`、`condition`、`hitl_select`、`hitl_form` 和 `end`；引擎还保留 `human_input`、`approval`。
 
-管理画布当前开放 `sql_read`、`condition` 和 `end`。控制流由 `edges[]` 表示；数据依赖由节点输入单独表示：
+控制流由 `edges[]` 表示；数据依赖由节点输入单独表示：
 
 ```json
 {"name":"customer_id","type":"integer","source":{"kind":"NODE_OUTPUT","nodeId":"sql-1","jsonPointer":"/data/0/id"}}
@@ -307,6 +307,41 @@ SUCCEEDED / FAILED / CANCEL_REQUESTED / CANCELLED / UNKNOWN
 ```
 
 `UNKNOWN` 表示 Worker可能已将请求发送给 AOPS，但未能持久化结果；平台不会自动重试。
+
+## HITL人工交互
+
+`hitl_select`从前置节点的对象数组生成候选；即使只有一个候选也进入`WAITING_INPUT`等待确认。候选真实值加密保存，列表接口只返回Workflow声明的展示字段。
+
+```http
+GET /api/v1/runs/{runId}/interrupts/{interruptId}/options?offset=0&limit=20&keyword=王五
+```
+
+```json
+{
+  "items":[{"candidateId":"candidate_x","label":"王五 / C001","display":{"customer_name":"王五","customer_id":"C001"}}],
+  "total":1,"offset":0,"limit":20,"hasMore":false,"selectionMode":"SINGLE"
+}
+```
+
+候选选择、表单提交和取消继续使用统一恢复接口，并建议为每次用户决定传新的`Idempotency-Key`：
+
+```http
+POST /api/v1/runs/{runId}/interrupts/{interruptId}/resume
+```
+
+```json
+{"payload":{"action":"SELECT","candidateIds":["candidate_x"]}}
+```
+
+```json
+{"payload":{"action":"SUBMIT","values":{"customer_id":"C001","limit":20}}}
+```
+
+```json
+{"payload":{"action":"CANCEL"}}
+```
+
+成功回复后中断先进入`RESUME_PENDING`，Worker恢复并生成加密节点结果后变为`RESOLVED`。不同请求重复回复返回409；同一幂等键返回第一次响应。表单值、隐藏候选字段和下游输出值不会写入事件或明文恢复状态。
 
 ## 运维
 

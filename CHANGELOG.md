@@ -1,5 +1,18 @@
 # 版本说明
 
+## 0.7.1
+
+- 新增 `workflow_hitl_form_reply`、`workflow_hitl_select_reply` 强类型MCP工具，Agent无需猜测payload结构；HITL取消统一复用 `workflow_run_cancel`。
+- 修复HITL业务校验失败后幂等键残留在处理中状态的问题。
+- MCP错误信息保留服务端明确校验原因。
+
+## 0.7.0
+
+- 新增 `hitl_select` 和 `hitl_form` 一等工作流节点，支持加密候选、结构化表单和LangGraph恢复。
+- Web与MCP共享同一中断状态；候选支持分页、关键词过滤、单选/多选和显式确认。
+- 新增 `workflow_interaction_options` MCP工具，`workflow_run_wait`返回明确的HITL下一步指令。
+- 人工输入、隐藏候选字段和下游输出值不写入事件、日志或明文运行恢复状态。
+
 ## 0.6.3
 
 - 发布流程显式排除 `._*`、`.DS_Store`、`.AppleDouble` 和 `__MACOSX`，关闭 tar xattr、ACL和 SELinux扩展元数据。

@@ -144,11 +144,15 @@ export const api = {
     runId: string,
     interruptId: string,
     payload: Record<string, unknown>,
+    idempotencyKey?: string,
   ) =>
     request<Run>(`/api/v1/runs/${runId}/interrupts/${interruptId}/resume`, {
       method: "POST",
       body: JSON.stringify({ payload }),
+      headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined,
     }),
+  interactionOptions: (runId: string, interruptId: string, params: { offset?: number; limit?: number; keyword?: string } = {}) =>
+    request<{ interruptId: string; title: string; selectionMode: string; displayFields: Array<Record<string, unknown>>; minimumSelections: number; maximumSelections: number; items: Array<{ candidateId: string; label: string; display: Record<string, unknown> }>; total: number; offset: number; limit: number; hasMore: boolean }>(query(`/api/v1/runs/${runId}/interrupts/${interruptId}/options`, params)),
   updateCredential: (runId: string, apiKey: string) =>
     request<Run>(`/api/v1/runs/${runId}/credential`, {
       method: "POST",

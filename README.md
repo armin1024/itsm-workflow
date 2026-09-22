@@ -1,13 +1,13 @@
 # ITSM Workflow
 
-当前稳定版本：`0.6.3`。
+当前稳定版本：`0.7.1`。
 
 面向 AOPS 生产操作的可观测、可中断、可恢复工作流平台。知识、不可变工作流版本、运行状态、LangGraph checkpoint、审批与审计统一保存在 PostgreSQL。
 
 当前实现：
 
 - 版本化 DAG与发布校验。
-- `sql_read`、`condition`、`human_input`、`approval`、`end` 节点。
+- `sql_read`、`condition`、`hitl_select`、`hitl_form`、`human_input`、`approval`、`end` 节点。
 - 系统 `aops-cli db read` 安全执行。
 - 计划哈希确认、节点级中断、恢复、暂停、取消和未知结果处理。
 - AES-256-GCM运行凭据与节点结果加密。
@@ -23,7 +23,7 @@
 - 执行中心和知识清单支持权限感知的后端分页、关键词查询、状态筛选及可恢复URL查询状态。
 - 创建运行时根据经验中的 `RUN_INPUT` 动态生成类型化表单；节点输出绑定参数不会重复向用户索要。
 - `FAILED` 节点支持人工重试；`UNKNOWN` 节点要求操作者选择重试或标记失败。
-- 独立 Streamable HTTP MCP Adapter，提供经验匹配、计划确认、紧凑事实短等待、节点结果读取、中断和恢复等13个工具。
+- 独立 Streamable HTTP MCP Adapter，提供经验匹配、计划确认、紧凑事实短等待、强类型HITL回复、候选分页、节点结果读取、中断和恢复等16个工具。
 - 节点失败记录可读错误原因，并为运行发起人和管理员提供加密、脱敏的 stdout/stderr诊断。
 - 知识、运行与不可变版本支持权限感知的字段级精确筛选和生命周期时间线。
 - 原生 DAG v2跨环境导入导出支持数据库路径映射、重复检测、待审核导入、快速路径替换和迁移审计。
@@ -31,7 +31,7 @@
 ## 经验创建
 
 - **从工单提取**：使用当前登录人的 AOPS API Key调用系统 `aops-cli event-center info --id <id>` 和 `aops-cli event-center audit_timeline --id <id>`。程序只保留明确成功、数据库路径完整且通过只读校验的 `sql_exec_read`，再由内网 LLM生成中文名称、摘要、匹配短语、参数语义和依赖。
-- **手工编排**：在可拖动、可连线的流程画布中添加 SQL读、条件判断和结束节点。点击节点编辑；点击条件出线配置 JSON Pointer、运算符、比较值和默认分支。SQL参数既可来自运行输入，也可通过 `来源节点 + JSON Pointer` 绑定图上任意可达前置节点的输出。
+- **手工编排**：在可拖动、可连线的流程画布中添加 SQL读、条件判断、人工选择、人工表单和结束节点。点击节点编辑；点击条件出线配置 JSON Pointer、运算符、比较值和默认分支。SQL参数既可来自运行输入，也可通过 `来源节点 + JSON Pointer` 绑定图上任意可达前置节点的输出。
 
 两种方式均先创建草稿。管理员在流程详情页核对、编辑后发布；发布生成不可变版本，既有运行不受后续编辑影响。
 
@@ -111,4 +111,5 @@ python3 -c 'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_
 - [MCP 与 Agent 接入实施计划](docs/mcp-implementation-plan.md)
 - [通用节点与卡片扩展平台设计](docs/node-extension-platform.md)
 - [统一Node Registry与节点扩展设计](docs/node-registry-design.md)
+- [工作流节点配置使用说明书](docs/workflow-node-configuration-guide.md)
 - [0.6.x版本说明](CHANGELOG.md)

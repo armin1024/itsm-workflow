@@ -1,6 +1,6 @@
 # Linux x86_64 非 Docker部署
 
-当前推荐部署版本为 `0.6.3`。不要继续部署 `0.6.0`：该版本的 Alembic revision超过 PostgreSQL默认版本字段长度。`0.6.1`修复迁移，`0.6.2`修复可编辑导出包的哈希策略，`0.6.3`进一步清理并阻止 macOS AppleDouble元数据进入安装目录。
+当前推荐部署版本为 `0.7.1`。该版本包含可恢复HITL、强类型MCP回复工具及失败校验后的幂等键释放修复。
 
 ## 前置条件
 
@@ -44,8 +44,8 @@ KNOWLEDGE_ENVIRONMENT_NAME=生产
 ## 安装
 
 ```bash
-tar -xzf itsm-workflow-0.6.3-linux-x86_64.tar.gz
-cd itsm-workflow-0.6.3-linux-x86_64
+tar -xzf itsm-workflow-0.7.1-linux-x86_64.tar.gz
+cd itsm-workflow-0.7.1-linux-x86_64
 sudo ./install.sh --no-start
 sudo vi /etc/itsm-workflow/service.env
 sudo systemctl start itsm-workflow-migrate
@@ -97,7 +97,7 @@ sudo systemctl show itsm-workflow-migrate \
 Running upgrade 0006_list_search_indexes -> 0007_diagnostics_transfer
 ```
 
-如果日志出现 `value too long for type character varying(32)`，说明仍在使用 `0.6.0`迁移文件，请安装 `0.6.3`。如果出现 `SyntaxError`、`source code string cannot contain null bytes` 或文件名以 `._` 开头，说明传输链路生成了 AppleDouble文件；`0.6.3`安装器会自动清理，也可以先只读检查：
+如果日志出现 `value too long for type character varying(32)`，说明仍在使用 `0.6.0`迁移文件，请安装 `0.7.1`。如果出现 `SyntaxError`、`source code string cannot contain null bytes` 或文件名以 `._` 开头，说明传输链路生成了 AppleDouble文件；`0.7.1`安装器会自动清理，也可以先只读检查：
 
 ```bash
 sudo find /opt/itsm-workflow -name '._*' -o -name '.DS_Store' -o -name '__MACOSX'
@@ -106,7 +106,7 @@ sudo find /opt/itsm-workflow -name '._*' -o -name '.DS_Store' -o -name '__MACOSX
 安装包本身可这样验收，命令应无输出：
 
 ```bash
-tar -tzf itsm-workflow-0.6.3-linux-x86_64.tar.gz \
+tar -tzf itsm-workflow-0.7.1-linux-x86_64.tar.gz \
   | grep -E '(^|/)(\._|\.DS_Store|\.AppleDouble|__MACOSX)(/|$)'
 ```
 
@@ -236,7 +236,7 @@ https://test.mg.tf.cn/aops/itsm-workflow/mcp
 
 安装器会停止 API、Worker、MCP和迁移单元，替换程序文件但保留 `/etc/itsm-workflow/service.env`。启动迁移单元成功后才能启动 API、Worker和MCP。
 
-从任意 `0.5.x/0.6.x`升级时，直接安装 `0.6.3`并运行迁移即可；PostgreSQL迁移使用事务DDL，失败不会把 Alembic版本号推进到一半。升级后检查：
+从任意 `0.5.x/0.6.x/0.7.0`升级时，直接安装 `0.7.1`并运行迁移即可；PostgreSQL迁移使用事务DDL，失败不会把 Alembic版本号推进到一半。升级后检查：
 
 ```bash
 curl http://127.0.0.1:8089/api/v1/health

@@ -1,5 +1,7 @@
 # 统一Node Registry与节点扩展设计
 
+> `0.7.x`实施边界：生产运行只增加`hitl_select`和`hitl_form`，候选直接来自前置节点结果；不实现运行时`llm_extract`、`REFINE`、`MANUAL_VALUE`或DAG回边。文档后续提到的LLM回炼仅作为未来设计，不属于本版本。
+
 ## 设计结论
 
 以下能力全部是Node Registry管理的节点类型：
@@ -7,11 +9,12 @@
 ```text
 sql_read
 condition
-llm_extract
 hitl_select
+hitl_form
 human_input
 approval
 end
+llm_extract（未来）
 未来新增的其他生产操作节点
 ```
 
@@ -26,7 +29,7 @@ DRY_RUN     只校验和渲染计划，不产生外部调用
 
 Workflow Compiler、生产Executor和Studio必须消费同一个Node Registry，避免分别维护节点Schema、参数规则和运行语义。
 
-需要区分两个阶段：Compiler为了“生成草稿”而调用LLM属于编译器内部处理，此时工作流尚不存在，所以它不是DAG节点；草稿或生产工作流中出现的LLM分析必须表示为正式`llm_extract`节点，并由Registry管理。HITL、SQL读和条件判断只要出现在DAG中，也全部是正式节点。
+需要区分两个阶段：Compiler为了“生成草稿”而调用LLM属于编译器内部处理，此时工作流尚不存在，所以它不是DAG节点。`0.7.x`生产DAG不包含LLM节点；HITL、SQL读和条件判断只要出现在DAG中，均为Registry正式节点。
 
 ## Node Registry在架构中的位置
 
@@ -328,7 +331,7 @@ sequenceDiagram
     UI-->>D: 展示输入、输出、事件和诊断
 ```
 
-## HITL反馈与LLM重新提取
+## 未来设计：HITL反馈与LLM重新提取（0.7.x不实现）
 
 `hitl_select`收到多候选时，用户不仅可以选择，也可以补充信息让上游LLM重新生成候选，或直接输入明确值。
 

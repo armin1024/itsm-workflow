@@ -70,7 +70,7 @@ sequenceDiagram
     participant W as worker.service
     participant C as mcp.service
 
-    O->>I: 安装0.6.3 --no-start
+    O->>I: 安装0.7.1 --no-start
     I->>I: 校验Linux x86_64和服务账号
     I->>I: 替换程序并保留service.env
     I->>I: 清理._* / .DS_Store / __MACOSX

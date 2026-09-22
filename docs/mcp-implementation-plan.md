@@ -2,7 +2,7 @@
 
 ## 1. 目标与实施状态
 
-计划中的事实快照、紧凑短等待 REST接口、幂等账本、独立 Streamable HTTP MCP服务、13个 Agent工具、节点结果分页读取、systemd单元和协议测试已经实现。保留本文作为实现结构、验收和后续扩展依据。
+计划中的事实快照、紧凑短等待 REST接口、幂等账本、独立 Streamable HTTP MCP服务、16个 Agent工具、强类型HITL回复、候选分页、节点结果读取、systemd单元和协议测试已经实现。保留本文作为实现结构、验收和后续扩展依据。
 
 在不改变现有知识、LangGraph、Worker 和 `aops-cli` 执行语义的前提下，新增独立 MCP Adapter，使 Hermes 或其他 Agent 能够完成：
 

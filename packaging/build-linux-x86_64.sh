@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] || { echo "Linux x86_64 build host required" >&2; exit 1; }
-VERSION=${1:-0.6.3}
+VERSION=${1:-0.7.1}
 OUTPUT=${2:-dist}
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 STAGE="$ROOT/.package-stage/itsm-workflow-$VERSION-linux-x86_64"

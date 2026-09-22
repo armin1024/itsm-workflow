@@ -42,6 +42,6 @@ with tempfile.TemporaryDirectory() as directory:
         async with Client(mcp) as client:
             tools = await client.list_tools()
             names = {item.name for item in tools.tools}
-            assert {"knowledge_match", "workflow_plan", "workflow_run_wait", "workflow_run_cancel"} <= names
+            assert {"knowledge_match", "workflow_plan", "workflow_run_wait", "workflow_interaction_options", "workflow_hitl_form_reply", "workflow_hitl_select_reply", "workflow_interrupt_reply", "workflow_run_cancel"} <= names
     asyncio.run(verify_mcp())
     print("Release acceptance passed", __version__)

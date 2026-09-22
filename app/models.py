@@ -147,7 +147,12 @@ class InterruptRecord(Base):
     status: Mapped[str] = mapped_column(String(24), default="OPEN")
     request_payload: Mapped[dict[str, Any]] = mapped_column(JsonType)
     response_payload: Mapped[dict[str, Any] | None] = mapped_column(JsonType, nullable=True)
+    option_artifact_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    response_artifact_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    attempt_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    option_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
 
