@@ -567,7 +567,7 @@ wheels = [
 
 [[package]]
 name = "itsm-workflow"
-version = "0.4.1"
+version = "0.7.1"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
@@ -577,6 +577,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "greenlet" },
     { name = "httpx" },
+    { name = "jsonschema" },
     { name = "langgraph" },
     { name = "langgraph-checkpoint-postgres" },
     { name = "mcp" },
@@ -604,6 +605,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "greenlet", specifier = "==3.2.4" },
     { name = "httpx", specifier = ">=0.28,<1" },
+    { name = "jsonschema", specifier = ">=4.23,<5" },
     { name = "langgraph", specifier = ">=1.0,<2" },
     { name = "langgraph-checkpoint-postgres", specifier = ">=3,<4" },
     { name = "mcp", specifier = ">=2,<3" },

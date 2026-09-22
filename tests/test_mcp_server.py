@@ -21,6 +21,8 @@ async def test_mcp_exposes_complete_agent_workflow_toolset():
         "knowledge_match", "knowledge_get", "workflow_plan", "workflow_run_approve",
         "workflow_run_get", "workflow_run_wait", "workflow_run_pause",
         "workflow_run_resume", "workflow_run_cancel", "workflow_interrupt_reply",
+        "workflow_hitl_form_reply", "workflow_hitl_select_reply",
+        "workflow_interaction_options",
         "workflow_run_credential_refresh", "workflow_node_result_get", "workflow_node_retry",
     ]
 
@@ -55,3 +57,34 @@ async def test_mcp_wait_is_compact_and_result_is_paginated(monkeypatch):
     assert waited.structured_content["agentDirective"] == "REPORT_DISPLAY_TEXT_BEFORE_NEXT_WAIT"
     assert result.structured_content["rows"] == [{"id": 2}]
     assert result.structured_content["hasMore"] is False
+
+
+@pytest.mark.asyncio
+async def test_mcp_wait_directs_agent_to_hitl_options(monkeypatch):
+    async def fake_request(_ctx, _method, path, **_kwargs):
+        assert path.endswith("/wait")
+        return {"runId": "run_1", "status": "WAITING_INPUT", "terminal": False, "progress": {"current": 1, "total": 3}, "events": [], "interaction": {"interruptId": "int_1", "kind": "HITL_SELECT", "title": "选择客户", "optionCount": 2}}
+    monkeypatch.setattr(mcp_server, "_request", fake_request)
+    async with Client(mcp_server.mcp) as client:
+        waited = await client.call_tool("workflow_run_wait", {"run_id": "run_1", "after_event_id": 0, "wait_seconds": 0})
+    assert waited.structured_content["agentDirective"] == "FETCH_INTERACTION_OPTIONS"
+    assert waited.structured_content["requiredNextToolCalls"][0]["tool"] == "workflow_interaction_options"
+
+
+@pytest.mark.asyncio
+async def test_typed_hitl_tools_wrap_payload_without_guessing(monkeypatch):
+    requests = []
+    async def fake_request(_ctx, method, path, **kwargs):
+        requests.append((method, path, kwargs))
+        if method == "GET":
+            return {"interrupts": [{"interruptId": "int_1", "kind": "HITL_FORM", "status": "OPEN"}, {"interruptId": "int_2", "kind": "HITL_SELECT", "status": "OPEN"}]}
+        return {"status": "QUEUED"}
+    monkeypatch.setattr(mcp_server, "_request", fake_request)
+    async with Client(mcp_server.mcp) as client:
+        form = await client.call_tool("workflow_hitl_form_reply", {"run_id": "run_1", "values": {"bot_id": "bot-1"}})
+        selected = await client.call_tool("workflow_hitl_select_reply", {"run_id": "run_1", "candidate_ids": ["candidate_1"]})
+    assert form.is_error is False and selected.is_error is False
+    posts = [item for item in requests if item[0] == "POST"]
+    assert posts[0][1].endswith("/interrupts/int_1/resume") and posts[0][2]["body"] == {"payload": {"action": "SUBMIT", "values": {"bot_id": "bot-1"}}}
+    assert posts[1][1].endswith("/interrupts/int_2/resume") and posts[1][2]["body"] == {"payload": {"action": "SELECT", "candidateIds": ["candidate_1"]}}
+    assert posts[0][2]["idempotency_key"].startswith("mcp-hitl-form-submit-")

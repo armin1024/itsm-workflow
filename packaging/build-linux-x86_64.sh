@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] || { echo "Linux x86_64 build host required" >&2; exit 1; }
-VERSION=${1:-0.4.1}
+VERSION=${1:-0.7.1}
 OUTPUT=${2:-dist}
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 STAGE="$ROOT/.package-stage/itsm-workflow-$VERSION-linux-x86_64"
@@ -24,10 +24,13 @@ cp -R frontend/dist "$STAGE/frontend/"
 cp -R "$PYTHON_ROOT" "$STAGE/python"
 cp pyproject.toml uv.lock alembic.ini README.md "$STAGE/"
 cp packaging/install.sh packaging/service.env.example packaging/mcp.env.example packaging/itsm-workflow-api.service.in packaging/itsm-workflow-worker.service.in packaging/itsm-workflow-migrate.service.in packaging/itsm-workflow-mcp.service.in packaging/verify-release.py packaging/verify-glibc.py "$STAGE/"
+# Never ship macOS Finder or AppleDouble metadata when the source workspace is
+# prepared on macOS and mounted into the Linux release builder.
+find "$STAGE" \( -name '.DS_Store' -o -name '._*' -o -name '.AppleDouble' -o -name '__MACOSX' \) -prune -exec rm -rf {} +
 PYTHONPATH="$STAGE/site-packages:$STAGE" "$STAGE/python/bin/python3" "$STAGE/verify-release.py"
 PYTHONPATH="$STAGE/site-packages:$STAGE" "$STAGE/python/bin/python3" "$ROOT/packaging/verify-glibc.py" "$STAGE"
 find "$STAGE" -type d -name __pycache__ -prune -exec rm -rf {} +
-tar -C "$(dirname "$STAGE")" -czf "$ARCHIVE" "$(basename "$STAGE")"
+COPYFILE_DISABLE=1 tar --no-xattrs --no-acls --no-selinux -C "$(dirname "$STAGE")" -czf "$ARCHIVE" "$(basename "$STAGE")"
 (cd "$OUTPUT" && sha256sum "$(basename "$ARCHIVE")") > "$ARCHIVE.sha256"
 rm -rf "$ROOT/.package-stage" "$RUNTIME" "$REQ"
 echo "Created $ARCHIVE"

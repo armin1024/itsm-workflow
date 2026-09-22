@@ -3,13 +3,14 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.cli import CliExecutionError, CliMetadata, CliResult
 from app.crypto import SecretBox, canonical_hash
 from app.db import Base
 from app.engine import WorkflowEngine
-from app.models import RunCredential, WorkflowRun
+from app.models import EncryptedArtifact, InterruptRecord, NodeAttempt, RunCredential, WorkflowRun
 from app.runs import update_credential
 from app.workflow import WorkflowDefinition
 
@@ -152,4 +153,51 @@ async def test_failed_graph_node_can_resume_as_a_new_attempt(tmp_path, monkeypat
         run = await session.get(WorkflowRun, run_id)
         assert run.node_statuses["sql-1"] == "SUCCEEDED"
     assert calls == 2
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_hitl_select_interrupt_resumes_once_and_binds_output(tmp_path, monkeypatch):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'hitl.db'}")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    definition = WorkflowDefinition.model_validate({
+        "entryNodeId": "sql-1",
+        "nodes": [
+            {"id": "sql-1", "type": "sql_read", "title": "查询", "config": {"databaseRef": "db", "sqlTemplate": "SELECT 1"}, "inputs": []},
+            {"id": "choose", "type": "hitl_select", "title": "选择客户", "config": {"title": "选择客户", "selectionMode": "SINGLE", "idPath": "/customer_id", "labelTemplate": "{{name}} / {{customer_id}}", "displayFields": [{"name": "name", "label": "姓名", "path": "/name"}, {"name": "customer_id", "label": "编号", "path": "/customer_id"}], "outputFields": [{"name": "customer_id", "path": "/customer_id"}]}, "inputs": [{"name": "rows", "type": "array", "source": {"kind": "NODE_OUTPUT", "nodeId": "sql-1", "jsonPointer": "/data"}}]},
+            {"id": "done", "type": "end", "title": "完成"},
+        ],
+        "edges": [{"id": "e1", "source": "sql-1", "target": "choose"}, {"id": "e2", "source": "choose", "target": "done"}],
+    })
+    run_id = "run_hitl"
+    async with sessions() as session:
+        session.add(WorkflowRun(id=run_id, knowledge_id="knw", workflow_version_id="wfv", ticket_id=1, initiated_by="uid", status="RUNNING", plan_hash=canonical_hash({}), workflow_snapshot=definition.model_dump(mode="json"), run_inputs={}, node_statuses={node.id: "PENDING" for node in definition.nodes}, output_refs={}))
+        session.add(RunCredential(id="hitl-cred", run_id=run_id, uid="uid", ciphertext=SecretBox().seal({"apiKey": "secret"}, purpose="run-credential:" + run_id), expires_at=datetime.now(UTC) + timedelta(hours=1)))
+        await session.commit()
+    async def fake_execute(**_kwargs):
+        return CliResult({"status": 0, "data": [{"customer_id": "C1", "name": "王五", "secret": "never expose"}, {"customer_id": "C2", "name": "王五", "secret": "never expose"}]}, b"{}", b"", 0, CliMetadata("test", "a" * 64))
+    monkeypatch.setattr("app.engine.execute_sql_read", fake_execute)
+    graph = WorkflowEngine(sessions, InMemorySaver()).compile(definition)
+    config = {"configurable": {"thread_id": run_id}}
+    await graph.ainvoke({"run_id": run_id, "inputs": {}, "output_refs": {}, "routes": {}}, config=config)
+    async with sessions() as session:
+        run = await session.get(WorkflowRun, run_id)
+        record = await session.scalar(select(InterruptRecord).where(InterruptRecord.run_id == run_id))
+        artifact = await session.get(EncryptedArtifact, record.option_artifact_id)
+        candidates = SecretBox().open(artifact.ciphertext, purpose="artifact:" + artifact.id)["candidates"]
+        assert run.status == "WAITING_INPUT" and record.option_count == 2
+        assert "never expose" not in str(record.request_payload)
+        record.status, record.resolved_by = "RESUME_PENDING", "uid"
+        await session.commit()
+        selected_id = candidates[1]["candidateId"]
+    await graph.ainvoke(Command(resume={"interactionId": record.id, "action": "SELECT", "candidateIds": [selected_id]}), config=config)
+    async with sessions() as session:
+        run = await session.get(WorkflowRun, run_id)
+        attempts = list((await session.execute(select(NodeAttempt).where(NodeAttempt.run_id == run_id, NodeAttempt.node_id == "choose"))).scalars())
+        output = await session.get(EncryptedArtifact, run.output_refs["choose"])
+        payload = SecretBox().open(output.ciphertext, purpose="artifact:" + output.id)
+        assert run.node_statuses["choose"] == "SUCCEEDED" and len(attempts) == 1
+        assert payload["output"] == {"selected": [{"candidateId": selected_id, "values": {"customer_id": "C2"}}]}
     await engine.dispose()

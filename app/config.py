@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     workflow_review_token: str = ""
     workflow_review_actor_uid: str = "workflow-review-service"
     workflow_public_url: str = "http://127.0.0.1:8089"
+    knowledge_environment_name: str = ""
     mcp_internal_api_url: str = "http://127.0.0.1:8089/api/v1"
     mcp_bind_host: str = "127.0.0.1"
     mcp_port: int = Field(default=8090, ge=1, le=65535)

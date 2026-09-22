@@ -9,13 +9,13 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.serde.encrypted import EncryptedSerializer
 from langgraph.types import Command
-from sqlalchemy import delete, select
+from sqlalchemy import delete, exists, or_, select
 
 from app.config import settings
 from app.db import SessionLocal, initialize_database
 from app.engine import WorkflowEngine
 from app.events import emit_event
-from app.models import NodeAttempt, RunCredential, WorkflowRun
+from app.models import InterruptRecord, NodeAttempt, RunCredential, WorkflowRun
 from app.models import EncryptedArtifact
 from app.workflow import WorkflowDefinition
 
@@ -30,6 +30,11 @@ class WorkflowWorker:
         async with SessionLocal() as session:
             result = await session.execute(select(WorkflowRun).where(WorkflowRun.status == "RUNNING", WorkflowRun.lease_expires_at < now))
             for run in result.scalars():
+                pending_hitl = await session.scalar(select(InterruptRecord).where(InterruptRecord.run_id == run.id, InterruptRecord.node_id == run.current_node_id, InterruptRecord.status == "RESUME_PENDING", InterruptRecord.kind.in_({"HITL_SELECT", "HITL_FORM"})))
+                if pending_hitl:
+                    run.status, run.waiting_reason, run.lease_owner, run.lease_expires_at = "QUEUED", None, None, None
+                    await emit_event(session, run, "HITL_RECOVERY_REQUEUED", node_id=run.current_node_id, status="QUEUED", summary="人工回复已保存，安全重新排队")
+                    continue
                 attempt = await session.scalar(select(NodeAttempt).where(NodeAttempt.run_id == run.id, NodeAttempt.status == "STARTED").order_by(NodeAttempt.started_at.desc()))
                 run.status, run.waiting_reason = "UNKNOWN", "Worker 在外部操作期间中断，需要人工处理"
                 if attempt:
@@ -126,7 +131,8 @@ class WorkflowWorker:
         now = datetime.now(UTC)
         cutoff = now - timedelta(days=settings.result_retention_days)
         async with SessionLocal() as session:
-            await session.execute(delete(EncryptedArtifact).where(EncryptedArtifact.expires_at <= now))
+            protected = exists(select(InterruptRecord.id).where(InterruptRecord.status.in_({"OPEN", "RESUME_PENDING"}), or_(InterruptRecord.option_artifact_id == EncryptedArtifact.id, InterruptRecord.response_artifact_id == EncryptedArtifact.id)))
+            await session.execute(delete(EncryptedArtifact).where(EncryptedArtifact.expires_at <= now, ~protected))
             await session.execute(delete(RunCredential).where(RunCredential.expires_at <= now))
             result = await session.execute(select(WorkflowRun).where(WorkflowRun.finished_at.is_not(None), WorkflowRun.finished_at <= cutoff))
             expired_runs = list(result.scalars())

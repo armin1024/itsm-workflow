@@ -100,6 +100,9 @@ REST和 MCP响应均提供运行状态、节点状态、attempt、事件序号�
 | `workflow_run_resume` | `POST /runs/{id}/resume` | 继续已暂停运行 | **是** |
 | `workflow_run_cancel` | `POST /runs/{id}/cancel` | 请求终止运行或当前 CLI 进程组 | **是** |
 | `workflow_interrupt_reply` | `POST /runs/{id}/interrupts/{interruptId}/resume` | 补参或批准风险节点 | **是** |
+| `workflow_interaction_options` | `GET /runs/{id}/interrupts/{interruptId}/options` | 分页读取允许展示的HITL候选 | 否 |
+| `workflow_hitl_form_reply` | 自动定位当前OPEN交互后调用恢复接口 | 只传runId和表单values，其余协议字段由程序补齐 | **是** |
+| `workflow_hitl_select_reply` | 同上 | 只传runId和candidateIds，其余协议字段由程序补齐 | **是** |
 | `workflow_run_credential_refresh` | `POST /runs/{id}/credential` | 从新的连接Header刷新运行凭据 | 用户先更新连接凭据 |
 | `workflow_node_result_get` | `GET /runs/{id}/nodes/{nodeId}/artifact` | 分页读取本次运行节点的真实结果 | 否，但必须遵守运行权限 |
 | `workflow_node_retry` | `POST /runs/{id}/nodes/{nodeId}/retry` | 重试失败/未知节点 | **是** |
@@ -151,6 +154,9 @@ mcp_servers:
         - workflow_run_resume
         - workflow_run_cancel
         - workflow_interrupt_reply
+        - workflow_interaction_options
+        - workflow_hitl_form_reply
+        - workflow_hitl_select_reply
         - workflow_run_credential_refresh
         - workflow_node_result_get
         - workflow_node_retry
@@ -217,10 +223,12 @@ Agent 循环调用 `workflow_run_wait`，每次最长等待10秒。每次返回�
 | 状态 | Agent 行为 |
 |---|---|
 | `WAITING_INPUT` | 展示缺失字段并向用户提问，提交 `workflow_interrupt_reply` |
+| `WAITING_INPUT / HITL_SELECT` | 先调用 `workflow_interaction_options`，展示候选；确认后调用 `workflow_hitl_select_reply` |
+| `WAITING_INPUT / HITL_FORM` | 按字段Schema逐项收集并汇总确认，再调用 `workflow_hitl_form_reply`；不得猜测字段值 |
 | `WAITING_NODE_APPROVAL` | 展示风险节点完整计划，等待明确批准 |
 | `WAITING_CREDENTIAL` | 要求用户重新认证；API Key 不出现在对话或日志中 |
 | `PAUSED` | 告知已在安全边界暂停，等待继续或取消 |
-| `FAILED` | 展示错误类别，询问是否重试失败节点 |
+| `FAILED` | 展示 `errorCode`、事件 `payload.errorMessage` 和安全摘要，询问是否重试失败节点；完整脱敏 stdout/stderr 由运行发起人在控制台“查看诊断”中读取 |
 | `UNKNOWN` | 明确提示可能已经到达 AOPS，让用户先查审计记录，再选择重试或标记失败 |
 
 ### 6. 完成
@@ -257,6 +265,7 @@ Agent 循环调用 `workflow_run_wait`，每次最长等待10秒。每次返回�
 用户要求暂停或取消时立即调用相应工具。WAITING_INPUT和节点审批必须向用户提问。
 运行成功后调用workflow_node_result_get读取本次真实结果，禁止用记忆或历史结果代替。FAILED只能在用户确认后重试；UNKNOWN必须警告请求可能已经到达AOPS，禁止自动重放。
 不要输出、记录或要求用户在聊天中粘贴AOPS API Key。
+HITL_SELECT必须先读取并展示候选，只能通过workflow_hitl_select_reply提交服务返回的candidateId；HITL_FORM必须逐项收集并在提交前汇总确认，然后通过workflow_hitl_form_reply提交values。顶层参数是values而不是payload。单候选也必须确认。取消HITL统一调用workflow_run_cancel。不要猜测参数包装结构，不要在对话中复述未声明的隐藏候选字段。
 ```
 
 ## MCP Adapter 验收要求
@@ -269,3 +278,4 @@ Agent 循环调用 `workflow_run_wait`，每次最长等待10秒。每次返回�
 - 未授权用户对私有经验和运行统一得到 `NOT_FOUND`。
 - Header、API Key、凭据密文不进入日志、事件和 MCP 响应。
 - MCP Adapter异常不能影响 API和 Worker进程。
+- Web和MCP并发回复同一HITL时只能有一个成功；另一方收到已处理冲突并刷新运行事实。

@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlglot import exp, parse, parse_one
 
 from app.node_types import NODE_TYPES
+from app.hitl import validate_hitl_node
 
 
 NODE_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,119}$")
@@ -170,6 +171,8 @@ class WorkflowDefinition(BaseModel):
             expression = parse_one(rendered, read="mysql")
             if not isinstance(expression, READ_ROOTS) or any(expression.find_all(FORBIDDEN_NODES)):
                 raise ValueError(f"节点 {node.id} 不是只读 SQL")
+        elif node.type in {"hitl_select", "hitl_form"}:
+            validate_hitl_node(node.model_dump(mode="json"))
 
 
 def legacy_steps_to_workflow(steps: list[dict[str, Any]]) -> WorkflowDefinition:

@@ -17,6 +17,7 @@ from app.conditions import evaluate, pointer
 from app.config import settings
 from app.crypto import SecretBox, sha256_bytes
 from app.events import emit_event
+from app.hitl import HitlError, build_candidates, validate_form
 from app.models import EncryptedArtifact, InterruptRecord, NodeAttempt, RunCredential, WorkflowRun
 from app.workflow import WorkflowDefinition, WorkflowNode
 
@@ -59,6 +60,8 @@ class WorkflowEngine:
         self.handlers = handlers or {
             "sql_read": self._handle_sql,
             "condition": self._handle_condition,
+            "hitl_select": self._handle_hitl_select,
+            "hitl_form": self._handle_hitl_form,
             "human_input": self._handle_human_input,
             "approval": self._handle_noop,
             "end": self._handle_noop,
@@ -74,6 +77,48 @@ class WorkflowEngine:
         await self._mark_simple_success(state["run_id"], node, "人工输入已完成")
         return {"inputs": state["inputs"]}
 
+    async def _handle_hitl_select(self, node: WorkflowNode, state: RuntimeState, values: dict[str, Any], _outgoing, _all_outgoing) -> dict[str, Any]:
+        try:
+            candidates = build_candidates(node.model_dump(mode="json"), values.get("rows"))
+        except HitlError as exc:
+            await self._mark_hitl_failure(state["run_id"], node, exc.code, str(exc))
+            raise NodeExecutionError(str(exc)) from exc
+        config = node.config
+        request = {
+            "message": str(config.get("title") or node.title), "title": str(config.get("title") or node.title),
+            "selectionMode": config.get("selectionMode"), "displayFields": config.get("displayFields"),
+            "minimumSelections": int(config.get("minimumSelections") or 1),
+            "maximumSelections": int(config.get("maximumSelections") or (1 if config.get("selectionMode") == "SINGLE" else 100)),
+        }
+        record = await self._open_hitl_interrupt(state["run_id"], node, "HITL_SELECT", request, candidates)
+        response = interrupt({"interruptId": record.id, "kind": "HITL_SELECT", **record.request_payload})
+        if not isinstance(response, dict) or response.get("interactionId") != record.id or response.get("action") != "SELECT":
+            raise NodeExecutionError("HITL候选恢复输入无效")
+        artifact = await self._load_artifact(str(record.option_artifact_id), state["run_id"])
+        options = artifact.get("candidates") or []
+        selected_ids = response.get("candidateIds") or []
+        selected = [item for item in options if item.get("candidateId") in selected_ids]
+        minimum, maximum = request["minimumSelections"], request["maximumSelections"]
+        if len(selected) != len(selected_ids) or len(set(selected_ids)) != len(selected_ids) or not minimum <= len(selected) <= maximum:
+            raise NodeExecutionError("HITL候选选择无效")
+        output = {"selected": [{"candidateId": item["candidateId"], "values": item["values"]} for item in selected]}
+        return await self._complete_hitl(record.id, node, state, output, {"action": "SELECT", "candidateIds": selected_ids})
+
+    async def _handle_hitl_form(self, node: WorkflowNode, state: RuntimeState, _values: dict[str, Any], _outgoing, _all_outgoing) -> dict[str, Any]:
+        config = node.config
+        fields = list(config.get("fields") or [])
+        request = {"message": str(config.get("title") or node.title), "title": str(config.get("title") or node.title), "description": str(config.get("description") or ""), "fields": fields}
+        record = await self._open_hitl_interrupt(state["run_id"], node, "HITL_FORM", request, None)
+        response = interrupt({"interruptId": record.id, "kind": "HITL_FORM", **record.request_payload})
+        if not isinstance(response, dict) or response.get("interactionId") != record.id or response.get("action") != "SUBMIT" or not response.get("responseArtifactId"):
+            raise NodeExecutionError("HITL表单恢复输入无效")
+        artifact = await self._load_artifact(str(response["responseArtifactId"]), state["run_id"])
+        try:
+            values = validate_form(fields, artifact.get("values"))
+        except HitlError as exc:
+            raise NodeExecutionError(str(exc)) from exc
+        return await self._complete_hitl(record.id, node, state, {"values": values}, {"action": "SUBMIT", "fieldNames": sorted(values)})
+
     async def _handle_noop(self, node: WorkflowNode, state: RuntimeState, _values: dict[str, Any], _outgoing, _all_outgoing) -> dict[str, Any]:
         await self._mark_simple_success(state["run_id"], node, node.title + "已完成")
         return {}
@@ -84,6 +129,63 @@ class WorkflowEngine:
             if not artifact or artifact.run_id != run_id:
                 raise NodeExecutionError("前置节点结果不存在")
             return SecretBox().open(artifact.ciphertext, purpose="artifact:" + artifact.id)
+
+    @staticmethod
+    def _artifact(session: AsyncSession, *, artifact_id: str, run_id: str, node_id: str, artifact_type: str, payload: dict[str, Any]) -> EncryptedArtifact:
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return EncryptedArtifact(id=artifact_id, run_id=run_id, node_id=node_id, artifact_type=artifact_type, ciphertext=SecretBox().seal(payload, purpose="artifact:" + artifact_id), content_hash=sha256_bytes(encoded), size_bytes=len(encoded), expires_at=datetime.now(UTC) + timedelta(days=settings.result_retention_days))
+
+    async def _open_hitl_interrupt(self, run_id: str, node: WorkflowNode, kind: str, request: dict[str, Any], candidates: list[dict[str, Any]] | None) -> InterruptRecord:
+        async with self.sessions() as session:
+            existing = await session.scalar(select(InterruptRecord).where(InterruptRecord.run_id == run_id, InterruptRecord.node_id == node.id, InterruptRecord.kind == kind, InterruptRecord.status.in_({"OPEN", "RESUME_PENDING"})).order_by(InterruptRecord.created_at.desc()))
+            if existing:
+                return existing
+            run = await session.get(WorkflowRun, run_id)
+            count = await session.scalar(select(func.count()).select_from(NodeAttempt).where(NodeAttempt.run_id == run_id, NodeAttempt.node_id == node.id))
+            attempt = NodeAttempt(id=_id("att_"), run_id=run_id, node_id=node.id, attempt=int(count or 0) + 1, status="WAITING", command_summary=f"{node.type}: {node.title}")
+            session.add(attempt)
+            option_artifact_id = None
+            if candidates is not None:
+                option_artifact_id = _id("art_")
+                session.add(self._artifact(session, artifact_id=option_artifact_id, run_id=run_id, node_id=node.id, artifact_type="HITL_OPTIONS", payload={"candidates": candidates}))
+            record = InterruptRecord(id=_id("int_"), run_id=run_id, node_id=node.id, kind=kind, request_payload={**request, "optionCount": len(candidates or [])}, option_artifact_id=option_artifact_id, attempt_id=attempt.id, option_count=len(candidates or []))
+            session.add(record)
+            statuses = dict(run.node_statuses)
+            statuses[node.id] = "WAITING"
+            run.node_statuses, run.current_node_id, run.status, run.waiting_reason = statuses, node.id, "WAITING_INPUT", request["message"]
+            await emit_event(session, run, "INTERRUPT_OPENED", node_id=node.id, attempt_id=attempt.id, status="WAITING_INPUT", summary=request["message"], payload={"interruptId": record.id, "kind": kind, "optionCount": len(candidates or [])})
+            await session.commit()
+            return record
+
+    async def _complete_hitl(self, record_id: str, node: WorkflowNode, state: RuntimeState, output: dict[str, Any], safe_response: dict[str, Any]) -> dict[str, Any]:
+        artifact_id = _id("art_")
+        async with self.sessions() as session:
+            record = await session.get(InterruptRecord, record_id)
+            run = await session.get(WorkflowRun, state["run_id"])
+            attempt = await session.get(NodeAttempt, str(record.attempt_id))
+            payload = {"input": {"interactionId": record.id, "kind": record.kind}, "output": output}
+            session.add(self._artifact(session, artifact_id=artifact_id, run_id=run.id, node_id=node.id, artifact_type="RESULT", payload=payload))
+            now = datetime.now(UTC)
+            record.status, record.response_payload, record.resolved_at = "RESOLVED", safe_response, now
+            attempt.status, attempt.artifact_id, attempt.finished_at = "SUCCEEDED", artifact_id, now
+            statuses, refs = dict(run.node_statuses), dict(run.output_refs)
+            statuses[node.id], refs[node.id] = "SUCCEEDED", artifact_id
+            run.node_statuses, run.output_refs, run.status, run.waiting_reason, run.current_node_id = statuses, refs, "RUNNING", None, node.id
+            await emit_event(session, run, "INTERRUPT_RESOLVED", node_id=node.id, attempt_id=attempt.id, status="RUNNING", summary=f"{node.title}人工交互已完成", payload={"interruptId": record.id, "kind": record.kind, **safe_response})
+            await emit_event(session, run, "NODE_SUCCEEDED", node_id=node.id, attempt_id=attempt.id, status="SUCCEEDED", summary=f"{node.title}已确认")
+            await session.commit()
+        return {"output_refs": {**state["output_refs"], node.id: artifact_id}}
+
+    async def _mark_hitl_failure(self, run_id: str, node: WorkflowNode, code: str, message: str) -> None:
+        attempt_id, _ = await self._mark_running(run_id, node)
+        async with self.sessions() as session:
+            run, attempt = await session.get(WorkflowRun, run_id), await session.get(NodeAttempt, attempt_id)
+            attempt.status, attempt.error_code, attempt.error_message, attempt.finished_at = "FAILED", code, message[:500], datetime.now(UTC)
+            statuses = dict(run.node_statuses)
+            statuses[node.id] = "FAILED"
+            run.node_statuses, run.status, run.finished_at = statuses, "FAILED", datetime.now(UTC)
+            await emit_event(session, run, "NODE_FAILED", node_id=node.id, attempt_id=attempt.id, status="FAILED", summary=message[:500], payload={"errorCode": code, "errorMessage": message[:500]})
+            await session.commit()
 
     async def _resolve_inputs(self, node: WorkflowNode, state: RuntimeState) -> tuple[dict[str, Any], list[str]]:
         values: dict[str, Any] = {}
@@ -244,12 +346,25 @@ class WorkflowEngine:
                 current = await session.get(WorkflowRun, state["run_id"])
                 attempt = await session.get(NodeAttempt, attempt_id)
                 code = exc.code if isinstance(exc, CliExecutionError) else "NODE_EXECUTION_ERROR"
-                attempt.status, attempt.error_code, attempt.exit_code, attempt.finished_at = "FAILED", code, getattr(exc, "exit_code", None), datetime.now(UTC)
+                message = str(exc)[:500]
+                diagnostic_id = None
+                diagnostic_truncated = False
+                if isinstance(exc, CliExecutionError) and (exc.stdout or exc.stderr):
+                    from app.cli import redact_diagnostic
+                    stdout_text, stdout_truncated = redact_diagnostic(exc.stdout, 64 * 1024)
+                    stderr_text, stderr_truncated = redact_diagnostic(exc.stderr, 1024 * 1024)
+                    diagnostic_truncated = exc.truncated or stdout_truncated or stderr_truncated
+                    diagnostic_id = _id("art_")
+                    diagnostic_payload = {"stdout": stdout_text, "stderr": stderr_text, "truncated": diagnostic_truncated}
+                    encoded = json.dumps(diagnostic_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                    session.add(EncryptedArtifact(id=diagnostic_id, run_id=current.id, node_id=node.id, artifact_type="DIAGNOSTIC", ciphertext=SecretBox().seal(diagnostic_payload, purpose="artifact:" + diagnostic_id), content_hash=sha256_bytes(encoded), size_bytes=len(encoded), expires_at=datetime.now(UTC) + timedelta(days=settings.result_retention_days)))
+                attempt.status, attempt.error_code, attempt.error_message = "FAILED", code, message
+                attempt.exit_code, attempt.diagnostic_artifact_id, attempt.diagnostic_truncated, attempt.finished_at = getattr(exc, "exit_code", None), diagnostic_id, diagnostic_truncated, datetime.now(UTC)
                 statuses = dict(current.node_statuses)
                 statuses[node.id] = "CANCELLED" if code == "CANCELLED" else "FAILED"
                 current.node_statuses, current.status = statuses, "CANCELLED" if code == "CANCELLED" else "FAILED"
                 current.finished_at = datetime.now(UTC)
-                await emit_event(session, current, "NODE_FAILED", node_id=node.id, attempt_id=attempt_id, status=statuses[node.id], summary=str(exc), payload={"errorCode": code})
+                await emit_event(session, current, "NODE_FAILED", node_id=node.id, attempt_id=attempt_id, status=statuses[node.id], summary=message, payload={"errorCode": code, "errorMessage": message, "exitCode": getattr(exc, "exit_code", None), "diagnosticAvailable": diagnostic_id is not None})
                 await session.commit()
             raise
 

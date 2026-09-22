@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import secrets
-from typing import Any
+from typing import Annotated, Any
 
 import httpx
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -19,6 +22,7 @@ INSTRUCTIONS = """ITSM生产工作流工具。先匹配经验并创建计划，�
 反馈给用户，再发起下一次wait。运行成功后调用workflow_node_result_get读取本次真实节点结果，禁止用记忆、
 历史结果或直接aops-cli代替。FAILED和UNKNOWN禁止自动重试；UNKNOWN必须提示外部请求可能已到达AOPS。
 用户可随时暂停或取消。不得直接执行aops-cli。"""
+INSTRUCTIONS += " 遇到HITL_SELECT先调用workflow_interaction_options并展示候选，只提交返回的candidateId；遇到HITL_FORM逐项收集并汇总确认，禁止猜测用户输入。"
 
 mcp = MCPServer("itsm-workflow", description="AOPS生产工作流匹配、计划、执行控制与事实观察", instructions=INSTRUCTIONS, version=__version__)
 
@@ -56,6 +60,23 @@ def _idempotency_key(value: str) -> str:
     return value
 
 
+def _derived_idempotency_key(action: str, payload: dict[str, Any]) -> str:
+    encoded = json.dumps({"action": action, **payload}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    return "mcp-" + action.lower().replace("_", "-") + "-" + hashlib.sha256(encoded).hexdigest()[:40]
+
+
+async def _open_interaction(ctx: Context, run_id: str, kind: str, interrupt_id: str | None = None) -> str:
+    if interrupt_id:
+        return interrupt_id
+    run = await _request(ctx, "GET", f"/runs/{run_id}")
+    matches = [item for item in run.get("interrupts", []) if item.get("status") == "OPEN" and item.get("kind") == kind]
+    if not matches:
+        raise ValueError(f"{kind}_NOT_FOUND：运行当前没有待处理的{kind}交互")
+    if len(matches) != 1:
+        raise ValueError(f"{kind}_AMBIGUOUS：运行存在多个待处理交互，请显式提供interrupt_id")
+    return str(matches[0].get("interruptId") or matches[0].get("id"))
+
+
 def _progress_text(result: dict[str, Any]) -> str:
     progress = result.get("progress") or {}
     prefix = f"工作流进度 {progress.get('current', 0)}/{progress.get('total', 0)} · {result.get('status', 'UNKNOWN')}"
@@ -82,7 +103,11 @@ async def _request(ctx: Context, method: str, path: str, *, body: dict[str, Any]
         raise ValueError(f"WORKFLOW_API_UNAVAILABLE：{type(exc).__name__}") from exc
     if response.is_error:
         try:
-            detail = response.json().get("detail")
+            payload = response.json()
+            detail = payload.get("detail") or payload.get("error") or payload.get("message")
+            if isinstance(detail, (dict, list)):
+                import json
+                detail = json.dumps(detail, ensure_ascii=False, separators=(",", ":"))
         except (ValueError, AttributeError):
             detail = None
         raise ValueError(f"WORKFLOW_API_ERROR_{response.status_code}：{detail or '请求失败'}")
@@ -134,8 +159,16 @@ async def workflow_run_get(run_id: str, ctx: Context) -> dict[str, Any]:
 async def workflow_run_wait(run_id: str, after_event_id: int, ctx: Context, wait_seconds: float = 10) -> dict[str, Any]:
     wait_seconds = min(max(float(wait_seconds), 0), float(settings.mcp_wait_max_seconds))
     result = await _request(ctx, "GET", f"/runs/{run_id}/wait", params={"afterEventId": after_event_id, "timeoutSeconds": wait_seconds})
-    required_calls = [{"tool": "workflow_node_result_get", "arguments": {"run_id": run_id, "node_id": node_id, "offset": 0, "limit": 100}} for node_id in result.get("resultAvailableNodes", [])] if result.get("terminal") and result.get("status") == "SUCCEEDED" else []
-    return {**result, "displayText": _progress_text(result), "agentDirective": "FETCH_CURRENT_RUN_RESULTS" if required_calls else "REPORT_DISPLAY_TEXT_BEFORE_NEXT_WAIT", "requiredNextToolCalls": required_calls}
+    interaction = result.get("interaction") or {}
+    if result.get("status") == "WAITING_INPUT" and interaction.get("kind") == "HITL_SELECT":
+        required_calls = [{"tool": "workflow_interaction_options", "arguments": {"run_id": run_id, "offset": 0, "limit": 20, "keyword": ""}}]
+        directive = "FETCH_INTERACTION_OPTIONS"
+    elif result.get("status") == "WAITING_INPUT" and interaction.get("kind") == "HITL_FORM":
+        required_calls, directive = [], "ASK_USER_FOR_FIELDS"
+    else:
+        required_calls = [{"tool": "workflow_node_result_get", "arguments": {"run_id": run_id, "node_id": node_id, "offset": 0, "limit": 100}} for node_id in result.get("resultAvailableNodes", [])] if result.get("terminal") and result.get("status") == "SUCCEEDED" else []
+        directive = "FETCH_CURRENT_RUN_RESULTS" if required_calls else "REPORT_DISPLAY_TEXT_BEFORE_NEXT_WAIT"
+    return {**result, "displayText": _progress_text(result), "agentDirective": directive, "requiredNextToolCalls": required_calls}
 
 
 @mcp.tool(description="请求在下一个节点安全边界暂停；RUNNING时可能先返回PAUSE_REQUESTED。")
@@ -153,9 +186,35 @@ async def workflow_run_cancel(run_id: str, idempotency_key: str, ctx: Context) -
     return await _request(ctx, "POST", f"/runs/{run_id}/cancel", body={}, idempotency_key=_idempotency_key(idempotency_key))
 
 
-@mcp.tool(description="提交人工补参、节点批准或暂停恢复响应。调用前必须取得用户输入或确认。")
+@mcp.tool(description="提交HITL选择、结构化表单、人工补参、节点批准或暂停恢复。HITL必须先展示内容并取得用户明确确认，候选只能提交服务返回的candidateId。")
 async def workflow_interrupt_reply(run_id: str, interrupt_id: str, payload: dict[str, Any], idempotency_key: str, ctx: Context) -> dict[str, Any]:
     return await _request(ctx, "POST", f"/runs/{run_id}/interrupts/{interrupt_id}/resume", body={"payload": payload}, idempotency_key=_idempotency_key(idempotency_key))
+
+
+@mcp.tool(description="提交当前运行唯一OPEN的HITL_FORM。Agent只传run_id和values；程序自动补充interrupt_id、SUBMIT action和幂等键。values示例：{\"bot_id\":\"用户输入值\"}，不要传payload。")
+async def workflow_hitl_form_reply(run_id: str, values: Annotated[dict[str, Any], Field(description="表单字段值对象；直接传字段名和值，例如 {\"bot_id\":\"bot_xxx\"}。不要包装为payload或values.values。")], ctx: Context) -> dict[str, Any]:
+    if not values:
+        raise ValueError("HITL_FORM_VALUES_REQUIRED：values不能为空")
+    resolved = await _open_interaction(ctx, run_id, "HITL_FORM")
+    body = {"payload": {"action": "SUBMIT", "values": values}}
+    return await _request(ctx, "POST", f"/runs/{run_id}/interrupts/{resolved}/resume", body=body, idempotency_key=_derived_idempotency_key("HITL_FORM_SUBMIT", {"runId": run_id, "interruptId": resolved, "values": values}))
+
+
+@mcp.tool(description="提交当前运行唯一OPEN的HITL_SELECT。Agent只传run_id和candidate_ids；程序自动补充interrupt_id、SELECT action和幂等键。")
+async def workflow_hitl_select_reply(run_id: str, candidate_ids: Annotated[list[str], Field(description="用户确认的candidateId数组，例如 [\"candidate_xxx\"]")], ctx: Context) -> dict[str, Any]:
+    if not candidate_ids or len(candidate_ids) != len(set(candidate_ids)) or any(not str(value).strip() for value in candidate_ids):
+        raise ValueError("HITL_CANDIDATES_REQUIRED：candidate_ids必须是非空无重复字符串数组")
+    resolved = await _open_interaction(ctx, run_id, "HITL_SELECT")
+    body = {"payload": {"action": "SELECT", "candidateIds": candidate_ids}}
+    return await _request(ctx, "POST", f"/runs/{run_id}/interrupts/{resolved}/resume", body=body, idempotency_key=_derived_idempotency_key("HITL_SELECT_REPLY", {"runId": run_id, "interruptId": resolved, "candidateIds": candidate_ids}))
+
+
+@mcp.tool(description="分页读取HITL选择候选。仅返回允许展示的字段；Agent必须把候选展示给用户，不得构造candidateId或隐藏值。")
+async def workflow_interaction_options(run_id: str, ctx: Context, offset: int = 0, limit: int = 20, keyword: str = "") -> dict[str, Any]:
+    if offset < 0 or limit < 1 or limit > 100:
+        raise ValueError("INTERACTION_PAGE_INVALID：offset必须大于等于0，limit必须为1至100")
+    resolved = await _open_interaction(ctx, run_id, "HITL_SELECT")
+    return await _request(ctx, "GET", f"/runs/{run_id}/interrupts/{resolved}/options", params={"offset": offset, "limit": limit, "keyword": keyword})
 
 
 @mcp.tool(description="用户更新MCP连接中的X-AOPS-Api-Key后，用该请求头刷新运行凭据；API Key不是工具参数。")
@@ -174,6 +233,8 @@ async def workflow_node_result_get(run_id: str, node_id: str, ctx: Context, offs
     output = output if isinstance(output, dict) else {"value": output}
     rows = output.get("data")
     row_list = rows if isinstance(rows, list) else []
+    if not isinstance(rows, list):
+        return {"runId": run_id, "nodeId": node_id, "output": output, "source": "ENCRYPTED_RUN_ARTIFACT", "agentDirective": "SUMMARIZE_ONLY_THIS_RUN_RESULT"}
     total = len(row_list)
     page = row_list[offset:offset + limit]
     stream = output.get("stream") if isinstance(output.get("stream"), dict) else {}

@@ -79,8 +79,8 @@ async def serialize_run(session: AsyncSession, run: WorkflowRun, *, include_even
         "planHash": run.plan_hash, "workflow": run.workflow_snapshot, "parameters": run.run_inputs,
         "nodeStatuses": run.node_statuses, "currentNodeId": run.current_node_id, "waitingReason": run.waiting_reason,
         "progress": {"current": current, "total": len(run.node_statuses or {})},
-        "attempts": [{"attemptId": item.id, "nodeId": item.node_id, "attempt": item.attempt, "status": item.status, "commandSummary": item.command_summary, "cliVersion": item.cli_version, "cliSha256": item.cli_sha256, "exitCode": item.exit_code, "errorCode": item.error_code, "artifactId": item.artifact_id, "startedAt": item.started_at.isoformat(), "finishedAt": item.finished_at.isoformat() if item.finished_at else None} for item in attempts_result.scalars()],
-        "interrupts": [{"interruptId": item.id, "nodeId": item.node_id, "kind": item.kind, "status": item.status, "request": item.request_payload, "response": item.response_payload, "createdAt": item.created_at.isoformat()} for item in interrupt_result.scalars()],
+        "attempts": [{"attemptId": item.id, "nodeId": item.node_id, "attempt": item.attempt, "status": item.status, "commandSummary": item.command_summary, "cliVersion": item.cli_version, "cliSha256": item.cli_sha256, "exitCode": item.exit_code, "errorCode": item.error_code, "errorMessage": item.error_message, "diagnosticAvailable": bool(item.diagnostic_artifact_id), "diagnosticTruncated": item.diagnostic_truncated, "artifactId": item.artifact_id, "startedAt": item.started_at.isoformat(), "finishedAt": item.finished_at.isoformat() if item.finished_at else None} for item in attempts_result.scalars()],
+        "interrupts": [{"interruptId": item.id, "nodeId": item.node_id, "kind": item.kind, "status": item.status, "request": item.request_payload, "response": item.response_payload, "optionCount": item.option_count, "createdAt": item.created_at.isoformat(), "updatedAt": item.updated_at.isoformat() if item.updated_at else None, "resolvedAt": item.resolved_at.isoformat() if item.resolved_at else None, "resolvedBy": item.resolved_by} for item in interrupt_result.scalars()],
         "events": events,
         "createdAt": run.created_at.isoformat(), "startedAt": run.started_at.isoformat() if run.started_at else None,
         "finishedAt": run.finished_at.isoformat() if run.finished_at else None,
@@ -97,6 +97,20 @@ async def serialize_run_facts(session: AsyncSession, run: WorkflowRun, events: l
     interrupt_result = await session.execute(
         select(InterruptRecord).where(InterruptRecord.run_id == run.id, InterruptRecord.status == "OPEN").order_by(InterruptRecord.created_at)
     )
+    open_interrupts = list(interrupt_result.scalars())
+    interaction = None
+    if open_interrupts:
+        item = open_interrupts[0]
+        reply_tool = "workflow_hitl_select_reply" if item.kind == "HITL_SELECT" else "workflow_hitl_form_reply" if item.kind == "HITL_FORM" else "workflow_interrupt_reply"
+        fields = (item.request_payload or {}).get("fields") if item.kind == "HITL_FORM" else None
+        if item.kind == "HITL_FORM":
+            value_template = {str(field.get("name")): f"<{field.get('type', 'string')}{'，必填' if field.get('required') else '，可选'}>" for field in (fields or [])}
+            reply_arguments = {"run_id": run.id, "values": value_template}
+        elif item.kind == "HITL_SELECT":
+            reply_arguments = {"run_id": run.id, "candidate_ids": ["<从workflow_interaction_options取得的candidateId>"]}
+        else:
+            reply_arguments = {"run_id": run.id, "interrupt_id": item.id, "payload": {}, "idempotency_key": "<每次提交使用新的唯一值>"}
+        interaction = {"interruptId": item.id, "nodeId": item.node_id, "kind": item.kind, "title": (item.request_payload or {}).get("title") or (item.request_payload or {}).get("message"), "optionCount": item.option_count, "fields": fields, "replyTool": reply_tool, "replyArgumentsTemplate": reply_arguments, "cancelTool": "workflow_run_cancel" if item.kind in {"HITL_SELECT", "HITL_FORM"} else None}
     return {
         "runId": run.id,
         "knowledgeId": run.knowledge_id,
@@ -116,7 +130,8 @@ async def serialize_run_facts(session: AsyncSession, run: WorkflowRun, events: l
         "progress": {"current": current, "total": len(statuses)},
         "nodeStatuses": statuses,
         "resultAvailableNodes": sorted((run.output_refs or {}).keys()),
-        "interrupts": [{"interruptId": item.id, "nodeId": item.node_id, "kind": item.kind, "status": item.status, "request": item.request_payload, "createdAt": item.created_at.isoformat()} for item in interrupt_result.scalars()],
+        "interrupts": [{"interruptId": item.id, "nodeId": item.node_id, "kind": item.kind, "status": item.status, "request": item.request_payload, "optionCount": item.option_count, "createdAt": item.created_at.isoformat()} for item in open_interrupts],
+        "interaction": interaction,
         "events": [event_dict(item) for item in (events or [])],
     }
 

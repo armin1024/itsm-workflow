@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Button,
   InlineLoading,
@@ -32,6 +32,10 @@ import type {
   WorkflowNode,
 } from "./types";
 import { withBase } from "./runtime";
+import { ListPagination, ListToolbar } from "./ListControls";
+import { useListQuery } from "./useListQuery";
+import type { KnowledgeSummary, Paginated, RunSummary } from "./types";
+import type { WorkflowVersionSummary } from "./types";
 
 type User = { uid: string; isAdmin: boolean; isOperator: boolean };
 
@@ -148,6 +152,7 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
           <NavLink to="/runs">执行中心</NavLink>
           <NavLink to="/runs/new">创建运行</NavLink>
           <NavLink to="/knowledge">知识与版本</NavLink>
+          {user.isAdmin && <NavLink to="/transfers">导入导出</NavLink>}
         </nav>
         <div className="identity">
           <span>{user.uid}</span>
@@ -155,7 +160,7 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
         </div>
       </header>
       <Routes>
-        <Route path="/runs" element={<RunList />} />
+        <Route path="/runs" element={<RunList user={user} />} />
         <Route path="/runs/new" element={<NewRun />} />
         <Route path="/runs/:runId" element={<RunDetail />} />
         <Route path="/knowledge" element={<KnowledgeList user={user} />} />
@@ -165,6 +170,7 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
           path="/knowledge/:knowledgeId/edit"
           element={<EditKnowledge />}
         />
+        <Route path="/transfers" element={user.isAdmin ? <TransferCenter /> : <Navigate to="/knowledge" replace />} />
         <Route
           path="/knowledge/:knowledgeId"
           element={<KnowledgeDetail user={user} />}
@@ -175,15 +181,54 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
   );
 }
 
-function RunList() {
-  const [runs, setRuns] = useState<Run[] | null>(null);
+function RunList({ user }: { user: User }) {
+  const query = useListQuery("statusGroup", "");
+  const exactKey = JSON.stringify(query.exactFilters);
+  const [data, setData] = useState<Paginated<RunSummary> | null>(null);
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState<Date>();
+  const requestSequence = useRef(0);
+  const load = useCallback(
+    async (background = false) => {
+      const sequence = ++requestSequence.current;
+      if (!background) setLoading(true);
+      setError("");
+      try {
+        const result = await api.runs({
+          page: query.page,
+          pageSize: query.pageSize,
+          keyword: query.keyword,
+          statusGroup: query.status || undefined,
+          ...query.exactFilters,
+        });
+        if (sequence === requestSequence.current) {
+          setData(result);
+          setLastUpdated(new Date());
+          if (result.page !== query.page) query.setPage(result.page);
+        }
+      } catch (value) {
+        if (sequence === requestSequence.current)
+          setError((value as Error).message);
+      } finally {
+        if (sequence === requestSequence.current) setLoading(false);
+      }
+    },
+    [query.page, query.pageSize, query.keyword, query.status, exactKey],
+  );
   useEffect(() => {
-    api
-      .runs()
-      .then((value) => setRuns(value.items))
-      .catch((value) => setError(value.message));
-  }, []);
+    void load();
+  }, [load]);
+  useEffect(() => {
+    const hasActive = data?.items.some(
+      (item) => !["SUCCEEDED", "FAILED", "CANCELLED"].includes(item.status),
+    );
+    if (!hasActive) return;
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void load(true);
+    }, 10000);
+    return () => window.clearInterval(timer);
+  }, [data?.items, load]);
   return (
     <main className="page">
       <header className="page-title">
@@ -196,6 +241,37 @@ function RunList() {
           创建运行
         </Button>
       </header>
+      <ListToolbar
+        keyword={query.draftKeyword}
+        placeholder="工单 ID / 运行 ID / 经验名称 / 发起人 UID"
+        status={query.status}
+        statusOptions={[
+          { value: "", label: "全部状态" },
+          { value: "ACTIVE", label: "执行中" },
+          { value: "WAITING", label: "等待处理" },
+          { value: "SUCCEEDED", label: "已完成" },
+          { value: "FAILED", label: "失败或取消" },
+        ]}
+        loading={loading}
+        lastUpdated={lastUpdated}
+        onKeywordChange={query.setDraftKeyword}
+        onKeywordCommit={query.commitKeyword}
+        onStatusChange={query.setStatus}
+        onRefresh={() => void load()}
+        onClear={query.clear}
+        exactValues={query.exactFilters}
+        onExactChange={query.setExactFilter}
+        exactFields={[
+          { key: "runId", label: "运行 ID" },
+          { key: "knowledgeId", label: "知识 ID" },
+          { key: "workflowVersionId", label: "版本 ID" },
+          { key: "ticketId", label: "工单 ID" },
+          ...(user.isAdmin ? [{ key: "initiatedBy", label: "发起人 UID" }] : []),
+          { key: "currentNodeId", label: "当前节点 ID" },
+          { key: "createdFrom", label: "创建时间起", type: "datetime-local" as const },
+          { key: "createdTo", label: "创建时间止", type: "datetime-local" as const },
+        ]}
+      />
       {error && (
         <InlineNotification
           kind="error"
@@ -204,49 +280,79 @@ function RunList() {
           hideCloseButton
         />
       )}
-      {runs === null ? (
+      {loading && data === null ? (
         <RunSkeleton />
-      ) : runs.length === 0 ? (
+      ) : data && data.items.length === 0 ? (
         <section className="empty-state">
           <span>00</span>
-          <h2>还没有运行记录</h2>
-          <p>从一条已发布经验创建计划，确认后才会进入执行队列。</p>
-          <Button as={Link} to="/runs/new">
-            创建第一条运行
-          </Button>
+          <h2>
+            {query.keyword || query.status
+              ? "当前条件没有匹配运行"
+              : "还没有运行记录"}
+          </h2>
+          <p>
+            {query.keyword || query.status
+              ? "调整关键词或状态，或者清空查询条件。"
+              : "从一条已发布经验创建计划，确认后才会进入执行队列。"}
+          </p>
+          {query.keyword || query.status ? (
+            <Button onClick={query.clear}>清空查询条件</Button>
+          ) : (
+            <Button as={Link} to="/runs/new">
+              创建第一条运行
+            </Button>
+          )}
         </section>
-      ) : (
-        <section className="run-table" aria-label="运行记录">
-          <div className="run-row header">
-            <span>状态</span>
-            <span>工单 / 运行</span>
-            <span>当前节点</span>
-            <span>发起人</span>
-            <span>进度</span>
-            <span>创建时间</span>
-          </div>
-          {runs.map((run) => (
-            <Link className="run-row" to={`/runs/${run.runId}`} key={run.runId}>
-              <StatusTag status={run.status} />
-              <span>
-                <strong>#{run.ticketId}</strong>
-                <small>{run.runId}</small>
-              </span>
-              <span>
-                {run.currentNodeId ||
-                  run.waitingReason ||
-                  statusLabel[run.status] ||
-                  "尚未开始"}
-              </span>
-              <span>{run.initiatedBy}</span>
-              <span>
-                {run.progress.current ?? 0}/{run.progress.total ?? 0}
-              </span>
-              <time>{new Date(run.createdAt).toLocaleString()}</time>
-            </Link>
-          ))}
-        </section>
-      )}
+      ) : data ? (
+        <>
+          <section
+            className={`run-table ${loading ? "is-refreshing" : ""}`}
+            aria-label="运行记录"
+          >
+            <div className="run-row header">
+              <span>状态</span>
+              <span>工单 / 运行</span>
+              <span>当前节点</span>
+              <span>发起人</span>
+              <span>进度</span>
+              <span>创建时间</span>
+            </div>
+            {data.items.map((run) => (
+              <Link
+                className="run-row"
+                to={`/runs/${run.runId}`}
+                key={run.runId}
+              >
+                <StatusTag status={run.status} />
+                <span>
+                  <strong>#{run.ticketId}</strong>
+                  <small>{run.runId}</small>
+                </span>
+                <span>
+                  {run.currentNodeId ||
+                    run.waitingReason ||
+                    statusLabel[run.status] ||
+                    "尚未开始"}
+                </span>
+                <span>{run.initiatedBy}</span>
+                <span>
+                  {run.progress.current ?? 0}/{run.progress.total ?? 0}
+                </span>
+                <time>{new Date(run.createdAt).toLocaleString()}</time>
+              </Link>
+            ))}
+          </section>
+          <ListPagination
+            page={data.page}
+            pageSize={data.pageSize}
+            total={data.total}
+            totalPages={data.totalPages}
+            loading={loading}
+            onPageChange={query.setPage}
+            onPageSizeChange={query.setPageSize}
+          />
+        </>
+      ) : null}
     </main>
   );
 }
@@ -267,7 +373,11 @@ function RunSkeleton() {
 
 function NewRun() {
   const navigate = useNavigate();
-  const [knowledge, setKnowledge] = useState<Knowledge[]>([]);
+  const [knowledge, setKnowledge] = useState<KnowledgeSummary[]>([]);
+  const [selectedKnowledge, setSelectedKnowledge] = useState<Knowledge | null>(
+    null,
+  );
+  const [knowledgeKeyword, setKnowledgeKeyword] = useState("");
   const [knowledgeId, setKnowledgeId] = useState("");
   const [ticketId, setTicketId] = useState("");
   const [parameters, setParameters] = useState<
@@ -276,20 +386,33 @@ function NewRun() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   useEffect(() => {
-    api
-      .knowledge()
-      .then((value) => {
-        setKnowledge(value.items.filter((item) => item.status === "PUBLISHED"));
-        setKnowledgeId(
-          value.items.find((item) => item.status === "PUBLISHED")
-            ?.knowledgeId || "",
-        );
-      })
-      .catch((value) => setError(value.message));
-  }, []);
-  const selectedKnowledge = knowledge.find(
-    (item) => item.knowledgeId === knowledgeId,
-  );
+    const timer = window.setTimeout(() => {
+      api
+        .knowledge({
+          status: "PUBLISHED",
+          pageSize: 20,
+          keyword: knowledgeKeyword.trim(),
+        })
+        .then((value) => {
+          setKnowledge(value.items);
+          setKnowledgeId((current) =>
+            value.items.some((item) => item.knowledgeId === current)
+              ? current
+              : value.items[0]?.knowledgeId || "",
+          );
+        })
+        .catch((value) => setError(value.message));
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [knowledgeKeyword]);
+  useEffect(() => {
+    setSelectedKnowledge(null);
+    if (knowledgeId)
+      api
+        .knowledgeById(knowledgeId)
+        .then(setSelectedKnowledge)
+        .catch((value) => setError(value.message));
+  }, [knowledgeId]);
   const parameterDefinitions = selectedKnowledge
     ? Array.from(
         new Map(
@@ -361,6 +484,13 @@ function NewRun() {
             hideCloseButton
           />
         )}
+        <TextInput
+          id="knowledge-option-keyword"
+          labelText="筛选已发布经验"
+          value={knowledgeKeyword}
+          onChange={(event) => setKnowledgeKeyword(event.target.value)}
+          placeholder="名称、摘要、知识 ID 或来源工单"
+        />
         <label className="select-label">
           已发布经验
           <select
@@ -464,7 +594,10 @@ function NewRun() {
           <Button kind="secondary" as={Link} to="/runs">
             取消
           </Button>
-          <Button type="submit" disabled={busy || !knowledgeId}>
+          <Button
+            type="submit"
+            disabled={busy || !knowledgeId || !selectedKnowledge}
+          >
             {busy ? "正在生成" : "生成计划"}
           </Button>
         </div>
@@ -653,6 +786,7 @@ function RunDetail() {
               status={run.nodeStatuses[node.id]}
               artifact={artifact}
               attempts={run.attempts.filter((item) => item.nodeId === node.id)}
+              runId={runId}
               onRetry={(decision) => retryNode(node.id, decision)}
             />
           ) : (
@@ -708,19 +842,16 @@ function InterruptBand({
   run: Run;
   onDone: (run: Run) => void;
 }) {
-  const open = (
-    run as Run & {
-      interrupts?: Array<{
-        id?: string;
-        interruptId?: string;
-        kind: string;
-        status: string;
-        request: { fields?: string[] };
-      }>;
-    }
-  ).interrupts?.find((item) => item.status === "OPEN");
-  const [value, setValue] = useState("{}"),
-    [error, setError] = useState("");
+  type OpenInterrupt = { id?: string; interruptId?: string; kind: string; status: string; request: { title?: string; description?: string; fields?: Array<{ name: string; label: string; type: string; required?: boolean; description?: string; enum?: unknown[] }> } };
+  const open = (run as Run & { interrupts?: OpenInterrupt[] }).interrupts?.find((item) => item.status === "OPEN");
+  const interruptId = open?.interruptId || open?.id || "";
+  const [value, setValue] = useState("{}"), [error, setError] = useState(""), [keyword, setKeyword] = useState(""), [offset, setOffset] = useState(0),
+    [options, setOptions] = useState<Awaited<ReturnType<typeof api.interactionOptions>> | null>(null), [selectedIds, setSelectedIds] = useState<string[]>([]),
+    [formValues, setFormValues] = useState<Record<string, unknown>>({}), [pendingPayload, setPendingPayload] = useState<Record<string, unknown> | null>(null), [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (open?.kind !== "HITL_SELECT" || !interruptId) return;
+    api.interactionOptions(run.runId, interruptId, { offset, limit: 20, keyword }).then(setOptions).catch((reason) => setError(reason.message));
+  }, [run.runId, interruptId, open?.kind, offset, keyword]);
   if (!open)
     return (
       <section className="decision-band">
@@ -730,32 +861,40 @@ function InterruptBand({
         </div>
       </section>
     );
-  const resume = async () => {
+  const resume = async (explicitPayload?: Record<string, unknown>) => {
+    setBusy(true);
     try {
       if (open.kind === "CREDENTIAL") {
         onDone(await api.updateCredential(run.runId, value));
         setValue("");
         return;
       }
-      const payload =
+      const payload = explicitPayload || (
         open.kind === "NODE_APPROVAL"
           ? { decision: "approve" }
           : open.kind === "PAUSE"
             ? { action: "continue" }
-            : { inputs: JSON.parse(value) };
+            : { inputs: JSON.parse(value) });
       onDone(
         await api.resumeInterrupt(
           run.runId,
-          open.interruptId || open.id || "",
+          interruptId,
           payload,
+          crypto.randomUUID(),
         ),
       );
+      setPendingPayload(null);
     } catch (reason) {
       setError((reason as Error).message);
+    } finally {
+      setBusy(false);
     }
   };
+  const fields = open.request.fields || [];
+  const candidatePayload = { action: "SELECT", candidateIds: selectedIds };
+  const formPayload = { action: "SUBMIT", values: formValues };
   return (
-    <section className="decision-band">
+    <section className="decision-band hitl-band">
       <div>
         <p className="overline">{open.kind}</p>
         <h2>{run.waitingReason}</h2>
@@ -777,15 +916,18 @@ function InterruptBand({
             autoComplete="off"
           />
         )}
+        {open.kind === "HITL_SELECT" && <div className="hitl-options"><div className="hitl-search"><TextInput id="hitl-keyword" labelText="筛选候选" value={keyword} onChange={(event) => { setKeyword(event.target.value); setOffset(0); }} /><span>{options ? `共 ${options.total} 条` : "加载候选"}</span></div>{options?.items.map((item) => { const selected = selectedIds.includes(item.candidateId); return <button type="button" className={selected ? "selected" : ""} key={item.candidateId} onClick={() => setSelectedIds((current) => options.selectionMode === "SINGLE" ? [item.candidateId] : selected ? current.filter((id) => id !== item.candidateId) : [...current, item.candidateId])}><strong>{item.label}</strong><small>{Object.entries(item.display).map(([key, fieldValue]) => `${key}: ${String(fieldValue)}`).join(" · ")}</small></button>; })}<footer><Button size="sm" kind="ghost" disabled={!offset} onClick={() => setOffset(Math.max(0, offset - 20))}>上一页</Button><span>{options ? `${offset + 1}-${Math.min(offset + options.items.length, options.total)}` : "—"}</span><Button size="sm" kind="ghost" disabled={!options?.hasMore} onClick={() => setOffset(offset + 20)}>下一页</Button></footer></div>}
+        {open.kind === "HITL_FORM" && <div className="hitl-form">{open.request.description && <p>{open.request.description}</p>}{fields.map((field) => field.type === "boolean" ? <label key={field.name}>{field.label}<select value={String(formValues[field.name] ?? "")} onChange={(event) => setFormValues((current) => ({ ...current, [field.name]: event.target.value === "true" }))}><option value="">请选择</option><option value="true">是</option><option value="false">否</option></select></label> : <TextInput key={field.name} id={`hitl-field-${field.name}`} type={field.type === "integer" || field.type === "number" ? "number" : "text"} labelText={`${field.label}${field.required ? " *" : ""}`} helperText={field.description} value={String(formValues[field.name] ?? "")} onChange={(event) => setFormValues((current) => ({ ...current, [field.name]: field.type === "integer" ? Number.parseInt(event.target.value, 10) : field.type === "number" ? Number(event.target.value) : event.target.value }))} />)}</div>}
         {error && <span className="error-text">{error}</span>}
       </div>
-      <Button onClick={resume}>
+      <div className="hitl-actions">{open.kind === "HITL_SELECT" && <Button disabled={!selectedIds.length || busy} onClick={() => setPendingPayload(candidatePayload)}>确认选择</Button>}{open.kind === "HITL_FORM" && <Button disabled={busy} onClick={() => setPendingPayload(formPayload)}>检查并提交</Button>}{["HITL_SELECT", "HITL_FORM"].includes(open.kind) && <Button kind="danger--tertiary" disabled={busy} onClick={() => setPendingPayload({ action: "CANCEL" })}>取消运行</Button>}{!["HITL_SELECT", "HITL_FORM"].includes(open.kind) && <Button onClick={() => void resume()} disabled={busy}>
         {open.kind === "NODE_APPROVAL"
           ? "批准节点"
           : open.kind === "CREDENTIAL"
             ? "更新凭据并继续"
             : "提交并继续"}
-      </Button>
+      </Button>}</div>
+      <Modal open={Boolean(pendingPayload)} danger={pendingPayload?.action === "CANCEL"} modalHeading={pendingPayload?.action === "CANCEL" ? "确认取消运行" : "确认人工交互回复"} primaryButtonText={busy ? "正在提交" : "确认提交"} secondaryButtonText="返回修改" primaryButtonDisabled={busy} onRequestClose={() => !busy && setPendingPayload(null)} onRequestSubmit={() => pendingPayload && void resume(pendingPayload)}><p>提交后工作流将从当前节点恢复，不能再次回复本次交互。</p><pre>{JSON.stringify(pendingPayload, null, 2)}</pre></Modal>
     </section>
   );
 }
@@ -796,15 +938,19 @@ function NodeDetail({
   artifact,
   attempts,
   onRetry,
+  runId,
 }: {
   node: WorkflowNode;
   status: NodeStatus;
   artifact: Record<string, unknown> | null;
   attempts: Array<Record<string, unknown>>;
   onRetry?: (decision: "retry" | "mark_failed") => Promise<void>;
+  runId?: string;
 }) {
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState("");
+  const [diagnostic, setDiagnostic] = useState<{ stdout: string; stderr: string; truncated: boolean } | null>(null);
+  const [diagnosticError, setDiagnosticError] = useState("");
   const decide = async (decision: "retry" | "mark_failed") => {
     if (!onRetry) return;
     setRetrying(true);
@@ -886,12 +1032,16 @@ function NodeDetail({
           <div className="attempt" key={index}>
             <b>第 {String(item.attempt)} 次</b>
             <span>{String(item.status)}</span>
-            <small>{String(item.errorCode || item.cliVersion || "")}</small>
+            <small>{String(item.errorMessage || item.errorCode || item.cliVersion || "")}</small>
+            {item.exitCode !== undefined && item.exitCode !== null && <small>退出码 {String(item.exitCode)}</small>}
+            {runId && Boolean(item.diagnosticAvailable) && <button type="button" className="diagnostic-link" onClick={() => { setDiagnosticError(""); api.diagnostic(runId, String(item.attemptId)).then((value) => setDiagnostic(value.data)).catch((value) => setDiagnosticError(value.message)); }}>查看诊断</button>}
           </div>
         ))
       ) : (
         <p className="muted">尚未执行</p>
       )}
+      {diagnosticError && <p className="error-text">{diagnosticError}</p>}
+      {diagnostic && <section className="diagnostic-panel"><header><b>脱敏诊断</b><button type="button" onClick={() => setDiagnostic(null)}>关闭</button></header>{diagnostic.truncated && <p>输出过长，已保留末尾内容。</p>}<h4>stderr</h4><pre>{diagnostic.stderr || "无 stderr 输出"}</pre><h4>stdout</h4><pre>{diagnostic.stdout || "无 stdout 输出"}</pre></section>}
       {artifact && (
         <>
           <h3>加密结果</h3>
@@ -930,18 +1080,46 @@ function EventTimeline({ events }: { events: WorkflowEvent[] }) {
 }
 
 function KnowledgeList({ user }: { user: User }) {
-  const [items, setItems] = useState<Knowledge[] | null>(null);
+  const query = useListQuery("status", "");
+  const exactKey = JSON.stringify(query.exactFilters);
+  const navigate = useNavigate();
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [data, setData] = useState<Paginated<KnowledgeSummary> | null>(null);
   const [error, setError] = useState("");
-  const [deleteTarget, setDeleteTarget] = useState<Knowledge | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState<Date>();
+  const [deleteTarget, setDeleteTarget] = useState<KnowledgeSummary | null>(
+    null,
+  );
   const [deleting, setDeleting] = useState(false);
-  const load = () =>
-    api
-      .knowledge()
-      .then((value) => setItems(value.items))
-      .catch((value) => setError(value.message));
+  const requestSequence = useRef(0);
+  const load = useCallback(async () => {
+    const sequence = ++requestSequence.current;
+    setLoading(true);
+    setError("");
+    try {
+      const result = await api.knowledge({
+        page: query.page,
+        pageSize: query.pageSize,
+        keyword: query.keyword,
+          status: query.status || undefined,
+          ...query.exactFilters,
+      });
+      if (sequence === requestSequence.current) {
+        setData(result);
+        setLastUpdated(new Date());
+        if (result.page !== query.page) query.setPage(result.page);
+      }
+    } catch (value) {
+      if (sequence === requestSequence.current)
+        setError((value as Error).message);
+    } finally {
+      if (sequence === requestSequence.current) setLoading(false);
+    }
+  }, [query.page, query.pageSize, query.keyword, query.status, exactKey]);
   useEffect(() => {
     void load();
-  }, []);
+  }, [load]);
   const publish = async (id: string) => {
     try {
       await api.publishKnowledge(id);
@@ -980,6 +1158,7 @@ function KnowledgeList({ user }: { user: User }) {
           <p>每条经验都是可观察的节点流程；发布后生成不可变版本。</p>
         </div>
         <div className="header-actions">
+          {user.isAdmin && selectedIds.length > 0 && <Button kind="tertiary" onClick={() => { sessionStorage.setItem("transferKnowledgeIds", JSON.stringify(selectedIds)); navigate("/transfers"); }}>导出所选 · {selectedIds.length}</Button>}
           {user.isOperator && (
             <Button kind="secondary" as={Link} to="/knowledge/extract">
               从工单提取
@@ -992,6 +1171,37 @@ function KnowledgeList({ user }: { user: User }) {
           )}
         </div>
       </header>
+      <ListToolbar
+        keyword={query.draftKeyword}
+        placeholder="名称 / 摘要 / 工单 ID / 事件编号 / 创建人 UID"
+        status={query.status}
+        statusOptions={[
+          { value: "", label: "全部状态" },
+          { value: "DRAFT", label: "草稿" },
+          { value: "PENDING_REVIEW", label: "待审核" },
+          { value: "PUBLISHED", label: "已发布" },
+        ]}
+        loading={loading}
+        lastUpdated={lastUpdated}
+        onKeywordChange={query.setDraftKeyword}
+        onKeywordCommit={query.commitKeyword}
+        onStatusChange={query.setStatus}
+        onRefresh={() => void load()}
+        onClear={query.clear}
+        exactValues={query.exactFilters}
+        onExactChange={query.setExactFilter}
+        exactFields={[
+          { key: "knowledgeId", label: "知识 ID" },
+          { key: "nameExact", label: "经验名称（精确）" },
+          { key: "creatorUid", label: "创建人 UID" },
+          ...(user.isAdmin ? [{ key: "authorizedUid", label: "授权 UID" }] : []),
+          { key: "sourceTicketId", label: "来源工单 ID" },
+          { key: "sourceTicketNo", label: "事件编号" },
+          { key: "systemKey", label: "系统标识" },
+          { key: "createdFrom", label: "创建时间起", type: "datetime-local" as const },
+          { key: "createdTo", label: "创建时间止", type: "datetime-local" as const },
+        ]}
+      />
       {error && (
         <InlineNotification
           kind="error"
@@ -1000,81 +1210,107 @@ function KnowledgeList({ user }: { user: User }) {
           hideCloseButton
         />
       )}
-      {items === null ? (
+      {loading && data === null ? (
         <RunSkeleton />
-      ) : items.length === 0 ? (
+      ) : data && data.items.length === 0 ? (
         <section className="empty-state">
           <span>K0</span>
-          <h2>还没有可执行经验</h2>
-          <p>从已处理工单提取，或手工编排多个只读查询节点。</p>
-          <Button as={Link} to="/knowledge/extract">
-            从工单提取第一条经验
-          </Button>
+          <h2>
+            {query.keyword || query.status
+              ? "当前条件没有匹配经验"
+              : "还没有可执行经验"}
+          </h2>
+          <p>
+            {query.keyword || query.status
+              ? "调整关键词或状态，或者清空查询条件。"
+              : "从已处理工单提取，或手工编排多个只读查询节点。"}
+          </p>
+          {query.keyword || query.status ? (
+            <Button onClick={query.clear}>清空查询条件</Button>
+          ) : (
+            <Button as={Link} to="/knowledge/extract">
+              从工单提取第一条经验
+            </Button>
+          )}
         </section>
-      ) : (
-        <div className="knowledge-grid">
-          {items.map((item) => (
-            <article key={item.knowledgeId}>
-              <div>
-                <StatusTag status={item.status} />
-                <span>
-                  {item.sourceType === "TICKET_EXTRACTION"
-                    ? `工单 #${item.sourceTicketId}`
-                    : "手工编排"}
-                </span>
-              </div>
-              <Link
-                className="knowledge-link"
-                to={`/knowledge/${item.knowledgeId}`}
-              >
-                <h2>{item.name}</h2>
-                <p>{item.summary}</p>
-              </Link>
-              <footer>
-                <span>
-                  {item.workflowDefinition.nodes.length} 节点 ·{" "}
-                  {item.visibility}
-                </span>
-                <div className="knowledge-actions">
-                  {user.isAdmin && item.status === "PENDING_REVIEW" ? (
-                    <Button
-                      size="sm"
-                      kind="tertiary"
-                      onClick={() => publish(item.knowledgeId)}
-                    >
-                      审核并发布
-                    </Button>
-                  ) : item.status === "DRAFT" &&
-                    (user.isAdmin || item.creatorUid === user.uid) ? (
-                    <Button
-                      size="sm"
-                      kind="tertiary"
-                      onClick={() => submitReview(item.knowledgeId)}
-                    >
-                      提交审核
-                    </Button>
-                  ) : item.status === "PENDING_REVIEW" ? (
-                    <span>等待管理员审核</span>
-                  ) : (
-                    <code>{item.knowledgeId}</code>
-                  )}
-                  {(user.isAdmin ||
-                    (item.creatorUid === user.uid &&
-                      item.status === "DRAFT")) && (
-                    <Button
-                      size="sm"
-                      kind="danger--ghost"
-                      onClick={() => setDeleteTarget(item)}
-                    >
-                      删除
-                    </Button>
-                  )}
+      ) : data ? (
+        <>
+          <div className={`knowledge-grid ${loading ? "is-refreshing" : ""}`}>
+            {data.items.map((item) => (
+              <article key={item.knowledgeId}>
+                <div>
+                  {user.isAdmin && <input aria-label={`选择 ${item.name}`} type="checkbox" checked={selectedIds.includes(item.knowledgeId)} onChange={(event) => setSelectedIds((current) => event.target.checked ? [...current, item.knowledgeId] : current.filter((id) => id !== item.knowledgeId))} />}
+                  <StatusTag status={item.status} />
+                  <span>
+                    {item.sourceType === "TICKET_EXTRACTION"
+                      ? `工单 #${item.sourceTicketId}`
+                      : "手工编排"}
+                  </span>
                 </div>
-              </footer>
-            </article>
-          ))}
-        </div>
-      )}
+                <Link
+                  className="knowledge-link"
+                  to={`/knowledge/${item.knowledgeId}`}
+                >
+                  <h2>{item.name}</h2>
+                  <p>{item.summary}</p>
+                </Link>
+                <footer>
+                  <span>
+                    {item.nodeCount} 节点 · {item.visibility}
+                    <br />创建 {new Date(item.createdAt).toLocaleString()}
+                    <br />更新 {new Date(item.updatedAt).toLocaleString()}
+                    {item.publishedAt && <><br />发布 {new Date(item.publishedAt).toLocaleString()}</>}
+                  </span>
+                  <div className="knowledge-actions">
+                    {user.isAdmin && item.status === "PENDING_REVIEW" ? (
+                      <Button
+                        size="sm"
+                        kind="tertiary"
+                        onClick={() => publish(item.knowledgeId)}
+                      >
+                        审核并发布
+                      </Button>
+                    ) : item.status === "DRAFT" &&
+                      (user.isAdmin || item.creatorUid === user.uid) ? (
+                      <Button
+                        size="sm"
+                        kind="tertiary"
+                        onClick={() => submitReview(item.knowledgeId)}
+                      >
+                        提交审核
+                      </Button>
+                    ) : item.status === "PENDING_REVIEW" ? (
+                      <span>等待管理员审核</span>
+                    ) : (
+                      <code>{item.knowledgeId}</code>
+                    )}
+                    {(user.isAdmin ||
+                      (item.creatorUid === user.uid &&
+                        item.status === "DRAFT")) && (
+                      <Button
+                        size="sm"
+                        kind="danger--ghost"
+                        onClick={() => setDeleteTarget(item)}
+                      >
+                        删除
+                      </Button>
+                    )}
+                  </div>
+                </footer>
+              </article>
+            ))}
+          </div>
+          <ListPagination
+            page={data.page}
+            pageSize={data.pageSize}
+            total={data.total}
+            totalPages={data.totalPages}
+            loading={loading}
+            onPageChange={query.setPage}
+            onPageSizeChange={query.setPageSize}
+          />
+        </>
+      ) : null}
       <Modal
         open={Boolean(deleteTarget)}
         danger
@@ -1223,6 +1459,97 @@ function lines(value: string) {
     .filter(Boolean);
 }
 
+type TransferPreview = {
+  sourceEnvironment: string;
+  packageId?: string;
+  knowledgeCount?: number;
+  itemCount?: number;
+  exportable?: boolean;
+  blockers?: string[];
+  warnings?: string[];
+  databasePaths: Array<{ sourceRef: string; targetRef: string; usageCount: number }>;
+  items: Array<{ itemIndex?: number; knowledgeId?: string; name: string; summary: string; creatorUid?: string; uids?: string[]; action?: string }>;
+};
+
+function TransferCenter() {
+  const initialIds = (() => { try { return JSON.parse(sessionStorage.getItem("transferKnowledgeIds") || "[]") as string[]; } catch { return []; } })();
+  const [knowledgeIds, setKnowledgeIds] = useState(initialIds.join("\n"));
+  const [exportData, setExportData] = useState<TransferPreview | null>(null);
+  const [exportMappings, setExportMappings] = useState<Array<{ sourceRef: string; targetRef: string }>>([]);
+  const [importPackageData, setImportPackageData] = useState<Record<string, unknown> | null>(null);
+  const [importData, setImportData] = useState<TransferPreview | null>(null);
+  const [importMappings, setImportMappings] = useState<Array<{ sourceRef: string; targetRef: string }>>([]);
+  const [replaceData, setReplaceData] = useState<{ affectedCount: number } | null>(null);
+  const [overrides, setOverrides] = useState<Array<{ itemIndex: number; creatorUid: string; uids: string[]; action: string }>>([]);
+  const [confirmed, setConfirmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const exportPreview = async () => {
+    setBusy(true); setError(""); setMessage(""); setConfirmed(false);
+    try {
+      const value = await api.exportPreview(lines(knowledgeIds)) as unknown as TransferPreview;
+      setExportData(value);
+      setExportMappings(value.databasePaths.map((item) => ({ sourceRef: item.sourceRef, targetRef: item.targetRef })));
+    } catch (value) { setError((value as Error).message); } finally { setBusy(false); }
+  };
+  const download = async () => {
+    if (!confirmed) return;
+    setBusy(true); setError("");
+    try {
+      const value = await api.exportPackage({ knowledgeIds: lines(knowledgeIds), confirmed: true, databaseMappings: exportMappings });
+      const filename = `itsm-workflow-${String(value.packageId || "export")}.json`;
+      const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: "application/json;charset=utf-8" }));
+      const link = document.createElement("a"); link.href = url; link.download = filename; link.click(); URL.revokeObjectURL(url);
+      setMessage(`已生成 ${filename}`);
+    } catch (value) { setError((value as Error).message); } finally { setBusy(false); }
+  };
+  const previewReplace = async () => {
+    setBusy(true); setError(""); setConfirmed(false);
+    try { setReplaceData(await api.replacePreview({ knowledgeIds: lines(knowledgeIds), databaseMappings: exportMappings }) as unknown as { affectedCount: number }); }
+    catch (value) { setError((value as Error).message); } finally { setBusy(false); }
+  };
+  const replaceNow = async () => {
+    if (!confirmed) return;
+    setBusy(true); setError("");
+    try { const value = await api.replacePaths({ knowledgeIds: lines(knowledgeIds), databaseMappings: exportMappings, confirmed: true }); setMessage(`已替换 ${(value.updatedKnowledgeIds as string[]).length} 条经验的数据库路径。`); setReplaceData(null); }
+    catch (value) { setError((value as Error).message); } finally { setBusy(false); }
+  };
+  const readPackage = async (file?: File) => {
+    if (!file) return;
+    setBusy(true); setError(""); setMessage(""); setConfirmed(false);
+    try {
+      if (file.size > 10 * 1024 * 1024) throw new Error("导入包超过10 MiB");
+      const packageValue = JSON.parse(await file.text()) as Record<string, unknown>;
+      const value = await api.importPreview({ package: packageValue }) as unknown as TransferPreview;
+      setImportPackageData(packageValue); setImportData(value);
+      setImportMappings(value.databasePaths.map((item) => ({ sourceRef: item.sourceRef, targetRef: item.targetRef })));
+      setOverrides(value.items.map((item, index) => ({ itemIndex: item.itemIndex ?? index, creatorUid: item.creatorUid || "", uids: item.uids || [], action: item.action || "CREATE" })));
+    } catch (value) { setError(`导入预检失败：${(value as Error).message}`); } finally { setBusy(false); }
+  };
+  const importNow = async () => {
+    if (!confirmed || !importPackageData) return;
+    setBusy(true); setError("");
+    try {
+      const value = await api.importPackage({ package: importPackageData, confirmed: true, databaseMappings: importMappings, knowledgeOverrides: overrides });
+      setMessage(`导入完成：创建 ${(value.createdKnowledgeIds as string[]).length} 条待审核经验，跳过 ${(value.skippedItemIndexes as number[]).length} 条。`);
+    } catch (value) { setError((value as Error).message); } finally { setBusy(false); }
+  };
+  return <main className="page transfer-page">
+    <header className="page-title"><div><p className="overline">PORTABLE WORKFLOW</p><h1>导入导出</h1><p>迁移结构化 DAG；路径核实和人工确认完成前不会写入生产知识。</p></div></header>
+    {error && <InlineNotification kind="error" title="迁移操作失败" subtitle={error} hideCloseButton />}
+    {message && <InlineNotification kind="success" title="迁移操作完成" subtitle={message} hideCloseButton />}
+    <div className="transfer-grid">
+      <section className="transfer-panel"><p className="overline">EXPORT</p><h2>导出经验</h2><p>每行一个知识 ID。已发布经验导出当前不可变版本。</p><TextArea id="transfer-ids" labelText="知识 ID" rows={6} value={knowledgeIds} onChange={(event) => setKnowledgeIds(event.target.value)} /><Button onClick={exportPreview} disabled={busy || !lines(knowledgeIds).length}>{busy ? "正在预检" : "预检并汇总路径"}</Button>
+        {exportData && <div className="transfer-preview"><strong>{exportData.knowledgeCount} 条经验 · {exportData.databasePaths.length} 条去重路径</strong>{exportData.blockers?.map((item) => <p className="error-text" key={item}>{item}</p>)}{exportMappings.map((item, index) => <div className="mapping-row" key={item.sourceRef}><code>{item.sourceRef}</code><span>→</span><TextInput id={`export-map-${index}`} labelText="目标数据库路径" hideLabel value={item.targetRef} onChange={(event) => setExportMappings((current) => current.map((entry, position) => position === index ? { ...entry, targetRef: event.target.value } : entry))} /></div>)}<label className="confirm-row"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />我已核实目标环境数据库路径</label><div className="transfer-actions"><Button onClick={download} disabled={busy || !confirmed || exportData.exportable === false}>下载 JSON 包</Button><Button kind="danger--tertiary" onClick={previewReplace} disabled={busy}>预检源环境路径替换</Button></div>{replaceData && <div className="replace-confirm"><p>将直接修改 {replaceData.affectedCount} 条当前环境经验；已发布经验会退回待审核。</p><Button kind="danger" onClick={replaceNow} disabled={!confirmed || busy}>确认快速替换</Button></div>}</div>}
+      </section>
+      <section className="transfer-panel"><p className="overline">IMPORT</p><h2>导入经验</h2><p>支持原生 v2 DAG包和旧版 v1线性步骤包，导入后一律进入待审核。</p><label className="file-drop">选择 JSON 文件<input type="file" accept="application/json,.json" onChange={(event) => void readPackage(event.target.files?.[0])} /></label>
+        {importData && <div className="transfer-preview"><strong>{importData.itemCount} 条经验 · 来源 {importData.sourceEnvironment}</strong>{importData.warnings?.map((item) => <p className="warning-text" key={item}>{item}</p>)}{importMappings.map((item, index) => <div className="mapping-row" key={item.sourceRef}><code>{item.sourceRef}</code><span>→</span><TextInput id={`import-map-${index}`} labelText="生产数据库路径" hideLabel value={item.targetRef} onChange={(event) => setImportMappings((current) => current.map((entry, position) => position === index ? { ...entry, targetRef: event.target.value } : entry))} /></div>)}<div className="override-list">{importData.items.map((item, index) => <article key={index}><b>{item.name}</b><TextInput id={`creator-${index}`} labelText="创建人 UID" value={overrides[index]?.creatorUid || ""} onChange={(event) => setOverrides((current) => current.map((entry, position) => position === index ? { ...entry, creatorUid: event.target.value } : entry))} /><TextInput id={`uids-${index}`} labelText="授权 UID（逗号分隔，留空公开）" value={(overrides[index]?.uids || []).join(",")} onChange={(event) => setOverrides((current) => current.map((entry, position) => position === index ? { ...entry, uids: event.target.value.split(",").map((value) => value.trim()).filter(Boolean) } : entry))} /><label>处理方式<select value={overrides[index]?.action || "CREATE"} onChange={(event) => setOverrides((current) => current.map((entry, position) => position === index ? { ...entry, action: event.target.value } : entry))}><option value="CREATE">创建</option><option value="SKIP">跳过</option><option value="COPY">强制复制</option></select></label></article>)}</div><label className="confirm-row"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />确认以待审核状态写入当前环境</label><Button onClick={importNow} disabled={busy || !confirmed}>确认导入</Button></div>}
+      </section>
+    </div>
+  </main>;
+}
+
 function ExtractKnowledge() {
   const [ticketId, setTicketId] = useState(""),
     [uids, setUids] = useState(""),
@@ -1340,6 +1667,7 @@ function KnowledgeDetail({ user }: { user: User }) {
   const { knowledgeId = "" } = useParams(),
     [knowledge, setKnowledge] = useState<Knowledge | null>(null),
     [selected, setSelected] = useState(""),
+    [versions, setVersions] = useState<WorkflowVersionSummary[]>([]),
     [error, setError] = useState("");
   useEffect(() => {
     api
@@ -1350,6 +1678,7 @@ function KnowledgeDetail({ user }: { user: User }) {
       })
       .catch((value) => setError(value.message));
   }, [knowledgeId]);
+  useEffect(() => { api.versions({ knowledgeId, pageSize: 100 }).then((value) => setVersions(value.items)).catch(() => setVersions([])); }, [knowledgeId]);
   if (error)
     return (
       <main className="page">
@@ -1371,7 +1700,7 @@ function KnowledgeDetail({ user }: { user: User }) {
     (item) => item.id === selected,
   );
   const authorable = knowledge.workflowDefinition.nodes.every((item) =>
-    ["sql_read", "condition", "end"].includes(item.type),
+    ["sql_read", "condition", "hitl_select", "hitl_form", "end"].includes(item.type),
   );
   const ownsDraft = knowledge.creatorUid === user.uid;
   const canEdit =
@@ -1478,6 +1807,12 @@ function KnowledgeDetail({ user }: { user: User }) {
           </div>
         </dl>
       </section>
+      <section className="lifecycle-panel">
+        <header><div><p className="overline">LIFECYCLE</p><h2>知识生命周期</h2></div><span>{knowledge.lifecycle?.length || 0} 条记录</span></header>
+        <ol>{knowledge.lifecycle?.map((item) => <li key={item.eventId}><time>{new Date(item.createdAt).toLocaleString()}</time><div><b>{item.eventType}</b><span>{item.summary}</span><small>{item.actorUid || "系统迁移"}{item.workflowVersionId ? ` · ${item.workflowVersionId}` : ""}</small></div></li>)}</ol>
+        {!knowledge.lifecycle?.length && <p className="muted">暂无生命周期记录</p>}
+      </section>
+      <section className="version-panel"><header><div><p className="overline">IMMUTABLE VERSIONS</p><h2>发布版本</h2></div><span>{versions.length} 个版本</span></header>{versions.length ? <div className="version-table">{versions.map((item) => <article key={item.workflowVersionId}><b>v{item.versionNumber}{item.current ? " · 当前" : ""}</b><code>{item.workflowVersionId}</code><span>{item.publishedBy}</span><time>{new Date(item.publishedAt).toLocaleString()}</time><small>{item.contentHash}</small></article>)}</div> : <p className="muted">尚未发布版本</p>}</section>
       {knowledge.status === "DRAFT" && (user.isAdmin || ownsDraft) && (
         <div className="sticky-save">
           <span>提交后草稿进入管理员审核队列，发布前不会参与匹配。</span>

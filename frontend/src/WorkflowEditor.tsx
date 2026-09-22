@@ -31,6 +31,8 @@ type CardData = { node: WorkflowNode; entry: boolean; [key: string]: unknown };
 const labels: Record<string, string> = {
   sql_read: "SQL READ",
   condition: "CONDITION",
+  hitl_select: "HITL SELECT",
+  hitl_form: "HITL FORM",
   end: "END",
 };
 const GraphCard = memo(({ data, selected }: NodeProps<Node<CardData>>) => {
@@ -53,6 +55,10 @@ const GraphCard = memo(({ data, selected }: NodeProps<Node<CardData>>) => {
           ? String(node.config.databaseRef || "待配置数据库")
           : node.type === "condition"
             ? "按前置结果选择分支"
+            : node.type === "hitl_select"
+              ? "从查询结果中人工选择"
+              : node.type === "hitl_form"
+                ? "等待人工填写结构化参数"
             : "汇总并结束运行"}
       </p>
       <footer>
@@ -60,6 +66,10 @@ const GraphCard = memo(({ data, selected }: NodeProps<Node<CardData>>) => {
           ? `${node.inputs.length} 输入${bound ? ` · ${bound} 数据绑定` : ""}`
           : node.type === "condition"
             ? "条件路由"
+            : node.type === "hitl_select"
+              ? "候选分页 · 人工确认"
+              : node.type === "hitl_form"
+                ? "结构化表单"
             : "终点"}
       </footer>
       {node.type !== "end" && (
@@ -109,6 +119,17 @@ const endNode = (id: string, x: number, y: number): WorkflowNode => ({
   approvalPolicy: "NONE",
   timeoutSeconds: 60,
   uiPosition: { x, y },
+});
+const hitlSelectNode = (id: string, x: number, y: number): WorkflowNode => ({
+  id, type: "hitl_select", title: "选择候选参数",
+  config: { title: "请选择用于后续步骤的参数", selectionMode: "SINGLE", idPath: "/customer_id", labelTemplate: "{{customer_name}} / {{customer_id}}", displayFields: [{ name: "customer_name", label: "客户姓名", path: "/customer_name" }, { name: "customer_id", label: "客户编号", path: "/customer_id" }], outputFields: [{ name: "customer_id", path: "/customer_id" }], minimumSelections: 1, maximumSelections: 1 },
+  inputs: [{ name: "rows", type: "array", description: "前置SQL查询结果", source: { kind: "NODE_OUTPUT", nodeId: "", jsonPointer: "/data" } }],
+  approvalPolicy: "NONE", timeoutSeconds: 60, uiPosition: { x, y },
+});
+const hitlFormNode = (id: string, x: number, y: number): WorkflowNode => ({
+  id, type: "hitl_form", title: "填写查询参数",
+  config: { title: "填写后续查询参数", description: "请确认后续查询所需参数", fields: [{ name: "customer_id", label: "客户编号", type: "string", required: true }] },
+  inputs: [], approvalPolicy: "NONE", timeoutSeconds: 60, uiPosition: { x, y },
 });
 
 export function newWorkflow(): EditableWorkflow {
@@ -257,10 +278,11 @@ export default function WorkflowEditor({
     setSelectedEdge(edge.id);
     setSelectedNode("");
   };
-  const add = (type: "sql_read" | "condition" | "end") => {
-    const id = `${type === "sql_read" ? "sql" : type === "condition" ? "condition" : "end"}-${Date.now()}`,
+  const add = (type: "sql_read" | "condition" | "hitl_select" | "hitl_form" | "end") => {
+    const prefix = type === "sql_read" ? "sql" : type === "condition" ? "condition" : type === "hitl_select" ? "hitl-select" : type === "hitl_form" ? "hitl-form" : "end",
+      id = `${prefix}-${Date.now()}`,
       position = {
-        x: 120 + (nodes.length % 3) * 320,
+        x: 120 + (nodes.length % 3) * 360,
         y: 100 + Math.floor(nodes.length / 3) * 220,
       },
       node =
@@ -268,6 +290,10 @@ export default function WorkflowEditor({
           ? sqlNode(id, position.x, position.y)
           : type === "condition"
             ? conditionNode(id, position.x, position.y)
+            : type === "hitl_select"
+              ? hitlSelectNode(id, position.x, position.y)
+              : type === "hitl_form"
+                ? hitlFormNode(id, position.x, position.y)
             : endNode(id, position.x, position.y),
       flow: Node<CardData> = {
         id,
@@ -382,6 +408,8 @@ export default function WorkflowEditor({
           <Button type="button" size="sm" kind="tertiary" onClick={() => add("condition")}>
             ◇ 条件判断
           </Button>
+          <Button type="button" size="sm" kind="tertiary" onClick={() => add("hitl_select")}>＋ 人工选择</Button>
+          <Button type="button" size="sm" kind="tertiary" onClick={() => add("hitl_form")}>＋ 人工表单</Button>
           <Button type="button" size="sm" kind="ghost" onClick={() => add("end")}>
             ＋ 结束
           </Button>
@@ -525,6 +553,10 @@ function NodeInspector({
         position === index ? value : item,
       ),
     });
+  const patchConfig = (key: string, value: unknown) => patch({ config: { ...node.config, [key]: value } });
+  const displayFields = (node.config.displayFields as Array<{ name: string; label: string; path: string }> | undefined) || [];
+  const outputFields = (node.config.outputFields as Array<{ name: string; path: string }> | undefined) || [];
+  const formFields = (node.config.fields as Array<{ name: string; label: string; type: string; required: boolean; minimum?: number; maximum?: number; minLength?: number; maxLength?: number; enum?: unknown[] }> | undefined) || [];
   return (
     <div>
       <p className="overline">NODE CONFIG</p>
@@ -685,6 +717,24 @@ function NodeInspector({
           </p>
         </div>
       )}
+      {node.type === "hitl_select" && (
+        <div className="hitl-editor">
+          <TextInput id={`${node.id}-hitl-title`} labelText="交互标题" value={String(node.config.title || "")} onChange={(event) => patchConfig("title", event.target.value)} />
+          <label>选择模式<select value={String(node.config.selectionMode || "SINGLE")} onChange={(event) => { const mode = event.target.value; patch({ config: { ...node.config, selectionMode: mode, minimumSelections: 1, maximumSelections: mode === "SINGLE" ? 1 : Math.max(2, Number(node.config.maximumSelections || 10)) } }); }}><option value="SINGLE">单选</option><option value="MULTIPLE">多选</option></select></label>
+          <div className="two-fields"><TextInput id={`${node.id}-id-path`} labelText="候选唯一值路径" value={String(node.config.idPath || "")} onChange={(event) => patchConfig("idPath", event.target.value)} /><TextInput id={`${node.id}-label-template`} labelText="候选标题模板" value={String(node.config.labelTemplate || "")} onChange={(event) => patchConfig("labelTemplate", event.target.value)} /></div>
+          {String(node.config.selectionMode) === "MULTIPLE" && <div className="two-fields"><TextInput id={`${node.id}-minimum`} type="number" labelText="最少选择" value={String(node.config.minimumSelections || 1)} onChange={(event) => patchConfig("minimumSelections", Number(event.target.value))} /><TextInput id={`${node.id}-maximum`} type="number" labelText="最多选择" value={String(node.config.maximumSelections || 10)} onChange={(event) => patchConfig("maximumSelections", Number(event.target.value))} /></div>}
+          <section className="binding-editor"><b>候选来源</b><label>前置节点<select value={String(node.inputs[0]?.source.nodeId || "")} onChange={(event) => patch({ inputs: [{ ...node.inputs[0], name: "rows", type: "array", source: { kind: "NODE_OUTPUT", nodeId: event.target.value, jsonPointer: node.inputs[0]?.source.jsonPointer || "/data" } }] })}><option value="">请选择</option>{predecessors.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label><TextInput id={`${node.id}-rows-path`} labelText="结果数组 JSON Pointer" value={String(node.inputs[0]?.source.jsonPointer || "/data")} onChange={(event) => patch({ inputs: [{ ...node.inputs[0], name: "rows", type: "array", source: { kind: "NODE_OUTPUT", nodeId: node.inputs[0]?.source.nodeId || "", jsonPointer: event.target.value } }] })} /></section>
+          <FieldList title="展示字段" fields={displayFields} includeLabel onChange={(value) => patchConfig("displayFields", value)} />
+          <FieldList title="下游输出字段" fields={outputFields} onChange={(value) => patchConfig("outputFields", value)} />
+        </div>
+      )}
+      {node.type === "hitl_form" && (
+        <div className="hitl-editor">
+          <TextInput id={`${node.id}-form-title`} labelText="表单标题" value={String(node.config.title || "")} onChange={(event) => patchConfig("title", event.target.value)} />
+          <TextArea id={`${node.id}-form-description`} labelText="填写说明" value={String(node.config.description || "")} onChange={(event) => patchConfig("description", event.target.value)} />
+          <FormFieldList fields={formFields} onChange={(value) => patchConfig("fields", value)} />
+        </div>
+      )}
       <div className="danger-zone">
         <Button size="sm" kind="danger--ghost" onClick={remove}>
           删除节点
@@ -692,6 +742,16 @@ function NodeInspector({
       </div>
     </div>
   );
+}
+
+function FieldList({ title, fields, includeLabel = false, onChange }: { title: string; fields: Array<{ name: string; label?: string; path: string }>; includeLabel?: boolean; onChange: (value: Array<{ name: string; label?: string; path: string }>) => void }) {
+  const change = (index: number, key: string, value: string) => onChange(fields.map((item, position) => position === index ? { ...item, [key]: value } : item));
+  return <section className="field-editor-list"><header><div><b>{title}</b><small>仅声明字段会进入对应视图</small></div><button type="button" onClick={() => onChange([...fields, { name: `field_${fields.length + 1}`, ...(includeLabel ? { label: "字段" } : {}), path: "/field" }])}>＋ 添加</button></header>{fields.map((field, index) => <div className={includeLabel ? "field-row three" : "field-row"} key={index}><input aria-label={`${title}名称`} value={field.name} onChange={(event) => change(index, "name", event.target.value)} placeholder="字段名" />{includeLabel && <input aria-label={`${title}标签`} value={field.label || ""} onChange={(event) => change(index, "label", event.target.value)} placeholder="展示标签" />}<input aria-label={`${title}路径`} value={field.path} onChange={(event) => change(index, "path", event.target.value)} placeholder="/field" /><button type="button" onClick={() => onChange(fields.filter((_, position) => position !== index))}>删除</button></div>)}</section>;
+}
+
+function FormFieldList({ fields, onChange }: { fields: Array<{ name: string; label: string; type: string; required: boolean; minimum?: number; maximum?: number; minLength?: number; maxLength?: number; enum?: unknown[] }>; onChange: (value: typeof fields) => void }) {
+  const change = (index: number, patch: Record<string, unknown>) => onChange(fields.map((item, position) => position === index ? { ...item, ...patch } : item));
+  return <section className="field-editor-list form-fields"><header><div><b>表单字段</b><small>字段值将加密保存</small></div><button type="button" onClick={() => onChange([...fields, { name: `field_${fields.length + 1}`, label: "参数", type: "string", required: true }])}>＋ 添加</button></header>{fields.map((field, index) => <article key={index}><div className="field-row three"><input aria-label="字段名" value={field.name} onChange={(event) => change(index, { name: event.target.value })} placeholder="customer_id" /><input aria-label="字段标签" value={field.label} onChange={(event) => change(index, { label: event.target.value })} placeholder="客户编号" /><select aria-label="字段类型" value={field.type} onChange={(event) => change(index, { type: event.target.value })}><option value="string">字符串</option><option value="integer">整数</option><option value="number">数字</option><option value="boolean">布尔值</option></select><button type="button" onClick={() => onChange(fields.filter((_, position) => position !== index))}>删除</button></div><label className="check-row"><input type="checkbox" checked={field.required} onChange={(event) => change(index, { required: event.target.checked })} />必填</label>{["integer", "number"].includes(field.type) && <div className="constraint-row"><input type="number" aria-label="最小值" placeholder="最小值" value={field.minimum ?? ""} onChange={(event) => change(index, { minimum: event.target.value === "" ? undefined : Number(event.target.value) })} /><input type="number" aria-label="最大值" placeholder="最大值" value={field.maximum ?? ""} onChange={(event) => change(index, { maximum: event.target.value === "" ? undefined : Number(event.target.value) })} /></div>}{field.type === "string" && <div className="constraint-row"><input type="number" aria-label="最短长度" placeholder="最短长度" value={field.minLength ?? ""} onChange={(event) => change(index, { minLength: event.target.value === "" ? undefined : Number(event.target.value) })} /><input type="number" aria-label="最长长度" placeholder="最长长度" value={field.maxLength ?? ""} onChange={(event) => change(index, { maxLength: event.target.value === "" ? undefined : Number(event.target.value) })} /><input aria-label="枚举值" placeholder="枚举值，逗号分隔" value={(field.enum || []).join(",")} onChange={(event) => change(index, { enum: event.target.value.split(",").map((value) => value.trim()).filter(Boolean) })} /></div>}</article>)}</section>;
 }
 
 function EdgeInspector({
