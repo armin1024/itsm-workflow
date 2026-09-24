@@ -129,6 +129,8 @@ POST /internal/v1/runtime/workflows/plan
 POST /internal/v1/compiler/preview
 ```
 
+tec01发布知识前必须调用`/internal/v1/runtime/workflows/validate`，并保存规范化Workflow、Catalog摘要和内容哈希。正式计划由tec01从该不可变版本创建，检查权限、工单ID和运行输入，并保存`planHash`。`/internal/v1/runtime/workflows/plan`用于预览与联调，不是每次创建计划的必需调用。Executor在收到下发任务时再次检查Workflow快照及内容哈希。
+
 `/internal/v1/compiler/preview`仅用于Studio和接口联调。目标生产流程由tec01调用`POST /internal/v1/compiler/jobs`提交`ticketInfo`和`auditTimeline`，Compiler异步回调简洁进度与最终DraftProposal；具体约定见[tec01集成契约](tec01-integration-contract.md)。
 
 整流程调试：

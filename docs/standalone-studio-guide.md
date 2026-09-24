@@ -21,7 +21,7 @@
 - `hitl_select`根据SQL结果映射候选。
 - `hitl_form`收集一个或多个用户参数。
 
-目标生产Workflow不使用运行时LLM节点；LLM只允许在草稿提取阶段由Compiler内部使用。
+生产运行节点为SQL读、条件判断、HITL选择、HITL表单和结束。草稿提取时的中文总结由Compiler完成，不出现在执行画布中。
 
 SQL读必须填写当前工单ID和`AOPS_API_KEY`，并真实执行`aops-cli db read`。底层API保留`SIMULATION/DRY_RUN`仅供自动化契约测试，不作为页面调试入口。
 

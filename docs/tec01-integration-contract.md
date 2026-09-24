@@ -32,15 +32,45 @@ POST /internal/v1/runtime/workflows/validate
 }
 ```
 
-返回规范化Workflow、Catalog摘要和内容哈希。
+tec01在审核发布时必须调用一次。返回规范化Workflow、Catalog摘要和内容哈希；tec01将三者随不可变发布版本保存。草稿编辑时也可调用，用于即时显示配置错误。
 
-### 生成执行计划
+### 计划预览接口
 
 ```http
 POST /internal/v1/runtime/workflows/plan
 ```
 
-返回节点顺序、参数来源、数据库、SQL摘要和需要用户确认的风险信息。tec01保存计划并交给Hermes或Web页面展示。
+返回节点、连线、运行输入说明和风险提示，供Studio或tec01联调时预览。**tec01创建正式计划时不必调用此接口**：它从已发布、已校验的版本生成展示内容，保存当前工单ID、参数、版本快照及`planHash`，交给Hermes或Web页面展示。
+
+正式计划由tec01负责以下检查：
+
+1. 当前用户有权使用已发布经验，工单ID有效。
+2. 运行输入中真正必填的参数已提供且类型正确；`NODE_OUTPUT`及HITL运行时才产生的值无需在此阶段输入。
+3. 用户确认时提交的`planHash`与所展示的版本、工单ID、参数和计划内容一致。修改任一项后重新展示。
+
+`workflowContentHash`标识发布版本的Workflow定义；`planHash`标识这次运行向用户展示的计划，至少覆盖版本ID及内容哈希、工单ID、已提供的运行参数和展示的节点/连线。两者不能混用。计划卡片要展示条件分支和后续HITL步骤，但不展示尚未执行出来的候选和值。
+
+SQL只读性、节点配置、图是否有环、条件默认边、HITL字段和前置输出绑定由itsm-workflow在**发布前**校验。tec01不维护第二套SQL或DAG校验器。下发执行时Executor再次核对快照内容哈希；Handler版本兼容检查应在联调验收中补齐。
+
+上游结果的具体字段值尚不存在时，静态校验只保证绑定指向上游节点且JSON Pointer格式有效；运行时如果实际结果缺少该字段，Executor返回节点失败原因，tec01展示给用户。
+
+这一分工参考`codex/list-pagination-search`：发布时校验并固化版本；创建计划时从发布版本生成快照、初始化节点状态并保存确认哈希。拆分后把原先本地数据库中的计划和确认事实交给tec01。
+
+tec01可以用同步缓存的Node Catalog检查当前Runtime是否仍支持该发布版本，无需每次计划创建都发起HTTP校验。当前代码对历史Catalog/Handler版本的兼容处理尚未完整实现；双方联调须覆盖“发布后Runtime升级，再创建计划或恢复旧运行”的场景。
+
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant T as tec01页面/Hermes
+    participant R as itsm-workflow
+
+    T->>R: 发布前校验Workflow
+    R-->>T: 返回规范化版本
+    U->>T: 填写工单ID和当前参数
+    T-->>U: 展示计划与需要人工处理的步骤
+    U->>T: 确认计划
+    T->>R: 下发已发布版本执行
+```
 
 ### 提交草稿提取任务
 
@@ -323,7 +353,7 @@ sequenceDiagram
 
 ## 最小联调顺序
 
-1. Catalog、Workflow校验和计划展示。
+1. 发布前Workflow校验；tec01独立创建计划并向用户展示。
 2. tec01下发两步SQL Workflow，确认逐节点状态返回。
 3. 条件节点根据`rowCount`选择分支。
 4. `hitl_select`通过Hermes和页面完成选择。

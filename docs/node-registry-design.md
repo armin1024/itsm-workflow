@@ -22,7 +22,9 @@ hitl_form           手工输入一个或多个参数
 end                 汇总并结束
 ```
 
-运行时取消`llm_extract`节点。Workflow草稿生成阶段仍可由Compiler内部使用LLM生成中文名称、摘要和步骤，但生产执行不依赖LLM判断参数。
+运行节点目录固定为上述五种类型。Compiler可以在生成草稿时使用内网LLM总结中文名称、摘要和步骤；执行期间的参数判断由条件节点与HITL处理。
+
+这个划分参考`codex/list-pagination-search`中的`app/hitl.py`：候选字段投影、表单字段校验和选择结果解析都采用确定性规则，不由模型猜测用户要选哪一行。tec01保存交互与用户回复，Executor据此继续下一节点。
 
 ## Node Manifest
 
@@ -85,6 +87,8 @@ eq ne gt gte lt lte in contains exists empty
 
 每个条件节点必须有默认分支。Executor返回命中的边，tec01在页面上高亮实际路径，并把其他分支显示为`SKIPPED`。
 
+常见流程是`sql_read → condition(rowCount > 0) → hitl_select/hitl_form → sql_read`。没有结果时走默认结束分支；用户选择或输入后，HITL输出通过`NODE_OUTPUT`绑定到后续SQL参数。
+
 ## HITL选择
 
 `hitl_select`直接把前置SQL行映射为候选，不需要LLM。
@@ -94,10 +98,7 @@ eq ne gt gte lt lte in contains exists empty
   "type": "hitl_select",
   "config": {
     "selectionMode": "SINGLE",
-    "source": {
-      "nodeId": "sql-1",
-      "jsonPointer": "/data"
-    },
+    "title": "请选择客户",
     "idPath": "/customer_id",
     "labelTemplate": "{{customer_name}} / {{customer_id}}",
     "displayFields": [
@@ -109,7 +110,12 @@ eq ne gt gte lt lte in contains exists empty
       {"name":"customer_id","path":"/customer_id"},
       {"name":"account_id","path":"/account_id"}
     ]
-  }
+  },
+  "inputs": [{
+    "name": "rows",
+    "type": "array",
+    "source": {"kind":"NODE_OUTPUT","nodeId":"sql-1","jsonPointer":"/data"}
+  }]
 }
 ```
 

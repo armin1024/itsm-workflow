@@ -3,8 +3,8 @@
 `0.9.0`开始，本仓库按tec01主动调度架构承担Python计算执行侧：
 
 - Node Registry与版本化Schema。
-- Workflow DAG校验和计划渲染。
-- 工单证据过滤、LLM分析和草稿编译。
+- 发布前Workflow DAG校验和计划预览。
+- 工单证据过滤、草稿编译与中文摘要提炼。
 - `sql_read`、`condition`、`hitl_select`、`hitl_form`等节点执行适配器。
 - 与tec01交互的Compiler/Executor协议客户端。
 - 使用管理Token登录、可独立运行的TEST_ONLY Studio。
@@ -35,6 +35,8 @@ http://127.0.0.1:8089/studio
 | `itsm-workflow-api` | 启用 | Studio、Catalog、校验、计划、Compiler Preview和静态页面 |
 
 生产架构由tec01主动提交草稿提取任务、下发完整Workflow和暂停/取消命令；Executor逐节点返回状态和结果。tec01同时承担Hermes消息渠道、MCP和Web页面，所有入口共享同一运行事实。
+
+正式计划由tec01从已发布版本创建；itsm-workflow在发布前校验节点和DAG，下发执行时复核版本。运行期间使用条件判断与HITL完成参数交互。内网LLM只用于草稿提取阶段。
 
 旧的`itsm-workflow-mcp`、`itsm-workflow-worker`和`itsm-workflow-migrate`已删除。升级安装时安装器会停用并移除这些旧unit。
 

@@ -10,8 +10,7 @@ flowchart LR
     S --> E[Node Executor]
     E --> CLI[aops-cli]
     CLI --> A[AOPS]
-    C --> L[内网LLM]
-    E --> L
+    C --> L[内网LLM，仅用于草稿提取]
     S --> DB[(TEST_ONLY SQLite)]
 
     U2[用户] <--> CH[tec01/Hermes消息渠道]
@@ -23,7 +22,7 @@ flowchart LR
     EX -->|逐节点返回状态和结果| T
 ```
 
-itsm-workflow拥有节点定义、草稿编译、DAG校验、计划渲染、节点Handler和外部系统适配器。tec01拥有生产知识、MCP、权限、状态机、队列、Artifact、Checkpoint和审计。
+itsm-workflow拥有节点定义、草稿编译、DAG校验、计划预览、节点Handler和外部系统适配器。tec01拥有生产知识、正式计划、MCP、权限、状态机、队列、Artifact、Checkpoint和审计。Runtime在发布前校验不可变版本；tec01据此独立创建计划，Executor在下发执行时复核快照。
 
 ## 保留模块
 
@@ -32,7 +31,7 @@ itsm-workflow拥有节点定义、草稿编译、DAG校验、计划渲染、节�
 | Node Registry | `app/runtime/registry.py`、`builtin_nodes.py` | 节点Manifest、Schema、版本与能力目录 |
 | Node Executor | `app/runtime/executor.py` | 单节点统一执行入口，Studio和后续Remote Executor共用 |
 | Compiler | `app/extraction.py` | 审计过滤、SQL参数化、LLM中文提炼、DAG生成 |
-| Planner | `app/runtime/planner.py` | DAG归一化、校验、计划材料和内容哈希 |
+| Planner | `app/runtime/planner.py` | 发布前DAG归一化与校验、预览材料和内容哈希 |
 | CLI Adapter | `app/cli.py` | 安全argv执行、SSE解析、超时、限流和诊断脱敏 |
 | tec01 Adapter | `app/tec01_client.py` | 接收tec01调度、逐节点状态回写和控制命令 |
 | Studio | `app/studio`、`frontend` | TEST_ONLY编排和调试 |
