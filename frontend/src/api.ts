@@ -1,5 +1,6 @@
 import { withBase } from "./runtime";
 import type { NodeCatalogItem } from "./types";
+import { localId } from "./browserStore";
 
 export class ApiError extends Error {
   status: number;
@@ -34,8 +35,12 @@ export const api = {
   studioNodes: () => request<{ items: NodeCatalogItem[]; total: number; catalogDigest: string }>("/api/v1/studio/nodes"),
   updateStudioNode: (type: string, schemaVersion: number, body: Record<string, unknown>) => request<Record<string, unknown>>(`/api/v1/studio/nodes/${encodeURIComponent(type)}/${schemaVersion}`, { method: "PATCH", body: JSON.stringify(body) }),
   studioDebugNode: (body: Record<string, unknown>, apiKey?: string) => request<Record<string, unknown>>("/api/v1/studio/node-debug-runs", { method: "POST", headers: apiKey ? { "X-AOPS-Api-Key": apiKey } : {}, body: JSON.stringify(body) }),
-  studioDebugWorkflow: (body: Record<string, unknown>, apiKey?: string) => request<Record<string, unknown>>("/api/v1/studio/workflow-debug-runs", { method: "POST", headers: apiKey ? { "X-AOPS-Api-Key": apiKey } : {}, body: JSON.stringify(body) }),
-  studioDebugReply: (id: string, response: Record<string, unknown>) => request<Record<string, unknown>>(`/api/v1/studio/node-debug-runs/${id}/interrupts/reply`, { method: "POST", body: JSON.stringify({ response }) }),
+  studioDebugReply: (node: Record<string, unknown>, inputs: Record<string, unknown>, response: Record<string, unknown>) => request<Record<string, unknown>>("/api/v1/studio/node-debug-runs/reply", { method: "POST", body: JSON.stringify({ node, inputs, response }) }),
+  extract: (body: Record<string, unknown>, apiKey?: string, fromTicket = false) => request<Record<string, unknown>>(`/api/v1/studio/extractions${fromTicket ? "/from-ticket" : ""}`, { method: "POST", headers: apiKey ? { "X-AOPS-Api-Key": apiKey } : {}, body: JSON.stringify(body) }),
+  studioEvents: (id: string, after: number) => request<{ events: Array<Record<string, unknown> & { eventId: number }>; active: boolean; syncStatus?: string; callbackError?: unknown }>(`/api/v1/studio/events/${encodeURIComponent(id)}?after=${after}`),
+  dispatch: (body: Record<string, unknown>, apiKey?: string) => request<Record<string, unknown>>("/api/v1/studio/executions/dispatch", { method: "POST", headers: apiKey ? { "X-AOPS-Api-Key": apiKey } : {}, body: JSON.stringify(body) }),
+  command: (runId: string, type: "PAUSE" | "CANCEL") => request<Record<string, unknown>>(`/api/v1/studio/executions/${encodeURIComponent(runId)}/commands`, { method: "POST", body: JSON.stringify({ commandId: localId("command"), type }) }),
+  planWorkflow: (body: Record<string, unknown>) => request<Record<string, unknown>>("/api/v1/studio/workflows/plan", { method: "POST", body: JSON.stringify(body) }),
   compileEvidence: (ticketInfo: Record<string, unknown>, auditTimeline: Record<string, unknown>[]) => request<Record<string, unknown>>("/api/v1/studio/compiler/preview", { method: "POST", body: JSON.stringify({ ticketInfo, auditTimeline }) }),
   compileTicket: (ticketId: number, apiKey: string) => request<Record<string, unknown>>("/api/v1/studio/compiler/from-ticket", { method: "POST", headers: { "X-AOPS-Api-Key": apiKey }, body: JSON.stringify({ ticketId }) }),
   validateWorkflow: (workflowDefinition: Record<string, unknown>) => request<Record<string, unknown>>("/api/v1/studio/workflows/validate", { method: "POST", body: JSON.stringify({ workflowDefinition, validationMode: "TEST" }) }),

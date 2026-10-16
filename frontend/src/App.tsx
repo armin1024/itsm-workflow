@@ -7,6 +7,7 @@ import CompilerLab from "./CompilerLab";
 import NodeManagement from "./NodeManagement";
 import NodeStudio from "./NodeStudio";
 import WorkflowLab from "./WorkflowLab";
+import LocalRuntimeMonitor from "./LocalRuntimeMonitor";
 
 function Login({ onReady }: { onReady: () => void }) {
   const [token, setToken] = useState("");
@@ -22,7 +23,7 @@ function Login({ onReady }: { onReady: () => void }) {
 }
 
 function Shell({ onLogout }: { onLogout: () => void }) {
-  return <div className="runtime-shell"><header className="topbar"><Link className="wordmark" to="/studio"><span>IW</span><strong>Runtime Studio</strong></Link><nav aria-label="主导航"><NavLink to="/studio">节点调试</NavLink><NavLink to="/nodes">Node管理</NavLink><NavLink to="/workflow">流程编排</NavLink><NavLink to="/compiler">草稿提取</NavLink><NavLink to="/docs">API文档</NavLink></nav><div className="identity"><span>TEST_ONLY</span><button onClick={onLogout}>退出</button></div></header><Routes><Route path="/studio" element={<NodeStudio />} /><Route path="/nodes" element={<NodeManagement />} /><Route path="/workflow" element={<WorkflowLab />} /><Route path="/compiler" element={<CompilerLab />} /><Route path="/docs" element={<ApiDocs />} /><Route path="*" element={<Navigate to="/studio" replace />} /></Routes></div>;
+  return <div className="runtime-shell"><header className="topbar"><Link className="wordmark" to="/runs"><span>IW</span><strong>Runtime Studio</strong></Link><nav aria-label="主导航"><NavLink to="/runs" end>执行中心</NavLink><NavLink to="/runs/new">创建运行</NavLink><NavLink to="/knowledge">知识与版本</NavLink><NavLink to="/compiler">知识抽取</NavLink><NavLink to="/studio">节点调试</NavLink><NavLink to="/nodes">Node管理</NavLink><NavLink to="/docs">API文档</NavLink></nav><div className="identity"><span>TEST_ONLY</span><button onClick={onLogout}>退出</button></div></header><LocalRuntimeMonitor /><Routes><Route path="/studio" element={<NodeStudio />} /><Route path="/nodes" element={<NodeManagement />} /><Route path="/runs" element={<WorkflowLab key="runs" />} /><Route path="/runs/new" element={<WorkflowLab key="new-run" />} /><Route path="/knowledge" element={<WorkflowLab key="knowledge" />} /><Route path="/workflow" element={<WorkflowLab key="legacy" />} /><Route path="/compiler" element={<CompilerLab />} /><Route path="/docs" element={<ApiDocs />} /><Route path="*" element={<Navigate to="/runs" replace />} /></Routes></div>;
 }
 
 export default function App() {

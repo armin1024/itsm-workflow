@@ -31,11 +31,6 @@ class CompilerTicketRequest(BaseModel):
     targetCatalogDigest: str | None = None
 
 
-class StudioWorkspaceCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
-    draft: dict[str, Any] = Field(default_factory=dict)
-
-
 class StudioNodeDebugRequest(BaseModel):
     workspaceId: str | None = None
     ticketId: int | None = Field(default=None, gt=0)
@@ -46,6 +41,8 @@ class StudioNodeDebugRequest(BaseModel):
 
 
 class StudioInterruptReply(BaseModel):
+    node: dict[str, Any]
+    inputs: dict[str, Any] = Field(default_factory=dict)
     response: dict[str, Any]
 
 
@@ -70,22 +67,35 @@ class StudioWorkflowDebugRequest(BaseModel):
     simulation: dict[str, Any] = Field(default_factory=dict)
 
 
-class CompilerJobRequest(BaseModel):
-    jobId: str = Field(min_length=1, max_length=160)
+class ExtractionSubmitRequest(BaseModel):
+    requestId: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9_.:-]+$")
     ticketId: int = Field(gt=0)
     ticketInfo: dict[str, Any]
     auditTimeline: list[dict[str, Any]]
 
 
+class StudioExtractionRequest(ExtractionSubmitRequest):
+    knowledgeId: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9_.:-]+$")
+    syncTec01: bool = False
+
+
+class StudioTicketExtractionRequest(BaseModel):
+    knowledgeId: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9_.:-]+$")
+    requestId: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9_.:-]+$")
+    ticketId: int = Field(gt=0)
+    syncTec01: bool = False
+
+
 class ExecutionDispatchRequest(BaseModel):
-    dispatchId: str = Field(min_length=1, max_length=160)
-    runId: str = Field(min_length=1, max_length=160)
+    dispatchId: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9_.:-]+$")
+    runId: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9_.:-]+$")
     ticketId: int = Field(gt=0)
     workflowContentHash: str = Field(min_length=1, max_length=128)
     workflowSnapshot: dict[str, Any]
     runInputs: dict[str, Any] = Field(default_factory=dict)
     nodeStates: dict[str, str] = Field(default_factory=dict)
     nodeOutputs: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    nodeResults: dict[str, dict[str, Any]] = Field(default_factory=dict)
     currentNodeId: str | None = None
     selectedRoutes: dict[str, str] = Field(default_factory=dict)
     resumePayload: dict[str, Any] | None = None
@@ -94,3 +104,25 @@ class ExecutionDispatchRequest(BaseModel):
 class ExecutionCommandRequest(BaseModel):
     commandId: str = Field(min_length=1, max_length=160)
     type: str = Field(pattern="^(PAUSE|CANCEL)$")
+
+
+class StudioExecutionRequest(ExecutionDispatchRequest):
+    syncTec01: bool = False
+
+
+class SingleNodeRequest(BaseModel):
+    requestId: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9_.:-]+$")
+    ticketId: int | None = Field(default=None, gt=0)
+    node: dict[str, Any]
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    resumePayload: dict[str, Any] | None = None
+
+
+class SingleNodeResponse(BaseModel):
+    requestId: str
+    nodeId: str
+    status: str
+    output: dict[str, Any] | None = None
+    diagnostic: dict[str, Any] | None = None
+    interaction: dict[str, Any] | None = None
+    handlerVersion: str

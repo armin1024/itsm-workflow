@@ -57,23 +57,6 @@ def register_builtin_nodes() -> None:
         config_schema=_object_schema(additional=True), input_schema=_object_schema(additional=True), output_schema=_object_schema({"selectedTarget": {"type": ["string", "null"]}, "matched": {"type": "boolean"}}, ["matched"], True),
         ui_schema={"icon": "branch", "editor": "condition", "debugConfig": {"rule": {"path": "/value", "op": "exists"}}, "debugInputs": {"value": "sample"}},
     )))
-    display_field = _object_schema({"name": {"type": "string"}, "label": {"type": "string"}, "path": {"type": "string", "pattern": "^/"}}, ["name", "label", "path"])
-    output_field = _object_schema({"name": {"type": "string"}, "path": {"type": "string", "pattern": "^/"}}, ["name", "path"])
-    NODE_REGISTRY.register(NodeRegistration(NodeManifest(
-        type="hitl_select", schema_version=1, handler_version="2.0.0", name="人工候选选择", category="human",
-        description="将前置SQL行映射为候选并等待用户选择", risk_level="LOW", approval_policy="NONE",
-        idempotency_class=IdempotencyClass.PURE, resume_semantics=ResumeSemantics.WAIT_FOR_INPUT, supported_modes=ALL_MODES,
-        config_schema=_object_schema({
-            "title": {"type": "string", "minLength": 1}, "selectionMode": {"enum": ["SINGLE", "MULTIPLE"]},
-            "idPath": {"type": "string", "pattern": "^/"}, "labelTemplate": {"type": "string", "minLength": 1},
-            "displayFields": {"type": "array", "items": display_field, "minItems": 1},
-            "outputFields": {"type": "array", "items": output_field, "minItems": 1},
-            "minimumSelections": {"type": "integer", "minimum": 1}, "maximumSelections": {"type": "integer", "minimum": 1, "maximum": 100},
-        }, ["title", "selectionMode", "idPath", "labelTemplate", "displayFields", "outputFields"]),
-        input_schema=_object_schema({"rows": {"type": "array", "items": {"type": "object"}}}, ["rows"]),
-        output_schema=_object_schema({"selected": {"type": "array", "items": _object_schema({"candidateId": {"type": "string"}, "values": {"type": "object"}}, ["candidateId", "values"], True)}}, ["selected"]),
-        ui_schema={"icon": "user-choice", "editor": "hitl-select", "debugConfig": {"title": "请选择客户", "selectionMode": "SINGLE", "idPath": "/customer_id", "labelTemplate": "{{customer_name}} / {{customer_id}}", "displayFields": [{"name": "customer_name", "label": "客户姓名", "path": "/customer_name"}, {"name": "customer_id", "label": "客户编号", "path": "/customer_id"}], "outputFields": [{"name": "customer_id", "path": "/customer_id"}]}, "debugInputs": {"rows": [{"customer_id": "C001", "customer_name": "王五"}, {"customer_id": "C002", "customer_name": "王五"}]}},
-    )))
     form_field = _object_schema({"name": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}, "label": {"type": "string"}, "type": {"enum": ["string", "integer", "number", "boolean"]}, "required": {"type": "boolean"}, "description": {"type": "string"}, "minimum": {"type": "number"}, "maximum": {"type": "number"}, "minLength": {"type": "integer", "minimum": 0}, "maxLength": {"type": "integer", "minimum": 1}, "enum": {"type": "array"}}, ["name", "label", "type", "required"], True)
     NODE_REGISTRY.register(NodeRegistration(NodeManifest(
         type="hitl_form", schema_version=1, handler_version="1.0.0", name="人工参数输入", category="human",

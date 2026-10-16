@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import hashlib
-import json
+import math
 import re
 from typing import Any, Awaitable, Callable
 
 from jsonschema import Draft202012Validator
 
 from app.cli import CliExecutionError, execute_sql_read, redact_diagnostic
-from app.conditions import evaluate, pointer
+from app.conditions import evaluate
 from app.runtime import NODE_REGISTRY
 from app.runtime.contracts import ExecutionMode
 
@@ -23,8 +22,12 @@ def _sql_literal(value: Any, value_type: str) -> str:
         return str(int(value))
     if value_type == "number":
         if isinstance(value, bool): raise ValueError("布尔值不能作为数字")
-        return str(float(value))
-    if value_type == "boolean": return "1" if bool(value) else "0"
+        number = float(value)
+        if not math.isfinite(number): raise ValueError("SQL数字参数必须是有限数值")
+        return str(number)
+    if value_type == "boolean":
+        if not isinstance(value, bool): raise ValueError("SQL布尔参数必须是true或false")
+        return "1" if value else "0"
     raise ValueError(f"SQL参数不支持类型 {value_type}")
 
 
@@ -41,32 +44,12 @@ def _validate_output(manifest, output: dict[str, Any]) -> None:
     if errors: raise ValueError(f"节点输出不符合Schema：{errors[0].message}")
 
 
-def _candidate_id(node_id: str, raw_id: Any, index: int) -> str:
-    digest = hashlib.sha256(json.dumps([node_id, raw_id, index], ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()[:20]
-    return "candidate_" + digest
-
-
-def build_candidates(node: dict[str, Any], rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    config = node.get("config") or {}
-    candidates: list[dict[str, Any]] = []
-    for index, row in enumerate(rows[:1000]):
-        try:
-            raw_id = pointer(row, str(config["idPath"]))
-            display = {str(field["name"]): pointer(row, str(field["path"])) for field in config["displayFields"]}
-            values = {str(field["name"]): pointer(row, str(field["path"])) for field in config["outputFields"]}
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise ValueError(f"第{index + 1}行无法按HITL映射配置提取字段") from exc
-        label = str(config["labelTemplate"])
-        for name, value in display.items(): label = label.replace("{{" + name + "}}", str(value))
-        candidates.append({"candidateId": _candidate_id(str(node.get("id")), raw_id, index), "label": label, "display": display, "values": values})
-    return candidates
-
-
 def form_schema(fields: list[dict[str, Any]]) -> dict[str, Any]:
     properties: dict[str, Any] = {}
     required: list[str] = []
     for field in fields:
         name, kind = str(field["name"]), str(field["type"])
+        if name in properties: raise ValueError(f"HITL表单字段名称重复：{name}")
         schema: dict[str, Any] = {"type": kind}
         for key in ("minimum", "maximum", "minLength", "maxLength", "enum"):
             if key in field: schema[key] = field[key]
@@ -79,8 +62,17 @@ async def execute_single_node(*, node: dict[str, Any], inputs: dict[str, Any], m
     """Execute one registered node. Credentials never enter output or storage."""
     execution_mode = ExecutionMode(mode)
     manifest = NODE_REGISTRY.validate_node(node)
+    if node.get("handlerVersion") and node["handlerVersion"] != manifest.handler_version:
+        raise ValueError(f"节点 {node.get('id')} 的Handler版本不可用：{node['handlerVersion']}")
     if execution_mode not in manifest.supported_modes or not manifest.allow_single_node_debug:
         raise ValueError(f"节点 {manifest.type} 不允许 {execution_mode.value} 执行")
+    input_errors = list(Draft202012Validator(manifest.input_schema).iter_errors(inputs))
+    for item in node.get("inputs", []):
+        if item.get("name") in inputs:
+            input_errors.extend(Draft202012Validator({"type": item.get("type", "string")}).iter_errors(inputs[item["name"]]))
+        elif item.get("required", True):
+            raise ValueError(f"缺少节点输入：{item['name']}")
+    if input_errors: raise ValueError(f"节点输入不符合Schema：{input_errors[0].message}")
     simulation = simulation or {}
     if execution_mode == ExecutionMode.DRY_RUN:
         return {"status": "SUCCEEDED", "output": {"plan": {"type": manifest.type, "title": node.get("title"), "config": node.get("config"), "inputs": inputs}}, "diagnostic": None, "interrupt": None, "handlerVersion": manifest.handler_version}
@@ -99,25 +91,13 @@ async def execute_single_node(*, node: dict[str, Any], inputs: dict[str, Any], m
             status = "CANCELLED" if exc.code == "CANCELLED" else "FAILED"
             return {"status": status, "output": None, "diagnostic": {"errorCode": exc.code, "message": str(exc), "exitCode": exc.exit_code, "stdout": stdout, "stderr": stderr, "truncated": exc.truncated or stdout_cut or stderr_cut}, "interrupt": None, "handlerVersion": manifest.handler_version}
         output = {key: result.payload[key] for key in ("status", "data", "rowCount") if key in result.payload}
-    elif manifest.type == "hitl_select":
-        rows = inputs.get("rows")
-        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows): raise ValueError("hitl_select输入缺少rows对象数组")
-        candidates = build_candidates(node, rows)
-        if not candidates: raise ValueError("没有可供选择的候选")
-        if resume_payload and resume_payload.get("nodeId") == node.get("id") and resume_payload.get("action") == "SELECT":
-            selected_ids = resume_payload.get("candidateIds") or []
-            selected = [item for item in candidates if item["candidateId"] in selected_ids]
-            minimum = int((node.get("config") or {}).get("minimumSelections") or 1)
-            maximum = int((node.get("config") or {}).get("maximumSelections") or (1 if (node.get("config") or {}).get("selectionMode") == "SINGLE" else 100))
-            if len(selected) != len(selected_ids) or not minimum <= len(selected) <= maximum: raise ValueError("HITL候选选择无效")
-            output = {"selected": [{"candidateId": item["candidateId"], "values": item["values"]} for item in selected]}
-        else:
-            return {"status": "WAITING_INPUT", "output": None, "diagnostic": None, "interrupt": {"kind": "HITL_SELECT", "title": (node.get("config") or {}).get("title"), "selectionMode": (node.get("config") or {}).get("selectionMode"), "candidates": candidates}, "handlerVersion": manifest.handler_version}
+        if isinstance(output.get("data"), list): output.setdefault("rowCount", len(output["data"]))
     elif manifest.type == "hitl_form":
         fields = list((node.get("config") or {}).get("fields") or [])
+        schema = form_schema(fields)
         if resume_payload and resume_payload.get("nodeId") == node.get("id") and resume_payload.get("action") == "SUBMIT":
             values = resume_payload.get("values")
-            errors = sorted(Draft202012Validator(form_schema(fields)).iter_errors(values), key=lambda item: list(item.path))
+            errors = sorted(Draft202012Validator(schema).iter_errors(values), key=lambda item: list(item.path))
             if errors: raise ValueError(f"HITL表单输入无效：{errors[0].message}")
             output = {"values": values}
         else:

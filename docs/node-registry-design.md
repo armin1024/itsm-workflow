@@ -1,231 +1,138 @@
 # Node Registry与节点设计
 
-## 目标
+Node Registry由itsm-workflow维护，统一定义节点配置、输入输出JSON Schema、Handler版本、校验和执行规则。tec01保存Workflow中的节点定义，使用Catalog及Schema生成表单并调用执行侧。
 
-Node Registry由itsm-workflow维护，统一决定：
+## 当前四种节点
 
-- 节点怎样配置。
-- 输入和输出是什么。
-- 节点怎样执行。
-- 是否需要用户交互。
-- 失败后是否允许重试。
+| 类型 | 用途 |
+|---|---|
+| `sql_read` | 真实执行aops-cli只读SQL，返回行数和行对象 |
+| `condition` | 确定性条件判断并选择分支 |
+| `hitl_form` | 等待用户填写一个或多个参数 |
+| `end` | 汇总并结束 |
 
-tec01保存Workflow中的节点配置和版本，但不实现Python Handler。
+运行时不调用LLM。Compiler可以使用内网LLM生成中文草稿；执行时参数由用户输入或前置结果绑定提供。
 
-## 第一版节点
+## 获取JSON约束
 
-```text
-sql_read            真实执行aops-cli db read
-condition           根据前置结果选择分支
-hitl_select         从已有候选中选择
-hitl_form           手工输入一个或多个参数
-end                 汇总并结束
+```http
+GET /internal/v1/runtime/catalog
+GET /internal/v1/runtime/schemas
+GET /internal/v1/runtime/schemas/workflowDefinition
 ```
 
-运行节点目录固定为上述五种类型。Compiler可以在生成草稿时使用内网LLM总结中文名称、摘要和步骤；执行期间的参数判断由条件节点与HITL处理。
-
-这个划分参考`codex/list-pagination-search`中的`app/hitl.py`：候选字段投影、表单字段校验和选择结果解析都采用确定性规则，不由模型猜测用户要选哪一行。tec01保存交互与用户回复，Executor据此继续下一节点。
-
-## Node Manifest
-
-每种节点在代码中注册：
+Catalog包含节点名称、类型、Schema/Handler版本和UI信息。schemas端点返回完整Workflow、dispatch、extraction、singleNode约束，并逐节点返回 `configSchema/inputSchema/outputSchema`，便于tec01或其他平台二次开发。
 
 ```json
 {
-  "type": "sql_read",
-  "schemaVersion": 1,
-  "handlerVersion": "1.0.0",
-  "name": "SQL只读查询",
-  "configSchema": {},
-  "inputSchema": {},
-  "outputSchema": {},
-  "riskLevel": "LOW",
-  "approvalPolicy": "PLAN"
+  "type":"sql_read",
+  "schemaVersion":1,
+  "handlerVersion":"1.0.0",
+  "name":"SQL只读查询",
+  "configSchema":{},
+  "inputSchema":{},
+  "outputSchema":{},
+  "riskLevel":"LOW"
 }
 ```
 
-Studio中的Node管理只允许修改启停、显示名称、说明和调试默认值，不允许上传代码或修改Handler安全规则。
+示例空对象代表实际完整Schema。结构字段通过Schema检查；DAG可达性、上游依赖、只读SQL等由Workflow校验接口进一步检查。
 
-## SQL读
+Studio的Node管理只调整当前浏览器中的启停、显示名称、说明与调试默认值，不修改服务端Handler或Catalog。正式新增节点需要开发、注册、测试和发布服务。
 
-标准输出：
+## SQL读与条件分支
+
+标准SQL输出：
 
 ```json
 {
-  "status": 0,
-  "rowCount": 2,
-  "columns": [
-    {"name":"customer_id","type":"varchar","comment":"客户编号"}
-  ],
-  "data": [
-    {"customer_id":"C001","customer_name":"王五"}
+  "status":0,
+  "rowCount":2,
+  "data":[
+    {"customer_id":"C001","customer_name":"王五"},
+    {"customer_id":"C002","customer_name":"王五"}
   ]
 }
 ```
 
-SQL必须是单条只读语句。参数只能来自运行输入、HITL输出或前置节点输出，不能由Agent猜测。
+原始CLI的SSE被适配为上述对象。SQL必须是安全单条只读语句，工单ID与当前API Key必填。
 
-页面中的“调试”固定调用真实Handler。SQL读调试必须提供当前工单ID和`AOPS_API_KEY`，并真实执行系统`aops-cli`。
-
-## 条件判断
-
-判断SQL是否返回数据：
+判断是否有结果：
 
 ```json
-{
-  "path": "/nodes/sql-1/output/rowCount",
-  "op": "gt",
-  "value": 0
-}
+{"path":"/nodes/sql-1/output/rowCount","op":"gt","value":0}
 ```
 
-支持：
+支持 `eq/ne/gt/gte/lt/lte/in/contains/exists/empty` 以及 `all/any/not`。条件节点必须有默认边，未命中路径标为SKIPPED，共用的后续节点仍可执行。
+
+推荐流程：
 
 ```text
-eq ne gt gte lt lte in contains exists empty
+SQL读 → 条件 rowCount > 0 → 人工表单 → 后续SQL
+                       └ 默认 → 无数据结束
 ```
 
-每个条件节点必须有默认分支。Executor返回命中的边，tec01在页面上高亮实际路径，并把其他分支显示为`SKIPPED`。
+## 人工表单
 
-常见流程是`sql_read → condition(rowCount > 0) → hitl_select/hitl_form → sql_read`。没有结果时走默认结束分支；用户选择或输入后，HITL输出通过`NODE_OUTPUT`绑定到后续SQL参数。
-
-## HITL选择
-
-`hitl_select`直接把前置SQL行映射为候选，不需要LLM。
+用户可参考前置SQL结果后填写值，也可在特定步骤直接补充新参数。
 
 ```json
 {
-  "type": "hitl_select",
-  "config": {
-    "selectionMode": "SINGLE",
-    "title": "请选择客户",
-    "idPath": "/customer_id",
-    "labelTemplate": "{{customer_name}} / {{customer_id}}",
-    "displayFields": [
-      {"name":"customer_name","label":"客户姓名","path":"/customer_name"},
-      {"name":"customer_id","label":"客户编号","path":"/customer_id"},
-      {"name":"status","label":"状态","path":"/status"}
-    ],
-    "outputFields": [
-      {"name":"customer_id","path":"/customer_id"},
-      {"name":"account_id","path":"/account_id"}
-    ]
-  },
-  "inputs": [{
-    "name": "rows",
-    "type": "array",
-    "source": {"kind":"NODE_OUTPUT","nodeId":"sql-1","jsonPointer":"/data"}
-  }]
-}
-```
-
-SQL可以返回全部字段，但只有`displayFields`发送给页面和Hermes。用户提交`candidateId`后，Executor根据已保存候选产生：
-
-```json
-{
-  "selected": [
-    {
-      "candidateId": "candidate-1",
-      "values": {
-        "customer_id": "C001",
-        "account_id": "A001"
-      }
-    }
-  ]
-}
-```
-
-下游绑定：
-
-```text
-/selected/0/values/customer_id
-/selected/0/values/account_id
-```
-
-多选时`selected`包含多项。大量候选保存在tec01并分页展示，不放进一条Hermes消息。
-
-## HITL表单
-
-`hitl_form`用于用户手工输入：
-
-```json
-{
-  "type": "hitl_form",
-  "config": {
-    "title": "填写后续查询参数",
-    "fields": [
-      {"name":"customer_id","label":"客户编号","type":"string","required":true},
+  "id":"input-1",
+  "type":"hitl_form",
+  "title":"填写后续查询参数",
+  "config":{
+    "title":"填写后续查询参数",
+    "description":"参考前置查询结果，确认用于下一步的客户编号与返回条数。",
+    "fields":[
+      {"name":"customer_id","label":"客户编号","type":"string","required":true,"minLength":1,"maxLength":64},
       {"name":"limit","label":"返回条数","type":"integer","required":true,"minimum":1,"maximum":100}
     ]
-  }
+  },
+  "inputs":[
+    {"name":"queryRows","type":"array","source":{"kind":"NODE_OUTPUT","nodeId":"sql-1","jsonPointer":"/data"}}
+  ]
 }
+```
+
+上下文只用于页面/消息展示，字段的最终值必须由用户确认。避免向Hermes或不需要该数据的用户发送整份敏感SQL结果。
+
+运行到该节点后返回 `WAITING_INPUT` 和 `HITL_FORM`，并释放执行资源。用户回复：
+
+```json
+{"nodeId":"input-1","action":"SUBMIT","values":{"customer_id":"C001","limit":20}}
 ```
 
 输出：
 
 ```json
+{"values":{"customer_id":"C001","limit":20}}
+```
+
+下游参数绑定：
+
+```json
 {
-  "values": {
-    "customer_id": "C001",
-    "limit": 20
-  }
+  "name":"customer_id",
+  "type":"string",
+  "source":{"kind":"NODE_OUTPUT","nodeId":"input-1","jsonPointer":"/values/customer_id"}
 }
 ```
 
-下游绑定：
+表单支持字符串、整数、数字、布尔值及必填、长度、数值范围和枚举约束。tec01页面/Hermes收集完整后展示确认，Executor恢复时再次校验值。
 
-```text
-/values/customer_id
-/values/limit
-```
+## 单节点执行
 
-tec01根据字段Schema校验。Hermes逐项向用户询问，收集完整后汇总确认；Agent不能自行填写。
+`POST /internal/v1/runtime/nodes/execute`接收node和已解析inputs，只执行该节点；不自动运行上游，也不替调用方持久化结果。
 
-## 执行流程
-
-Executor收到完整Workflow和节点状态：
-
-1. 跳过`SUCCEEDED`和`SKIPPED`节点。
-2. 找到`READY`节点。
-3. 告知tec01节点开始。
-4. 执行Handler。
-5. 告知tec01节点结果和下一条边。
-6. 遇到HITL、暂停、取消、失败或完成时释放运行。
-
-每个节点执行结果都必须先返回tec01，才能进入下一个节点。
-
-## 页面和人的交互
-
-### Studio
-
-- 管理Node启停和调试默认值。
-- 可视化编辑Workflow。
-- 草稿生成后直接渲染DAG。
-- 使用真实`aops-cli`单步或整流程调试。
-
-### tec01生产页面
-
-- 展示用户确认过的完整计划。
-- 实时高亮当前节点和已执行路径。
-- 展示每个节点的结果或失败原因。
-- 展示HITL候选、分页和表单。
-- 提供暂停、继续、取消和重试。
-
-### Hermes消息渠道
-
-- tec01通过MCP把相同运行状态交给Hermes。
-- Hermes向用户展示计划、进度和HITL问题。
-- 用户可在消息中选择，也可打开tec01页面处理。
-- 两个入口读取同一状态，不会产生两份HITL回复。
+条件节点单步测试使用 `config.rule` 和传入的上下文。表单第一次执行返回等待交互；使用新requestId提交 `resumePayload` 后返回values。SQL节点使用真实CLI，必须传当前工单ID和请求头API Key。
 
 ## 新增节点
 
-新增节点只需要：
+1. 定义config/input/output Schema。
+2. 实现Handler及安全校验。
+3. 注册到Node Registry并提供调试默认值。
+4. 验证单节点、Workflow依赖和中断恢复语义。
+5. 发布新Catalog，tec01重新获取约束并展示配置表单。
 
-1. 定义配置、输入和输出Schema。
-2. 实现Handler。
-3. 注册到Node Registry。
-4. 添加真实调试样例和自动测试。
-5. 发布新的Catalog版本。
-
-tec01同步新Catalog后即可在Workflow编辑器中使用，不需要修改调度核心。
+JSON定义不能包含Python代码、任意shell命令或凭据。

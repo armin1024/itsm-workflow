@@ -8,7 +8,7 @@ with tempfile.TemporaryDirectory() as directory:
     assert not forbidden, f"macOS metadata found: {forbidden[:5]}"
     static_root = package_root / "frontend" / "dist"
     if not static_root.is_dir(): static_root = package_root.parent / "frontend" / "dist"
-    os.environ.update({"ENVIRONMENT": "test", "STATIC_DIR": str(static_root), "STUDIO_DATABASE_PATH": directory + "/studio.db", "STUDIO_ADMIN_TOKEN": "release-test-token"})
+    os.environ.update({"ENVIRONMENT": "test", "STATIC_DIR": str(static_root), "STUDIO_ADMIN_TOKEN": "release-test-token"})
     from fastapi.testclient import TestClient
     from app import __version__
     from app.main import app

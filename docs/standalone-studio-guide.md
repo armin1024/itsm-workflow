@@ -1,104 +1,105 @@
-# 独立Studio调试教程
+# 浏览器本地知识与执行调试手册
 
-## 1. 页面功能
+## 进入页面
 
-进入页面先输入`STUDIO_ADMIN_TOKEN`。Token只用于建立HttpOnly管理会话。Studio包含五个入口：
+启动服务后访问`http://<服务地址>:8089/`，输入`STUDIO_ADMIN_TOKEN`。页面保留节点调试、Node管理、知识抽取、本地知识与测试执行以及内网API文档。
 
-1. **节点调试**：查看Node Catalog并单步运行一个节点。
-2. **Node管理**：启停Studio节点并维护名称、说明和调试默认值。
-3. **流程编排**：以卡片画布新增节点、连线、配置条件和输出绑定，再执行Registry校验。
-4. **草稿提取**：生成DraftProposal后直接渲染DAG，支持选中节点或整流程调试。
-5. **API文档**：使用本地OpenAPI渲染器，不访问公网CDN。
+知识、提取结果、执行计划、节点结果和Node显示设置存入当前浏览器的IndexedDB。后台不创建数据库，只在执行时保留内存上下文和用于页面读取的短期事件缓存。更换浏览器、域名或端口相当于打开另一份本地工作区；需要迁移时使用页面导出与导入。
 
-页面顶栏始终显示`TEST_ONLY`，避免把本地结果误认为tec01生产事实。
+## 知识抽取
 
-## 2. 调试固定执行真实Handler
+1. 打开“知识抽取”。选择填写工单ID或直接粘贴JSON。
+2. 通过工单ID取证时临时填写`AOPS_API_KEY`；直接JSON方式填写`info.data`对象和`audit_timeline.data`数组。
+3. 默认只在本地抽取。需要同步时勾选同步tec01，并填写tec01已经创建的经验ID。
+4. 提交后页面展示过滤SQL、参数化、分析工单、生成Workflow、校验Workflow五个阶段。分析较慢时每15秒更新一次心跳。
+5. 抽取完成后核对名称、中文摘要、步骤、参数、数据库和依赖，保存到浏览器本地知识库。保存的记录可再次编辑、导出或创建执行计划。
 
-页面中的“调试”固定使用`TEST`，不会用Fixture伪造节点成功：
-
-- `sql_read`调用系统`aops-cli db read`。
-- `condition`执行本地确定性规则。
-- `hitl_select`根据SQL结果映射候选。
-- `hitl_form`收集一个或多个用户参数。
-
-生产运行节点为SQL读、条件判断、HITL选择、HITL表单和结束。草稿提取时的中文总结由Compiler完成，不出现在执行画布中。
-
-SQL读必须填写当前工单ID和`AOPS_API_KEY`，并真实执行`aops-cli db read`。底层API保留`SIMULATION/DRY_RUN`仅供自动化契约测试，不作为页面调试入口。
-
-## 3. 调试SQL读节点
-
-1. 进入“节点调试”，选择“SQL只读查询”。
-2. 填写并核对节点定义、数据库路径、SQL模板和输入。
-3. 填写当前工单ID和个人`AOPS_API_KEY`。
-4. 点击“执行真实单节点调试”，服务调用系统`aops-cli db read`。
-5. 查看真实输出或脱敏诊断。
-
-凭据路径：
-
-```text
-浏览器密码输入框
-  -> X-AOPS-Api-Key请求头
-  -> FastAPI请求内存
-  -> aops-cli子进程AOPS_API_KEY环境变量
-  -> 请求结束后释放
-```
-
-凭据不会进入请求JSON、调试记录、SQLite或日志。页面在每次请求完成后清空输入框。
-
-## 4. 调试HITL
-
-选择`hitl_select`，在输入JSON中准备前置SQL返回行：
+JSON输入的根节点约定：
 
 ```json
 {
-  "rows": [
-    {"customer_id":"C001","customer_name":"王五"},
-    {"customer_id":"C002","customer_name":"王五"}
-  ]
+  "ticketInfo": {"id":100173,"event_title":"客户信息查询"},
+  "auditTimeline": []
 }
 ```
 
-节点根据`displayFields`和`outputFields`生成候选。运行后状态变为`WAITING_INPUT`，可在右侧选择或取消。`hitl_form`则根据字段Schema展示一个或多个输入框。
+实际操作记录必须包含成功的`sql_exec_read`，否则提示没有有效操作。失败操作和重复SQL的过滤原因在提取诊断中显示。
 
-## 5. 从工单提取草稿
+## 手工添加和管理知识
 
-“按工单ID提取”会依次执行：
+进入“本地知识与测试执行”，点击“手工新建”。填写名称、摘要、匹配短语和系统信息，在画布中添加SQL读、条件、人工表单和结束节点，点击卡片编辑配置并连接步骤。页面沿用知识列表、执行中心、卡片画布和节点详情的统一布局。
 
-```text
-aops-cli event-center info --id <工单ID>
-aops-cli event-center audit_timeline --id <工单ID>
-```
+“保存到浏览器”保存当前定义。列表支持多条知识；可以反复编辑、删除、导入和导出。修改知识后不会改变此前生成的执行计划，因为每条计划都保存了生成时的完整快照。
 
-Compiler只接受`operation=sql_exec_read`、结果明确成功且SQL安全只读的操作；失败、缺失结果、危险SQL和重复操作会进入`diagnostics.ignoredOperations`。
-
-如果不希望Studio访问AOPS，选择“直接传JSON”，分别粘贴：
-
-- `uatu info`响应中的`data`对象。
-- `uatu audit_timeline`响应中的`data`数组。
-
-生成结果不会自动提交tec01或发布。审核后由调用方通过tec01契约创建DRAFT。
-
-提取成功后页面会把`workflowDefinition`直接载入可视化画布。你可以修改节点和连线，然后：
-
-- 选择某一节点进行单步调试。
-- 使用真实Handler执行整个DAG；其中SQL读节点逐个调用`aops-cli db read`。
-- 查看每个节点的`SUCCEEDED/FAILED/WAITING/SKIPPED`状态与输出。
-- 使用运行输入JSON补齐参数；运行前必须提供当前工单ID和`AOPS_API_KEY`。
-
-## 6. 流程编排和依赖
-
-画布支持SQL读、条件、HITL选择、HITL表单和结束节点。下游参数依赖前置输出时，在节点输入中设置：
+SQL参数既可来自运行输入，也可绑定前置结果。例如：
 
 ```json
-{
-  "kind": "NODE_OUTPUT",
-  "nodeId": "sql-1",
-  "jsonPointer": "/data/0/customer_id"
-}
+{"kind":"NODE_OUTPUT","nodeId":"sql-1","jsonPointer":"/data/0/customer_id"}
 ```
 
-点击“校验流程”后，服务检查节点Schema、只读SQL、可达性、条件默认边和输出绑定，并返回规范化DAG及内容哈希。运行时Workflow不允许循环。
+根据SQL行数决定是否进入人工处理：
 
-## 7. 数据清理
+```json
+{"path":"/nodes/sql-1/output/rowCount","op":"gt","value":0}
+```
 
-Studio SQLite只保存临时workspace、节点定义、非凭据输入、输出、诊断和HITL回复。默认TTL为24小时，服务启动和查询workspace时执行清理。删除SQLite不会影响tec01生产知识或运行。
+## 生成和保存计划
+
+1. 打开一条知识，填写当前工单ID和页面按定义生成的运行参数。
+2. 如需状态同步，勾选“将执行状态同步到tec01”，填写tec01已有的运行ID。
+3. 点击“校验并保存测试计划”。这一步只生成并保存计划，不执行SQL。
+4. 切换到“计划”列表，核对画布、数据库路径、SQL、参数来源及`#uatu-<工单ID>`注释。
+5. 临时填写`AOPS_API_KEY`并确认计划，然后执行。
+
+浏览器支持同时保留多条计划，每条计划独立记录输入、执行节点、状态和结果。执行凭据只保留于页面输入状态及当前请求内存中，不进入IndexedDB、导出包或事件。
+
+## 暂停、继续、取消和重试
+
+执行时页面持续展示节点开始、完成、失败和人工等待事件。
+
+- **暂停**：等待当前SQL节点到达安全边界，保存已完成结果并释放执行上下文。页面中的“暂停请求已提交”与“已暂停”有区别。
+- **继续**：使用浏览器保存的节点状态、结果与分支信息重新下发，仅执行未完成节点。每次继续需重新提供`AOPS_API_KEY`。
+- **取消并移除**：停止当前CLI进程并从浏览器计划清单移除该计划；知识本身继续保留。尚未运行或已经暂停的计划可以直接移除。
+- **失败重试**：页面显示失败诊断；用户确认后从失败节点继续，已成功SQL不会重放。
+- **服务重启或结果未知**：已提交结果保留。如果某条SQL执行结果不确定，页面要求先核对AOPS审计，再确认是否重新执行该节点。
+
+刷新页面后，浏览器会重新读取本地计划并继续跟踪仍在后台执行的任务。服务器重新启动后不具备本地数据库恢复能力，恢复依据是浏览器保存的最近快照。
+
+## 人工参数输入
+
+到达`hitl_form`时，根据定义渲染一个或多个必填/可选字段，支持字符串、整数、数字、布尔值及范围限制。用户参考上游SQL结果后填写所需字段；也可以到达某一步时补充新参数。提交后校验字段，并把`values`绑定到后续节点。
+
+例如：
+
+```text
+人工输入输出 /values/customer_id
+```
+
+等待人工输入时不占Executor执行槽位。用户回复后重新下发同一个计划快照继续。
+
+## 是否同步tec01
+
+默认关闭同步，此时本地抽取和执行不访问tec01。打开同步前，在服务端配置：
+
+```dotenv
+TEC01_BASE_URL=http://tec01:3421
+TEC01_SERVICE_TOKEN=<回调令牌>
+```
+
+同步使用文档规定的统一回调接口，包含节点结果及人工交互。tec01需要预先创建对应经验或运行记录，页面不会替tec01建立生产数据。恢复计划沿用相同tec01运行ID，并生成新的`dispatchId`。
+
+节点执行完但tec01未确认回调时，Executor停止进入下一节点，避免两端状态分叉。页面会保留已知结果并提示核实后恢复。
+
+## 单节点调试
+
+原“节点调试”入口保留。它使用真实Handler；SQL读必须提供当前工单ID和临时`AOPS_API_KEY`，执行真实`aops-cli db read`。HITL节点可直接在页面填写表单。单步调试不会自动运行它的前置节点，依赖输入需由使用者提供。
+
+## 三方获取JSON约束与单节点执行
+
+在API文档中查看`GET /internal/v1/runtime/schemas`，可获取Workflow、下发、抽取及单节点请求的JSON Schema，以及每种节点的配置、输入、输出约束。也可用`/internal/v1/runtime/schemas/{schemaName}`读取单份。
+
+三方使用`POST /internal/v1/runtime/nodes/execute`，提交`requestId`、完整`node`、已解析`inputs`和可选`resumePayload`。SQL读必须再传当前`ticketId`及请求头API Key。接口同步返回结果；相同请求ID仅在当前进程内幂等，重新执行或人工回复使用新的请求ID。完整示例见[REST API](api.md)。
+
+## 本地数据备份
+
+通过知识或计划的导出按钮下载JSON，再在同一页面导入。浏览器数据属于当前站点，清除站点数据会删除本地知识和计划。取消运行按产品语义移除本地计划；需要保留结果时先导出。

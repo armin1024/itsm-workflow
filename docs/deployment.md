@@ -10,8 +10,8 @@
 ## 安装
 
 ```bash
-tar -xzf itsm-workflow-0.9.0-linux-x86_64.tar.gz
-cd itsm-workflow-0.9.0-linux-x86_64
+tar -xzf itsm-workflow-0.10.0-linux-x86_64.tar.gz
+cd itsm-workflow-0.10.0-linux-x86_64
 sudo ./install.sh --no-start
 sudo vi /etc/itsm-workflow/service.env
 sudo systemctl start itsm-workflow-api
@@ -26,7 +26,6 @@ AOPS_CLI_PATH=/usr/local/bin/aops-cli
 LLM_BASE_URL=http://llm.internal/v1
 LLM_MODEL=<模型名>
 STUDIO_ADMIN_TOKEN=<随机长管理Token>
-STUDIO_DATABASE_PATH=/var/lib/itsm-workflow/studio.db
 ```
 
 不要在`service.env`配置`AOPS_API_KEY`。真实SQL测试时由使用者在页面临时输入。
@@ -83,4 +82,6 @@ sudo systemctl restart itsm-workflow-api
 
 ## 安全边界
 
-Studio使用`STUDIO_ADMIN_TOKEN`建立HttpOnly会话；仍建议叠加内网ACL、VPN或Nginx统一认证。TEST模式会真实调用外部系统并产生AOPS审计记录。SQLite可能包含测试SQL结果，应将`/var/lib/itsm-workflow`限制为服务用户可读，并按TTL清理。
+Studio使用`STUDIO_ADMIN_TOKEN`建立HttpOnly会话。调试会真实调用外部系统并产生AOPS审计记录。知识、计划和结果保存在浏览器IndexedDB，服务端不建立数据库；不再需要`STUDIO_DATABASE_PATH`或本地数据库备份。更换浏览器、访问域名或清除站点数据前，应通过页面导出需要保留的记录。
+
+默认本地调试不依赖tec01；启用状态同步前配置回调地址和令牌，并在tec01预先创建相应经验或运行。接入细节见[API文档](api.md)及[独立调试手册](standalone-studio-guide.md)。

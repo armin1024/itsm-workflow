@@ -1,362 +1,199 @@
 # tec01与itsm-workflow接口约定
 
-本文只保留双方第一版开发需要的接口。tec01主动调用Compiler和Executor；itsm-workflow通过回调返回进度、节点状态和结果。
+tec01主动提交工单数据、下发Workflow和控制命令。itsm-workflow通过统一回调返回提取进度、节点开始/完成和运行释放。详细字段以两份方向API文档为准：
 
-## 认证和通用规则
+- [itsm-workflow提供给tec01](itsm-workflow-to-tec01-api.md)
+- [tec01提供给itsm-workflow](tec01-to-itsm-workflow-api.md)
 
-- 双方请求使用内网HTTPS和固定服务Token。
-- 所有变更请求携带唯一`requestId`，重复请求返回原结果。
-- Workflow通过`workflowContentHash`校验，执行期间不能被修改。
-- AOPS API Key不出现在Workflow、日志、节点结果或回调中。
+## 认证
 
-## itsm-workflow提供的接口
+tec01请求本服务使用 `Authorization: Bearer <RUNTIME_SERVICE_TOKEN>`。本服务回调tec01使用 `Authorization: Bearer <TEC01_SERVICE_TOKEN>` 及稳定 `X-Request-Id`。真实SQL执行额外使用当前用户的 `X-AOPS-Api-Key`，执行器只在当前执行内存及CLI环境使用。
 
-### Node Catalog
+## 节点目录与JSON约束
 
 ```http
 GET /internal/v1/runtime/catalog
+GET /internal/v1/runtime/schemas
+GET /internal/v1/runtime/schemas/{schemaName}
 ```
 
-tec01在编辑和发布Workflow时读取节点类型、配置Schema、输入输出和Handler版本。
+schemas返回 `runtimeVersion/jsonSchemaDialect/schemas/nodes`。`schemas`含 `workflowDefinition/dispatch/extraction/singleNode`，另有`singleNodeResponse`响应约束；`nodes`含各节点 `configSchema/inputSchema/outputSchema`。单Schema请求使用相应名称。
 
-### 校验Workflow
+当前节点为SQL读、条件判断、人工表单和结束。tec01可按Schema生成配置输入框；DAG、依赖和只读SQL仍调用发布校验。
+
+## 发布与计划创建
 
 ```http
 POST /internal/v1/runtime/workflows/validate
+
+{"workflowDefinition":{},"validationMode":"PUBLISH"}
 ```
 
-```json
+正式发布前必须调用，返回 `normalizedDefinition/catalogDigest/workflowContentHash`。tec01固化不可变版本，创建计划时检查权限、当前工单ID与运行输入，并保存展示内容的 `planHash`。
+
+用户在页面或Hermes确认相同planHash后执行。参数或计划修改需要重新展示确认。`/internal/v1/runtime/workflows/plan`可用于联调预览，正式计划不需要每次远程校验整张图。
+
+未产生的SQL结果和人工参数不要求创建计划时输入；卡片应说明这些值将在什么步骤获得。
+
+## 草稿提取
+
+```http
+POST /internal/v1/extractions/knw_100173
+Content-Type: application/json
+
 {
-  "workflowDefinition": {},
-  "validationMode": "PUBLISH"
+  "requestId":"extract_100173_1",
+  "ticketId":100173,
+  "ticketInfo":{"id":100173,"incident_id":"INC-1","event_title":"客户查询"},
+  "auditTimeline":[]
 }
 ```
 
-tec01在审核发布时必须调用一次。返回规范化Workflow、Catalog摘要和内容哈希；tec01将三者随不可变发布版本保存。草稿编辑时也可调用，用于即时显示配置错误。
+tec01先创建EXTRACTING记录，再传真实的info.data对象和audit_timeline.data数组。示例空数组可用于验证无有效操作的失败路径。响应202仅代表受理：
 
-### 计划预览接口
+```json
+{"knowledgeId":"knw_100173","accepted":true,"duplicate":false}
+```
+
+同知识ID、requestId与证据内容重复提交不重复提取；内容冲突返回409。失败后仍用相同knowledgeId，显式重试使用新的requestId。
+
+回调：
 
 ```http
-POST /internal/v1/runtime/workflows/plan
+POST /internal/v1/extractions/{knowledgeId}/callbacks
 ```
 
-返回节点、连线、运行输入说明和风险提示，供Studio或tec01联调时预览。**tec01创建正式计划时不必调用此接口**：它从已发布、已校验的版本生成展示内容，保存当前工单ID、参数、版本快照及`planHash`，交给Hermes或Web页面展示。
-
-正式计划由tec01负责以下检查：
-
-1. 当前用户有权使用已发布经验，工单ID有效。
-2. 运行输入中真正必填的参数已提供且类型正确；`NODE_OUTPUT`及HITL运行时才产生的值无需在此阶段输入。
-3. 用户确认时提交的`planHash`与所展示的版本、工单ID、参数和计划内容一致。修改任一项后重新展示。
-
-`workflowContentHash`标识发布版本的Workflow定义；`planHash`标识这次运行向用户展示的计划，至少覆盖版本ID及内容哈希、工单ID、已提供的运行参数和展示的节点/连线。两者不能混用。计划卡片要展示条件分支和后续HITL步骤，但不展示尚未执行出来的候选和值。
-
-SQL只读性、节点配置、图是否有环、条件默认边、HITL字段和前置输出绑定由itsm-workflow在**发布前**校验。tec01不维护第二套SQL或DAG校验器。下发执行时Executor再次核对快照内容哈希；Handler版本兼容检查应在联调验收中补齐。
-
-上游结果的具体字段值尚不存在时，静态校验只保证绑定指向上游节点且JSON Pointer格式有效；运行时如果实际结果缺少该字段，Executor返回节点失败原因，tec01展示给用户。
-
-这一分工参考`codex/list-pagination-search`：发布时校验并固化版本；创建计划时从发布版本生成快照、初始化节点状态并保存确认哈希。拆分后把原先本地数据库中的计划和确认事实交给tec01。
-
-tec01可以用同步缓存的Node Catalog检查当前Runtime是否仍支持该发布版本，无需每次计划创建都发起HTTP校验。当前代码对历史Catalog/Handler版本的兼容处理尚未完整实现；双方联调须覆盖“发布后Runtime升级，再创建计划或恢复旧运行”的场景。
-
-```mermaid
-sequenceDiagram
-    participant U as 用户
-    participant T as tec01页面/Hermes
-    participant R as itsm-workflow
-
-    T->>R: 发布前校验Workflow
-    R-->>T: 返回规范化版本
-    U->>T: 填写工单ID和当前参数
-    T-->>U: 展示计划与需要人工处理的步骤
-    U->>T: 确认计划
-    T->>R: 下发已发布版本执行
-```
-
-### 提交草稿提取任务
-
-```http
-POST /internal/v1/compiler/jobs
-```
+阶段 `FILTERING_OPERATIONS → PARAMETERIZING_SQL → ANALYZING_EVIDENCE → BUILDING_WORKFLOW → VALIDATING_WORKFLOW`。分析阶段进入时立即上报，之后每15秒心跳。
 
 ```json
 {
-  "jobId": "extract_xxx",
-  "ticketId": 100173,
-  "ticketInfo": {},
-  "auditTimeline": []
+  "type":"PROGRESS",
+  "seq":4,
+  "stage":"ANALYZING_EVIDENCE",
+  "message":"正在分析工单和操作记录",
+  "progress":{"current":null,"total":null},
+  "occurredAt":"2026-10-16T10:00:00+08:00"
 }
 ```
 
-响应：
+终态为 `FINISHED/SUCCEEDED`，带proposal、validation、diagnostics；失败为 `FINISHED/FAILED`，带稳定error。成功草稿的名称和摘要使用中文，完整筛选账本包含重复SQL。
 
-```http
-202 Accepted
-```
+**失败重试约定：** tec01在接受新的requestId进行显式重试时，将同一knowledgeId重新置为EXTRACTING，并重置该次提取的终态去重窗口。FINISHED“只接受第一次”仅适用于同一次提取，避免上一次FAILED挡住下一次SUCCEEDED。暂存记录仍存在时，执行侧seq继续递增；tec01不得假定跨进程重启后seq仍连续。
 
-Compiler在后台处理，并通过tec01回调接口报告进度和最终结果。
-
-### 下发完整Workflow
+## 完整Workflow下发
 
 ```http
 POST /internal/v1/executions/dispatch
+X-AOPS-Api-Key: <AOPS_API_KEY>
 ```
 
 ```json
 {
-  "dispatchId": "dispatch_xxx",
-  "runId": "run_xxx",
-  "ticketId": 100173,
-  "workflowContentHash": "sha256...",
-  "workflowSnapshot": {},
-  "runInputs": {},
-  "nodeStates": {
-    "sql-1": "SUCCEEDED",
-    "sql-2": "READY"
-  },
-  "outputRefs": {
-    "sql-1": "artifact_sql_1"
-  },
-  "nodeOutputs": {
-    "sql-1": {"status":0,"rowCount":2,"data":[]}
-  },
-  "resumePayload": null
+  "dispatchId":"dispatch_2",
+  "runId":"run_100173",
+  "ticketId":100173,
+  "workflowContentHash":"<校验接口返回的哈希>",
+  "workflowSnapshot":{},
+  "runInputs":{},
+  "nodeStates":{"sql-1":"SUCCEEDED","input-1":"WAITING","sql-2":"PENDING"},
+  "nodeOutputs":{"sql-1":{"status":0,"rowCount":2,"data":[]}},
+  "currentNodeId":"input-1",
+  "selectedRoutes":{},
+  "resumePayload":{"nodeId":"input-1","action":"SUBMIT","values":{"customer_id":"C001","limit":20}}
 }
 ```
 
-Executor返回：
+实际workflowSnapshot填完整规范化定义。响应200表示受理，后台逐节点执行。首次、暂停继续、HITL回复和失败重试都使用新dispatchId。相同ID相同内容返回原受理结果，冲突返回409；已活动runId不允许并发下发；容量满返回429。
 
-```json
-{
-  "dispatchId": "dispatch_xxx",
-  "accepted": true,
-  "executorId": "executor-01"
-}
-```
+tec01应传当前节点及已提交结果。执行器跳过SUCCEEDED/SKIPPED节点，失败节点仅在明确重试时继续，RUNNING/UNKNOWN等不确定状态不能直接重放。暂停继续可传 `{"action":"continue"}`；HITL使用SUBMIT表单值。
 
-响应只表示已经接受。真实进度以节点回调为准。
+## 节点与运行回调
 
-容量不足时返回：
+所有运行回调统一到：
 
 ```http
-429 Too Many Requests
-Retry-After: 3
+POST /internal/v1/runs/{runId}/callbacks
 ```
 
-tec01保持运行排队并稍后重试。
+```json
+{"type":"NODE_STARTED","dispatchId":"dispatch_2","attemptId":"attempt_1","nodeId":"sql-2","startedAt":"2026-10-16T10:01:00+08:00"}
+```
 
-### 暂停和取消
+```json
+{
+  "type":"NODE_COMPLETED",
+  "dispatchId":"dispatch_2",
+  "attemptId":"attempt_1",
+  "nodeId":"sql-2",
+  "status":"SUCCEEDED",
+  "safeSummary":"查询返回2行",
+  "result":{"status":0,"rowCount":2,"data":[]},
+  "diagnostic":null,
+  "interaction":null,
+  "selectedEdgeId":null,
+  "skippedNodeIds":[]
+}
+```
+
+```json
+{"type":"RUN_RELEASED","dispatchId":"dispatch_2","status":"SUCCEEDED","currentNodeId":"done","reason":"执行完成"}
+```
+
+结果直接置于result，沿用SQL读20MiB上限；tec01负责保存结果与诊断。tec01必须先提交节点状态和事件事务，再推SSE或Hermes消息。执行器收到成功回调确认后才执行下一节点；回调无法确认时停止并释放。
+
+| 回调 | X-Request-Id |
+|---|---|
+| NODE_STARTED | `{attemptId}:started` |
+| NODE_COMPLETED | `{attemptId}:completed` |
+| RUN_RELEASED | `{dispatchId}:released` |
+| PROGRESS | `{knowledgeId}:{seq}` |
+| FINISHED | `{knowledgeId}:finished` |
+
+成功HTTP200，响应使用 `{status:200,msg:"success",data:{...}}`。HTTP5xx/超时首次失败后重试5次，退避1/2/4/8/16秒，始终复用同一请求ID；4xx不重试。重复回调返回200且不覆盖已提交状态。
+
+## 人工表单与Hermes
+
+HITL等待回调的interaction：
+
+```json
+{
+  "kind":"HITL_FORM",
+  "title":"填写后续参数",
+  "description":"请参考上一步SQL结果，确认客户编号。",
+  "fields":[
+    {"name":"customer_id","label":"客户编号","type":"string","required":true},
+    {"name":"limit","label":"返回条数","type":"integer","required":true,"minimum":1,"maximum":100}
+  ],
+  "context":{}
+}
+```
+
+tec01保存交互、显示前置结果与表单，通过消息渠道向Hermes提供同样信息。用户填写一个或多个值并确认后，tec01保存回复，携带 `resumePayload`重新下发。表单输出为 `{"values":{...}}`，下游使用 `/values/customer_id`。
+
+Hermes的MCP工具由tec01维护，可包括匹配、计划、确认、状态、等待、人工回复、暂停、继续、取消和重试；全部调用tec01相同运行服务。消息与Web页面共享同一状态，用户不需要重复填写。
+
+## 暂停、取消与释放
 
 ```http
 POST /internal/v1/executions/{runId}/commands
+
+{"commandId":"cmd_1","type":"PAUSE"}
 ```
 
-暂停：
+取消使用CANCEL。接受命令HTTP200不代表已暂停；以RUN_RELEASED的最终状态为准。暂停在安全边界生效，取消终止CLI；外部结果不确定时标为UNKNOWN。WAITING_INPUT、PAUSED、FAILED、CANCELLED、UNKNOWN、SUCCEEDED都会释放执行资源。
 
-```json
-{"commandId":"cmd_xxx","type":"PAUSE"}
-```
-
-取消：
-
-```json
-{"commandId":"cmd_xxx","type":"CANCEL"}
-```
-
-Executor先返回已接收，再在安全处理完成后通过运行回调返回`PAUSED`、`CANCELLED`或`UNKNOWN`。
-
-## tec01提供的回调接口
-
-### 提取进度
+## 单节点接入
 
 ```http
-POST /internal/v1/compiler/jobs/{jobId}/progress
+POST /internal/v1/runtime/nodes/execute
+
+{"requestId":"single_1","ticketId":100173,"node":{},"inputs":{},"resumePayload":null}
 ```
 
-```json
-{
-  "stage": "FILTERING_OPERATIONS",
-  "message": "正在过滤有效SQL",
-  "current": 3,
-  "total": 8
-}
-```
+传完整node及已解析inputs，返回 `requestId/nodeId/status/output/diagnostic/interaction/handlerVersion`。SQL读额外需要API Key；HITL回复使用新requestId。结果同步返回，调用方自行保存。该接口不自动执行上游或生成完整运行回调。
 
-### 提取完成或失败
+## Studio与存储
 
-```text
-POST /internal/v1/compiler/jobs/{jobId}/complete
-POST /internal/v1/compiler/jobs/{jobId}/fail
-```
+Studio用管理Token登录，知识、计划、结果、Node默认值存浏览器IndexedDB；后台无数据库。默认不访问tec01，勾选同步才回调既有知识/运行ID。暂停保存本地快照，继续提交新dispatchId；取消从本地计划列表移除。Key不入浏览器存储或导出文件。
 
-完成响应包含`DraftProposal`和过滤诊断；失败响应包含错误码和可读原因。
-
-### 节点开始
-
-```http
-POST /internal/v1/runs/{runId}/nodes/{nodeId}/started
-```
-
-```json
-{
-  "dispatchId": "dispatch_xxx",
-  "attemptId": "attempt_xxx",
-  "startedAt": "2026-09-21T14:20:00+08:00"
-}
-```
-
-### 节点完成、失败或等待
-
-```http
-POST /internal/v1/runs/{runId}/nodes/{nodeId}/completed
-```
-
-```json
-{
-  "dispatchId": "dispatch_xxx",
-  "attemptId": "attempt_xxx",
-  "status": "SUCCEEDED",
-  "safeSummary": "查询返回2行",
-  "result": {},
-  "selectedEdgeId": "edge-next",
-  "skippedNodeIds": []
-}
-```
-
-`status`可以是：
-
-```text
-SUCCEEDED
-FAILED
-WAITING_INPUT
-PAUSED
-CANCELLED
-UNKNOWN
-```
-
-第一版节点结果直接放在回调`result`中，沿用SQL读20 MiB上限；tec01收到后负责持久化。
-
-### 运行结束和释放
-
-```http
-POST /internal/v1/runs/{runId}/released
-```
-
-```json
-{
-  "dispatchId": "dispatch_xxx",
-  "status": "FAILED",
-  "currentNodeId": "sql-2",
-  "reason": "节点执行失败"
-}
-```
-
-WAITING、PAUSED、FAILED、CANCELLED、UNKNOWN和SUCCEEDED都会释放Executor中的运行上下文。
-
-## HITL接口
-
-HITL由Executor创建，tec01保存并通过Hermes消息渠道或页面交给用户。
-
-### 打开人工交互
-
-节点完成回调使用`WAITING_INPUT`并携带：
-
-```json
-{
-  "interaction": {
-    "interactionId": "interaction_xxx",
-    "kind": "HITL_SELECT",
-    "title": "请选择客户",
-    "displayFields": ["customer_name", "customer_id", "status"],
-    "candidateArtifactId": "artifact_candidates"
-  }
-}
-```
-
-自由输入使用`HITL_FORM`和字段Schema。
-
-### 用户查询候选和提交
-
-```text
-GET  /api/v1/runs/{runId}/interactions/{interactionId}/options
-POST /api/v1/runs/{runId}/interactions/{interactionId}/reply
-```
-
-Hermes MCP调用同一组tec01接口。选择时只提交`candidateId`；自由表单提交`values`。
-
-提交成功后tec01重新调用`/internal/v1/executions/dispatch`，传入相同Workflow、最新节点状态和`resumePayload`。
-
-## 面向Hermes的MCP工具
-
-tec01提供：
-
-```text
-workflow_match
-workflow_plan
-workflow_approve
-workflow_status
-workflow_wait
-workflow_interaction_options
-workflow_interaction_reply
-workflow_pause
-workflow_resume
-workflow_cancel
-workflow_retry
-```
-
-Hermes必须：
-
-- 在执行前展示完整计划并取得用户确认。
-- 收到HITL时展示候选或字段，不自行猜测用户答案。
-- 多字段填写完成后汇总并让用户确认。
-- 持续把tec01返回的节点状态和失败原因告诉用户。
-- 用户从页面完成操作后，Hermes读取同一运行状态继续反馈。
-
-## 简洁泳道图
-
-### 提取
-
-```mermaid
-sequenceDiagram
-    participant U as 用户
-    participant T as tec01页面/Hermes
-    participant C as Compiler
-
-    U->>T: 生成草稿
-    T->>C: 工单详情和操作记录
-    C-->>T: 分阶段进度
-    C-->>T: 草稿或失败原因
-    T-->>U: 展示进度和结果
-```
-
-### 执行和HITL
-
-```mermaid
-sequenceDiagram
-    participant U as 用户
-    participant T as tec01/Hermes消息渠道
-    participant E as Executor
-    participant A as AOPS
-
-    U->>T: 确认计划
-    T->>E: 下发完整Workflow
-    E->>A: 执行SQL读
-    A-->>E: 返回结果
-    E->>T: 节点结果
-    T-->>U: 展示进度
-    E->>T: 请求用户选择/输入
-    T-->>U: Hermes消息或页面展示
-    U->>T: 提交答案
-    T->>E: 下发Workflow继续执行
-    E->>T: 最终结果
-    T-->>U: 展示完成
-```
-
-## 最小联调顺序
-
-1. 发布前Workflow校验；tec01独立创建计划并向用户展示。
-2. tec01下发两步SQL Workflow，确认逐节点状态返回。
-3. 条件节点根据`rowCount`选择分支。
-4. `hitl_select`通过Hermes和页面完成选择。
-5. `hitl_form`提交多个参数并绑定到下游SQL。
-6. 暂停、取消、失败和重试。
-7. Compiler进度在页面和Hermes中同步展示。
+服务内存只用于当前任务和短期幂等/事件记录。重启后由tec01或浏览器重新下发最近已知状态；它不能把未确认的外部SQL当作未执行。

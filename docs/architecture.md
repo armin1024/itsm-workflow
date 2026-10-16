@@ -1,45 +1,56 @@
-# 精简后架构
+# 当前实现架构
 
-## 边界
+## 两端职责
+
+| 位置 | 负责内容 | 存储 |
+|---|---|---|
+| tec01 | 生产知识、版本、计划、运行状态、结果、权限、MCP、Hermes消息渠道 | tec01数据库 |
+| itsm-workflow | 节点定义、JSON Schema、工单草稿提取、校验、单节点与Workflow执行 | 活动任务内存与有限期事件缓存 |
+| Studio浏览器 | 调试知识、手工定义、执行计划、节点结果、Node显示设置 | IndexedDB；支持JSON导入导出 |
+
+后台不建立SQLite、PostgreSQL或其他业务数据库。生产恢复依赖tec01重新下发状态；独立调试依赖浏览器保存的快照。API Key只存在于当前请求和执行内存。
 
 ```mermaid
 flowchart LR
-    U[开发或测试人员] --> S[独立Studio]
-    S --> R[Node Registry]
-    S --> C[Workflow Compiler]
-    S --> E[Node Executor]
-    E --> CLI[aops-cli]
-    CLI --> A[AOPS]
-    C --> L[内网LLM，仅用于草稿提取]
-    S --> DB[(TEST_ONLY SQLite)]
-
-    U2[用户] <--> CH[tec01/Hermes消息渠道]
-    CH --> T[tec01控制面]
-    T -->|Catalog/Validate/Compile| API[Runtime API]
-    API --> C
-    T -->|主动下发完整Workflow| EX[Executor服务]
-    EX --> E
-    EX -->|逐节点返回状态和结果| T
+    U[调试人员] --> S[Studio页面]
+    S <--> B[(浏览器本地知识与计划)]
+    S --> R[itsm-workflow]
+    T[tec01页面与Hermes渠道] -->|提取 / 校验 / 下发 / 控制| R
+    R -->|进度与节点结果| T
+    R --> C[aops-cli / AOPS]
+    R --> L[内网LLM：仅草稿提取]
 ```
 
-itsm-workflow拥有节点定义、草稿编译、DAG校验、计划预览、节点Handler和外部系统适配器。tec01拥有生产知识、正式计划、MCP、权限、状态机、队列、Artifact、Checkpoint和审计。Runtime在发布前校验不可变版本；tec01据此独立创建计划，Executor在下发执行时复核快照。
+## 执行侧模块
 
-## 保留模块
-
-| 模块 | 路径 | 职责 |
+| 模块 | 主要代码 | 职责 |
 |---|---|---|
-| Node Registry | `app/runtime/registry.py`、`builtin_nodes.py` | 节点Manifest、Schema、版本与能力目录 |
-| Node Executor | `app/runtime/executor.py` | 单节点统一执行入口，Studio和后续Remote Executor共用 |
-| Compiler | `app/extraction.py` | 审计过滤、SQL参数化、LLM中文提炼、DAG生成 |
-| Planner | `app/runtime/planner.py` | 发布前DAG归一化与校验、预览材料和内容哈希 |
-| CLI Adapter | `app/cli.py` | 安全argv执行、SSE解析、超时、限流和诊断脱敏 |
-| tec01 Adapter | `app/tec01_client.py` | 接收tec01调度、逐节点状态回写和控制命令 |
-| Studio | `app/studio`、`frontend` | TEST_ONLY编排和调试 |
+| Node Registry | `app/runtime/registry.py`、`builtin_nodes.py` | 配置、输入输出Schema、版本和节点目录 |
+| Compiler | `app/extraction.py`、`compiler_service.py` | 过滤成功只读操作、参数化、中文提炼、生成草稿、阶段回报 |
+| Planner | `app/runtime/planner.py` | DAG归一化、只读SQL和绑定校验、内容哈希、调试计划 |
+| Node Executor | `app/runtime/executor.py` | 执行SQL读、条件判断、人工表单和结束节点 |
+| Push Executor | `app/runtime/push_executor.py` | 异步下发、恢复、并发限制、暂停/取消、逐节点回调 |
+| CLI Adapter | `app/cli.py` | 安全argv调用、SSE解析、进程组控制、诊断脱敏 |
+| tec01 Client | `app/tec01_client.py` | 统一提取与运行回调、稳定幂等键和失败重试 |
+| Studio | `frontend`、`app/studio` | 浏览器持久化、画布、调试交互、临时事件读取 |
 
-## 已移除模块
+## 运行与人的交互
 
-本仓库不再包含本地生产知识、全文/向量检索、MCP Server、AOPS生产用户登录与业务权限、生产运行中心、PostgreSQL模型、Alembic迁移、旧生产Worker、导入导出和生产Artifact存储。独立Studio仅使用`STUDIO_ADMIN_TOKEN`保护本地Node管理和调试页面。
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant T as tec01页面/Hermes
+    participant E as itsm-workflow
+    U->>T: 确认完整计划
+    T->>E: 下发Workflow和已有状态
+    E-->>T: 每个节点开始、结果或失败
+    E-->>T: 需要人工填写参数，释放执行资源
+    T-->>U: 展示SQL结果与表单
+    U->>T: 填写并确认
+    T->>E: 携带表单值重新下发
+    E-->>T: 继续执行并返回结果
+```
 
-SQLite仅保存临时workspace与调试输出，默认24小时清理；它不是tec01的副本，也不能承载生产恢复。
+等待用户时没有常驻执行任务。暂停/失败同样释放资源；取消停止当前执行。条件节点可用SQL的 `rowCount` 决定是否进入人工表单。
 
-草稿提取由tec01主动提交工单数据，Compiler分阶段回调进度。生产执行由tec01主动下发完整Workflow；Executor根据tec01给出的节点状态继续执行，并逐节点返回状态和结果。tec01同时负责Web页面、Hermes消息渠道和MCP，三个入口共享同一运行状态。
+独立Studio使用同一Executor，结果回到浏览器；勾选同步时再调用tec01的统一回调。后台事件缓存用于短期页面追踪，不能代替浏览器或tec01持久化。

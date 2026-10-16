@@ -1,277 +1,108 @@
 # tec01与itsm-workflow拆分设计
 
-## 结论
+## 分工
 
-采用简单的两层架构：
+- tec01：生产知识与版本、用户权限、执行计划、全部运行状态和结果、Web页面、MCP、Hermes消息渠道。
+- itsm-workflow：Node Registry、JSON Schema、草稿提取、Workflow校验、逐节点真实执行、暂停和取消。
+- Studio浏览器：独立调试知识、手工编辑、多条计划和结果的本地保存。
 
-- **tec01**：用户消息渠道、Hermes接入、MCP、知识管理、计划与运行状态、页面和生产数据。
-- **itsm-workflow**：Node Registry、草稿提取、Workflow校验、节点执行和`aops-cli`适配。
-
-tec01主动把完整Workflow下发给Executor。Executor按tec01给出的节点状态继续执行，并把每个节点的开始、结果、失败或等待状态返回tec01。
-
-## 总体结构
+后台无业务数据库。生产数据由tec01持久化；Studio数据由浏览器IndexedDB持久化，服务端内存只保留活动任务与有限期事件缓存。
 
 ```mermaid
 flowchart LR
-    U[用户] <--> C[tec01消息渠道]
-    C <--> H[Hermes]
-    H --> M[tec01 MCP]
-    U --> W[tec01 Web页面]
-    M --> T[tec01运行控制]
-    W --> T
-    T --> D[(tec01生产数据)]
-    T -->|下发完整Workflow| E[itsm-workflow Executor]
+    U[用户] <--> T[tec01页面与Hermes消息渠道]
+    T <--> D[(tec01生产数据)]
+    T -->|提交工单数据 / 下发Workflow / 暂停取消| E[itsm-workflow]
+    E -->|提取进度 / 逐节点状态与结果| T
     E --> A[aops-cli / AOPS]
-    E -->|逐节点返回状态和结果| T
+    S[Studio页面] <--> B[(浏览器本地知识与计划)]
+    S -->|独立摄入与执行调试| E
 ```
 
-用户无论从Hermes消息渠道还是tec01页面操作，最终都进入同一个tec01运行控制接口。Executor不直接向用户发送消息。
+## 计划创建与校验
 
-## 职责
-
-### tec01
-
-- 通过AOPS Channel与用户交互，并承载Hermes和MCP。
-- 保存知识、Workflow版本、执行计划和全部运行状态。
-- 从已发布版本创建计划，检查当前用户权限、工单ID和运行参数，并记录用户确认。
-- 向用户展示计划、节点进度、结果、失败原因和HITL表单。
-- 用户确认后主动向Executor下发完整Workflow。
-- 主动下发暂停和取消命令。
-- 保存每个节点返回的状态和结果。
-
-### itsm-workflow
-
-- 管理节点类型、Schema和Handler。
-- 根据工单详情和操作记录生成Workflow草稿。
-- 在审核发布时校验节点配置、只读SQL、DAG、条件分支和输出绑定；执行前复核下发的版本。
-- 接收tec01下发的完整Workflow并执行。
-- 调用真实`aops-cli`，解析SSE结果。
-- 生成条件判断、HITL候选和HITL表单。
-- 每个节点结束后立即把状态和结果返回tec01。
-
-## 计划创建与校验分工
-
-**计划由tec01创建。** 参考`codex/list-pagination-search`中的发布与计划流程：先校验草稿并固化不可变版本，创建运行时读取该版本、填入当前工单ID和参数、保存计划快照及确认哈希。拆分后，tec01沿用这个流程；节点执行规则仍由itsm-workflow定义。
-
-| 时机 | 负责方 | 检查内容 |
+| 时机 | 负责方 | 处理 |
 |---|---|---|
-| 编辑草稿 | itsm-workflow | 可选实时检查节点Schema、只读SQL、图结构、条件默认边、HITL配置和前置结果绑定，便于页面即时纠错 |
-| 审核发布 | itsm-workflow校验，tec01保存 | **必须**调用Runtime校验；tec01保存返回的规范化Workflow、Catalog版本和内容哈希，再发布不可变版本 |
-| 创建执行计划 | tec01 | 从已发布版本生成计划；检查用户能否使用经验、工单ID、当前输入的必填项和类型；保存快照与`planHash`，向用户展示 |
-| 用户确认 | tec01 | 对照原`planHash`确认；计划或参数变化后要求重新展示与确认 |
-| 下发执行 | itsm-workflow | 重新核对Workflow内容哈希和执行安全规则；节点Handler版本兼容检查列入联调验收 |
+| 草稿编辑 | 页面/tec01与itsm-workflow | 获取JSON Schema生成表单，调用Workflow校验纠错 |
+| 发布 | itsm-workflow校验，tec01保存 | 校验只读SQL、节点配置、条件、绑定和DAG；保存规范化不可变版本与内容哈希 |
+| 创建计划 | tec01 | 检查权限、工单ID、当前运行输入，保存完整版本快照和planHash |
+| 用户确认 | tec01页面/Hermes | 展示完整计划，确认同一planHash |
+| 下发执行 | itsm-workflow | 校验快照哈希、节点版本与配置，按已有状态执行 |
 
-创建计划时不必再次请求Runtime做完整DAG/SQL校验，因为tec01读取的是发布时已经校验且之后不可变的版本。tec01也无需复制Python的SQL解析、节点Handler或条件解释器。`/internal/v1/runtime/workflows/plan`保留为预览与联调接口，tec01可用它生成展示材料，但它不是每次创建计划的必经步骤。
+计划创建无需每次重新请求整张DAG校验。tec01可用发布时的版本与已缓存Schema检查运行输入；上游SQL结果和HITL参数只有运行到相应步骤时才存在。
 
-tec01在创建计划时可使用已同步的Node Catalog确认发布版本仍有可用Handler；这属于版本兼容检查，不是重新解释Workflow。当前Runtime对历史Catalog/Handler版本的兼容校验还不完整，需在tec01生产联调前补齐，否则旧版本可能在下发时因版本不匹配而失败。
-
-发布前能检查的是绑定来源确实位于上游、JSON Pointer格式合法；SQL执行后某个字段是否真的存在，要等节点返回结果时检查。tec01创建计划时负责校验用户当下输入的类型和必填项，不能把运行时才得到的SQL结果或HITL值当作已知参数。
-
-HITL值与前置SQL结果只有运行到对应节点后才知道。计划只展示“此处将要求用户选择/输入哪些字段”，不能在确认计划时预先填入候选值，也不能由Hermes猜测。
-
-```mermaid
-sequenceDiagram
-    participant U as 用户
-    participant T as tec01页面/Hermes
-    participant R as itsm-workflow
-
-    T->>R: 发布前校验草稿
-    R-->>T: 通过并返回版本信息
-    U->>T: 输入工单ID和已有参数
-    T-->>U: 展示完整计划与HITL步骤
-    U->>T: 确认计划
-    T->>R: 下发已发布Workflow
-    R-->>T: 逐节点返回真实状态
-```
+`workflowContentHash`用于核对定义，`planHash`用于核对本次向用户展示的版本、工单ID、参数和执行内容。正式计划与用户确认始终保存在tec01。
 
 ## 草稿提取
 
-tec01取得工单详情和操作记录后，主动调用Compiler。Compiler不再自行拉取任务，也不主动访问AOPS。
-
 ```mermaid
 sequenceDiagram
-    participant U as 用户/管理员
-    participant T as tec01页面与数据
-    participant C as itsm-workflow Compiler
-
-    U->>T: 根据工单生成草稿
+    participant U as 用户
+    participant T as tec01页面/Hermes
+    participant C as itsm-workflow
+    U->>T: 生成经验草稿
     T->>T: 获取工单详情和操作记录
-    T->>C: 提交提取任务和工单数据
-    C-->>T: 正在过滤有效SQL
-    C-->>T: 正在参数化SQL
-    C-->>T: 正在生成并校验Workflow
-    C-->>T: 返回草稿或失败原因
-    T-->>U: 页面持续显示进度和最终草稿
+    T->>C: 传data对象、data数组与经验ID
+    C-->>T: 过滤、参数化、分析、生成、校验进度
+    C-->>T: 返回中文草稿或失败原因
+    T-->>U: 展示进度，供编辑审核
 ```
 
-提取进度由Compiler回调tec01。tec01保存进度，再通过页面SSE或Hermes消息展示。Compiler不直接连接浏览器。
+Compiler只采纳 `operation=sql_exec_read`、结果明确成功、数据库路径完整且安全单语句的SQL，去除重复操作；实际条件值改为参数。LLM只参与中文名称、摘要、步骤目的与参数语义提炼，不能在运行时替用户填写值。
 
-建议进度保持简单：
+进入分析阶段立即上报进度，随后每15秒心跳；阶段、心跳和终态共用递增seq。成功返回草稿、校验摘要及包含重复过滤项的完整账本。
 
-```text
-已接收
-正在过滤操作记录
-正在生成步骤和参数
-正在校验Workflow
-已完成 / 失败
-```
+## 生产执行与恢复
 
-## 生产执行
-
-tec01下发：
-
-- 完整不可变Workflow。
-- 工单ID和运行参数。
-- 每个节点当前状态。
-- 已完成节点的结果引用。
-- 需要恢复的HITL输入。
-
-Executor返回`202 Accepted`后在后台执行，不占用tec01的HTTP请求。
+tec01主动下发完整Workflow、工单ID、当前运行参数、节点状态、已完成输出和分支信息。Executor立即确认受理，后台逐节点执行。每个节点开始和完成都返回tec01；开启生产回调时，结果未被确认不得执行下一节点。
 
 ```mermaid
 sequenceDiagram
     participant U as 用户
     participant T as tec01页面/Hermes
-    participant E as itsm-workflow Executor
+    participant E as itsm-workflow
     participant A as AOPS
-
-    U->>T: 确认执行计划
-    T->>E: 下发完整Workflow
-    E-->>T: 已接受
-    E->>T: 节点1开始
-    E->>A: 执行aops-cli
-    A-->>E: 返回结果
-    E->>T: 节点1完成和结果
-    T-->>U: 展示节点1完成
-    E->>T: 节点2开始
-    T-->>U: 展示当前进度
+    U->>T: 确认计划
+    T->>E: 下发完整Workflow与已有进度
+    E->>A: 执行SQL读
+    A-->>E: 返回数据
+    E-->>T: 节点状态与结果
+    T-->>U: 展示进度和数据
+    E-->>T: 等待填写参数，释放资源
+    T-->>U: 展示人工表单
+    U->>T: 填写并确认参数
+    T->>E: 携带参数重新下发
+    E-->>T: 继续未完成节点
 ```
 
-Executor每完成一个节点就回报，不等整个Workflow结束后再一次性返回。
+已完成或已跳过节点不会重放。tec01每次开始、恢复或重试生成新dispatchId；同ID同内容重发返回原受理结果，同ID不同内容拒绝。仍在执行的runId不能接受另一份并发调度。
 
-## 执行一半后恢复
+## 条件与人在回路
 
-完整Workflow可以已经执行了一部分。tec01再次下发时同时提供节点状态：
+当前运行节点为 `sql_read`、`condition`、`hitl_form`、`end`。
 
-```text
-SUCCEEDED  已完成，Executor跳过
-SKIPPED    未命中分支，Executor跳过
-READY      下一步可以执行
-PENDING    等待前置节点
-WAITING    等待用户输入
-FAILED     等待用户决定是否重试
-```
+典型流程：SQL读返回数据后，以 `/nodes/sql-1/output/rowCount > 0` 判断是否进入人工表单。用户根据结果填写一个或多个字段，例如客户编号、状态和返回条数；Executor校验类型与范围，输出 `values`，下游通过 `/values/customer_id` 绑定参数。无数据时进入默认结束分支。
 
-Executor只从`READY`节点继续，不重复执行`SUCCEEDED`节点。完整计划可以缓存在Executor内存，但tec01保存的Workflow、节点状态和结果才是最终事实。
-
-## HITL节点
-
-生产Workflow的参数处理使用条件判断和人在回路：
-
-- `hitl_select`：从前置SQL结果中选择一条或多条。
-- `hitl_form`：用户手工填写一个或多个参数。
-
-### 从SQL结果选择
-
-SQL可以返回很多字段，但HITL只展示Workflow配置允许的字段：
-
-```json
-{
-  "type": "hitl_select",
-  "config": {
-    "title": "请选择客户",
-    "selectionMode": "SINGLE",
-    "idPath": "/customer_id",
-    "labelTemplate": "{{customer_name}} / {{customer_id}}",
-    "displayFields": [
-      {"name":"customer_name","label":"客户姓名","path":"/customer_name"},
-      {"name":"customer_id","label":"客户编号","path":"/customer_id"}
-    ],
-    "outputFields": [{"name":"customer_id","path":"/customer_id"}]
-  },
-  "inputs": [{
-    "name": "rows", "type": "array",
-    "source": {"kind":"NODE_OUTPUT","nodeId":"sql-1","jsonPointer":"/data"}
-  }]
-}
-```
-
-用户只看到配置的姓名和编号；选择后，下游只得到配置的`customer_id`。Agent提交`candidateId`，不能直接修改候选真实值。需要多个参数时，在`outputFields`中逐项声明。
-
-候选很多时，tec01页面和MCP分页显示并支持关键词筛选。
-
-### 用户手工输入
-
-```json
-{
-  "type": "hitl_form",
-  "config": {
-    "title": "填写后续查询参数",
-    "fields": [
-      {"name":"customer_id","label":"客户编号","type":"string","required":true},
-      {"name":"limit","label":"返回条数","type":"integer","required":true,"minimum":1,"maximum":100}
-    ]
-  }
-}
-```
-
-用户可以在Hermes对话或tec01页面填写。两种入口使用同一个tec01接口，提交后重新下发Workflow继续执行。
-
-### HITL泳道图
-
-```mermaid
-sequenceDiagram
-    participant E as Executor
-    participant T as tec01/Hermes消息渠道
-    participant U as 用户
-
-    E->>T: 需要用户选择或输入
-    T-->>U: Hermes消息或页面展示表单
-    U->>T: 提交选择/参数
-    T->>E: 下发Workflow并携带用户输入
-    E->>T: HITL完成，继续下一节点
-```
-
-等待用户期间Executor释放该运行，不占用执行槽位。
+HITL可从tec01页面或Hermes处理。tec01先保存相同交互及用户回复，再重新下发，两个入口共享同一运行事实。Hermes展示字段说明、收集参数并请用户确认，不能猜测答案。
 
 ## 暂停、取消和失败
 
-tec01主动向当前Executor发送命令：
+- 暂停：tec01先显示请求中；Executor完成当前SQL后在安全边界回报PAUSED并释放资源。
+- 继续：tec01提供完整快照与已提交节点状态，生成新dispatchId重新下发。
+- 取消：停止本地CLI并回报结果；如外部执行无法确认，保留UNKNOWN供用户核实。
+- 失败：返回具体脱敏诊断并释放资源，用户决定是否重试。
+- 等待输入与完成：回报tec01后释放资源。
 
-```mermaid
-sequenceDiagram
-    participant U as 用户
-    participant T as tec01页面/Hermes
-    participant E as Executor
+释放只清除Executor活动上下文，不删除tec01运行记录。服务中断时如SQL已发出且没有完成记录，不能自动认定成功或重放；应由tec01展示结果未知并让用户核实。
 
-    U->>T: 暂停或取消
-    T->>E: 下发命令
-    E->>E: 到安全位置暂停或停止aops-cli
-    E->>T: 返回PAUSED/CANCELLED/UNKNOWN
-    T-->>U: 展示真实结果
-```
+## 独立Studio
 
-- 暂停：当前节点到达安全位置后保存状态并释放运行。
-- 取消：停止本地进程；如果请求可能已经到达AOPS，返回`UNKNOWN`。
-- 失败：返回失败原因并释放运行，等待用户决定是否重试。
-- 完成：返回最终结果并释放运行。
+Studio继续提供管理Token登录、Node管理、知识抽取、手工新建、画布编辑、计划确认、真实单步和整流程调试。页面采用统一的知识列表和执行中心布局；数据保存在浏览器，可编辑、导入、导出及保存多条记录。
 
-## 页面设计
+默认不访问tec01；勾选同步后，使用已有tec01知识/运行ID回调。取消从浏览器移除该计划。当前API Key只在执行时临时填写，不保存到IndexedDB、导出包或事件中。
 
-tec01生产页面至少包含：
+## 接入最小范围
 
-1. **执行计划**：节点卡片、数据库、SQL摘要、参数来源和风险说明。
-2. **执行进度**：当前节点、已完成节点、失败原因和每步结果入口。
-3. **HITL面板**：候选分页、字段表单、确认和取消。
-4. **运行控制**：暂停、继续、取消和失败重试。
-5. **消息同步**：Hermes中的状态与页面一致，用户可以在任一入口继续处理。
+tec01获取Catalog与JSON Schema、发布前校验、提交草稿、下发Workflow、暂停/取消，并提供统一提取/运行回调。三方也可使用同步单节点API自行调度，无需完整运行调度。
 
-itsm-workflow Studio只用于Node管理、草稿预览和真实调试，不承担生产运行页面。
-
-## 当前规模的约束
-
-- 第一版只有一个Executor服务，最多处理几十个并发运行。
-- Executor设置最大运行数和最大`aops-cli`进程数，满载时返回“暂时无容量”，tec01稍后重试。
-- 使用`dispatchId`防止tec01重复下发同一运行。
-- 每个节点必须先回报tec01，再执行下一个节点。
-- AOPS API Key不放进Workflow；Executor按当前运行临时获取并只传给`aops-cli`。
+第一版单服务最大运行数与CLI进程数通过配置限制，容量满返回429；不需要额外消息队列、任务领取进程或第二套状态数据库。

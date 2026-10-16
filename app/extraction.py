@@ -3,13 +3,14 @@ from __future__ import annotations
 import base64
 import json
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from sqlglot import exp, parse_one
+from sqlglot import exp, parse, parse_one
 
-from app.cli import CliExecutionError, execute_json_command
+from app.cli import CliExecutionError, execute_json_command, redact_diagnostic
 from app.config import settings
 from app.workflow import WorkflowDefinition, WorkflowEdge, WorkflowNode
 
@@ -29,6 +30,7 @@ SEMANTIC_DESCRIPTIONS = {
 
 _READ_ROOTS = (exp.Select, exp.Show, exp.Describe, exp.Union)
 _FORBIDDEN = (exp.Insert, exp.Update, exp.Delete, exp.Create, exp.Drop, exp.Alter)
+ProgressCallback = Callable[[str, str, int | None, int | None], Awaitable[None]]
 
 
 @dataclass
@@ -71,10 +73,13 @@ def _successful(value: Any) -> str:
     parsed = _object(value)
     if not parsed:
         return "invalid_result"
-    error = parsed.get("e", parsed.get("error", ""))
-    if error not in (None, "", [], {}):
+    if any(parsed.get(key) not in (None, "", [], {}) for key in ("e", "error")):
         return "failed_result"
-    return "success" if parsed.get("r") is True or parsed.get("status") in {0, "0", "success", "SUCCEEDED"} else "failed_result"
+    if parsed.get("r") is False:
+        return "failed_result"
+    status = parsed.get("status")
+    known_success = type(status) in (int, str) and status in (0, "0", "success", "SUCCESS", "SUCCEEDED")
+    return "success" if parsed.get("r") is True or known_success else "failed_result"
 
 
 def extract_operations(rows: list[dict[str, Any]]) -> tuple[list[Operation], list[dict[str, Any]]]:
@@ -97,18 +102,25 @@ def extract_operations(rows: list[dict[str, Any]]) -> tuple[list[Operation], lis
             ignored.append({"operationId": operation_id, "reason": "missing_sql"})
             continue
         try:
-            expression = parse_one(command, read="mysql")
+            statements = [item for item in parse(command, read="mysql") if item is not None]
+            if len(statements) != 1:
+                raise ValueError("only one read statement is permitted")
+            expression = statements[0]
             if not isinstance(expression, _READ_ROOTS) or any(expression.find_all(_FORBIDDEN)) or re.search(r"\b(FOR\s+UPDATE|INTO\s+OUTFILE|LOAD_FILE|SLEEP)\b", command, re.I):
                 raise ValueError("SQL is not a permitted read statement")
             normalized = expression.sql(dialect="mysql", pretty=False)
-        except Exception as exc:
-            ignored.append({"operationId": operation_id, "reason": f"invalid_read_sql:{exc}"})
+        except Exception:
+            ignored.append({"operationId": operation_id, "reason": "invalid_read_sql:SQL必须是安全只读单语句"})
             continue
         database_values = [sql_data.get(key) for key in ("serverid", "dbid", "dbname", "dbuser", "service_name")]
         if not all(value is not None and str(value).strip() for value in database_values):
             ignored.append({"operationId": operation_id, "reason": "missing_database_ref"})
             continue
-        valid.append(Operation(str(operation_id or ""), int(row.get("created_at") or 0), command.strip(), normalized, "/".join(str(value).strip() for value in database_values)))
+        try:
+            created_at = int(row.get("created_at") or 0)
+        except (TypeError, ValueError):
+            created_at = 0
+        valid.append(Operation(str(operation_id or ""), created_at, command.strip(), normalized, "/".join(str(value).strip() for value in database_values)))
     valid.sort(key=lambda item: (item.created_at, item.operation_id))
     return valid, ignored
 
@@ -167,8 +179,7 @@ async def _assess(ticket: dict[str, Any], nodes: list[dict[str, Any]]) -> dict[s
             try:
                 response = await client.post(url, headers=headers, json=body)
                 if response.is_error:
-                    detail = re.sub(r"\s+", " ", response.text)[:300]
-                    failures.append(f"{mode}: HTTP {response.status_code} {detail}")
+                    failures.append(f"{mode}: 模型接口返回HTTP {response.status_code}")
                     continue
                 payload = response.json()
                 content = payload.get("choices", [{}])[0].get("message", {}).get("content") if isinstance(payload, dict) else None
@@ -225,37 +236,70 @@ def _apply_assessment(nodes: list[dict[str, Any]], assessed: dict[str, Any]) -> 
                     parameter["source"] = {"kind": "NODE_OUTPUT", "nodeId": source_id, "jsonPointer": pointer[:1000]}
 
 
-async def compile_ticket_evidence(ticket: dict[str, Any], rows: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Compile evidence into a storage-agnostic DraftProposal."""
+def validate_ticket_evidence(ticket: Any, rows: Any, ticket_id: int | None = None) -> int:
+    """Accept only the data object and data array, never an AOPS response envelope."""
     if not isinstance(ticket, dict):
-        raise ValueError("ticketInfo必须是JSON对象")
-    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ValueError("ticketInfo必须是JSON对象，请填写info响应中的data对象")
+    if "data" in ticket and any(key in ticket for key in ("status", "msg", "message")):
+        raise ValueError("请填写info响应中的data对象，不要传完整响应")
+    source_id = ticket.get("id")
+    if isinstance(source_id, bool) or not isinstance(source_id, int) or source_id < 1:
+        raise ValueError("ticketInfo.id必须是正整数")
+    if ticket_id is not None and (isinstance(ticket_id, bool) or not isinstance(ticket_id, int) or ticket_id < 1):
+        raise ValueError("ticketId必须是正整数")
+    if ticket_id is not None and ticket_id != source_id:
+        raise ValueError("ticketId必须与ticketInfo.id一致")
+    if not isinstance(rows, list):
+        raise ValueError("请填写audit timeline响应中的data数组，不要传完整响应")
+    if not all(isinstance(row, dict) for row in rows):
         raise ValueError("auditTimeline必须是JSON对象数组")
+    return source_id
+
+
+async def compile_ticket_evidence(ticket: dict[str, Any], rows: list[dict[str, Any]], *, progress: ProgressCallback | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Compile evidence into a storage-agnostic DraftProposal."""
+    validate_ticket_evidence(ticket, rows)
+    if progress:
+        await progress("FILTERING_OPERATIONS", "正在过滤有效 SQL", 0, len(rows))
     operations, ignored = extract_operations(rows)
+    if progress:
+        await progress("FILTERING_OPERATIONS", "已完成有效 SQL 过滤", len(rows), len(rows))
     if not operations:
         raise ValueError("NO_VALID_OPERATIONS：没有成功且安全的 SQL 读操作")
     nodes: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
-    for operation in operations:
+    if progress:
+        await progress("PARAMETERIZING_SQL", "正在参数化 SQL", 0, len(operations))
+    for index, operation in enumerate(operations):
         key = (operation.database_ref, operation.normalized_sql)
         if key in seen:
             ignored.append({"operationId": operation.operation_id, "reason": "duplicate_read_operation"})
+            if progress:
+                await progress("PARAMETERIZING_SQL", "正在参数化 SQL", index + 1, len(operations))
             continue
         seen.add(key)
         number = len(nodes) + 1
         sql, inputs = parameterize_sql(operation.sql, number)
         nodes.append({"id": f"sql-{number}", "type": "sql_read", "title": f"只读查询步骤 {number}", "config": {"databaseRef": operation.database_ref, "sqlTemplate": sql}, "inputs": inputs, "approvalPolicy": "PLAN", "timeoutSeconds": 600})
+        if progress:
+            await progress("PARAMETERIZING_SQL", "正在参数化 SQL", index + 1, len(operations))
+    if progress:
+        await progress("ANALYZING_EVIDENCE", "正在分析工单和操作记录", None, None)
     assessed = await _assess(ticket, nodes)
+    if progress:
+        await progress("BUILDING_WORKFLOW", "正在生成 Workflow 草稿", None, None)
     _apply_assessment(nodes, assessed)
     name = str(assessed.get("name") or "").strip()[:200]
     summary = str(assessed.get("summary") or "").strip()[:2000]
     phrases = [str(value).strip()[:200] for value in assessed.get("matchPhrases", []) if str(value).strip()][:20]
     negatives = [str(value).strip()[:200] for value in assessed.get("negativePhrases", []) if str(value).strip()][:20]
-    if not name or not summary or not phrases or not any("\u4e00" <= char <= "\u9fff" for char in name + summary):
+    if not name or not summary or not phrases or not all(any("\u4e00" <= char <= "\u9fff" for char in value) for value in (name, summary)):
         raise ValueError("LLM_ANALYSIS_FAILED：名称、中文摘要或匹配短语缺失")
     end_node = {"id": "done", "type": "end", "title": "完成并展示结果", "config": {}, "inputs": [], "approvalPolicy": "NONE", "timeoutSeconds": 60}
     all_nodes = nodes + [end_node]
     edges = [WorkflowEdge(id=f"edge-{index + 1}", source=node["id"], target=all_nodes[index + 1]["id"]) for index, node in enumerate(nodes)]
+    if progress:
+        await progress("VALIDATING_WORKFLOW", "正在校验 Workflow", None, None)
     definition = WorkflowDefinition(entryNodeId=nodes[0]["id"], nodes=[WorkflowNode.model_validate(node) for node in all_nodes], edges=edges)
     systems = [str(item.get("id") or item.get("name")) for item in ticket.get("system_list", []) if isinstance(item, dict) and (item.get("id") or item.get("name"))]
     proposal = {"name": name, "summary": summary, "matchPhrases": phrases, "negativePhrases": negatives, "systemKeys": systems[:20], "workflowDefinition": definition.model_dump(mode="json")}
@@ -269,7 +313,8 @@ async def fetch_ticket_evidence(ticket_id: int, api_key: str) -> tuple[dict[str,
         info = await execute_json_command(["event-center", "info", "--id", str(ticket_id)], api_key=api_key, timeout_seconds=30)
         timeline = await execute_json_command(["event-center", "audit_timeline", "--id", str(ticket_id)], api_key=api_key, timeout_seconds=60)
     except CliExecutionError as exc:
-        raise ValueError(f"AOPS_CLI_{exc.code}：{exc}") from exc
+        message, _ = redact_diagnostic(str(exc), 1000)
+        raise ValueError(f"AOPS_CLI_{exc.code}：{message}") from exc
     ticket = info.payload.get("data")
     rows = timeline.payload.get("data")
     if not isinstance(ticket, dict):

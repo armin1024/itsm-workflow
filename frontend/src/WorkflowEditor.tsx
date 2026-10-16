@@ -31,7 +31,6 @@ type CardData = { node: WorkflowNode; entry: boolean; [key: string]: unknown };
 const labels: Record<string, string> = {
   sql_read: "SQL READ",
   condition: "CONDITION",
-  hitl_select: "HITL SELECT",
   hitl_form: "HITL FORM",
   end: "END",
 };
@@ -55,9 +54,7 @@ const GraphCard = memo(({ data, selected }: NodeProps<Node<CardData>>) => {
           ? String(node.config.databaseRef || "待配置数据库")
           : node.type === "condition"
             ? "按前置结果选择分支"
-            : node.type === "hitl_select"
-                ? "将SQL结果映射为候选"
-              : node.type === "hitl_form"
+            : node.type === "hitl_form"
                 ? "等待用户填写参数"
             : "汇总并结束运行"}
       </p>
@@ -66,9 +63,7 @@ const GraphCard = memo(({ data, selected }: NodeProps<Node<CardData>>) => {
           ? `${node.inputs.length} 输入${bound ? ` · ${bound} 数据绑定` : ""}`
           : node.type === "condition"
             ? "条件路由"
-            : node.type === "hitl_select"
-              ? "人工选择"
-              : node.type === "hitl_form"
+            : node.type === "hitl_form"
                 ? "人工输入"
                 : "终点"}
       </footer>
@@ -119,12 +114,6 @@ const endNode = (id: string, x: number, y: number): WorkflowNode => ({
   approvalPolicy: "NONE",
   timeoutSeconds: 60,
   uiPosition: { x, y },
-});
-const hitlNode = (id: string, x: number, y: number): WorkflowNode => ({
-  id, type: "hitl_select", schemaVersion: 1, title: "选择候选参数",
-  config: { selectionMode: "SINGLE", title: "请选择用于后续步骤的参数", idPath: "/customer_id", labelTemplate: "{{customer_name}} / {{customer_id}}", displayFields: [{ name: "customer_name", label: "客户姓名", path: "/customer_name" }, { name: "customer_id", label: "客户编号", path: "/customer_id" }], outputFields: [{ name: "customer_id", path: "/customer_id" }] },
-  inputs: [{ name: "rows", type: "array", description: "前置SQL查询结果", source: { kind: "RUN_INPUT", key: "rows" } }],
-  approvalPolicy: "NONE", timeoutSeconds: 60, uiPosition: { x, y },
 });
 const hitlFormNode = (id: string, x: number, y: number): WorkflowNode => ({
   id, type: "hitl_form", schemaVersion: 1, title: "填写查询参数",
@@ -220,18 +209,16 @@ export default function WorkflowEditor({
       })),
     });
   };
-  const nodeChanges = (changes: NodeChange[]) =>
-    setNodes((current) => {
-      const next = applyNodeChanges(changes, current) as Node<CardData>[];
-      emit(next, edges);
-      return next;
-    });
-  const edgeChanges = (changes: EdgeChange[]) =>
-    setEdges((current) => {
-      const next = applyEdgeChanges(changes, current);
-      emit(nodes, next);
-      return next;
-    });
+  const nodeChanges = (changes: NodeChange[]) => {
+    const next = applyNodeChanges(changes, nodes) as Node<CardData>[];
+    setNodes(next);
+    if (changes.some((change) => change.type !== "dimensions" && change.type !== "select")) emit(next, edges);
+  };
+  const edgeChanges = (changes: EdgeChange[]) => {
+    const next = applyEdgeChanges(changes, edges);
+    setEdges(next);
+    if (changes.some((change) => change.type !== "select")) emit(nodes, next);
+  };
   const connect = (connection: Connection) => {
     if (
       !connection.source ||
@@ -271,16 +258,14 @@ export default function WorkflowEditor({
               }
           : {},
     };
-    setEdges((current) => {
-      const next = addEdge(edge, current);
-      emit(nodes, next);
-      return next;
-    });
+    const nextEdges = addEdge(edge, edges);
+    setEdges(nextEdges);
+    emit(nodes, nextEdges);
     setSelectedEdge(edge.id);
     setSelectedNode("");
   };
-  const add = (type: "sql_read" | "condition" | "hitl_select" | "hitl_form" | "end") => {
-    const prefix = type === "sql_read" ? "sql" : type === "condition" ? "condition" : type === "hitl_select" ? "hitl-select" : type === "hitl_form" ? "hitl-form" : "end",
+  const add = (type: "sql_read" | "condition" | "hitl_form" | "end") => {
+    const prefix = type === "sql_read" ? "sql" : type === "condition" ? "condition" : type === "hitl_form" ? "hitl-form" : "end",
       id = `${prefix}-${Date.now()}`,
       position = {
         x: 120 + (nodes.length % 3) * 320,
@@ -291,9 +276,7 @@ export default function WorkflowEditor({
           ? sqlNode(id, position.x, position.y)
           : type === "condition"
             ? conditionNode(id, position.x, position.y)
-            : type === "hitl_select"
-                ? hitlNode(id, position.x, position.y)
-              : type === "hitl_form"
+            : type === "hitl_form"
                 ? hitlFormNode(id, position.x, position.y)
             : endNode(id, position.x, position.y),
       flow: Node<CardData> = {
@@ -302,17 +285,14 @@ export default function WorkflowEditor({
         position,
         data: { node, entry: false },
       };
-    setNodes((current) => {
-      const next = [...current, flow];
-      emit(next, edges);
-      return next;
-    });
+    const nextNodes = [...nodes, flow];
+    setNodes(nextNodes);
+    emit(nextNodes, edges);
     setSelectedNode(id);
     setSelectedEdge("");
   };
-  const patchNode = (patch: Partial<WorkflowNode>) =>
-    setNodes((current) => {
-      const next = current.map((item) =>
+  const patchNode = (patch: Partial<WorkflowNode>) => {
+      const next = nodes.map((item) =>
         item.id === selectedNode
           ? {
               ...item,
@@ -320,9 +300,9 @@ export default function WorkflowEditor({
             }
           : item,
       );
+      setNodes(next);
       emit(next, edges);
-      return next;
-    });
+  };
   const removeNode = () => {
     const nextNodes = nodes.filter((item) => item.id !== selectedNode),
       nextEdges = edges.filter(
@@ -351,9 +331,8 @@ export default function WorkflowEditor({
     default?: boolean;
     condition?: Record<string, unknown>;
     kind?: WorkflowEdge["kind"];
-  }) =>
-    setEdges((currentEdges) => {
-      let next = currentEdges.map((item) =>
+  }) => {
+      let next = edges.map((item) =>
         item.id === selectedEdge
           ? {
               ...item,
@@ -370,9 +349,9 @@ export default function WorkflowEditor({
             : item,
         );
       }
+      setEdges(next);
       emit(nodes, next);
-      return next;
-    });
+  };
   const syncInputs = () => {
     if (!current || current.type !== "sql_read") return;
     const names = [
@@ -409,9 +388,6 @@ export default function WorkflowEditor({
           </Button>
           <Button type="button" size="sm" kind="tertiary" disabled={allowedTypes ? !allowedTypes.has("condition") : false} onClick={() => add("condition")}>
             ◇ 条件判断
-          </Button>
-          <Button type="button" size="sm" kind="tertiary" disabled={allowedTypes ? !allowedTypes.has("hitl_select") : false} onClick={() => add("hitl_select")}>
-            ＋ HITL 选择
           </Button>
           <Button type="button" size="sm" kind="tertiary" disabled={allowedTypes ? !allowedTypes.has("hitl_form") : false} onClick={() => add("hitl_form")}>
             ＋ HITL 表单
@@ -719,7 +695,7 @@ function NodeInspector({
           </p>
         </div>
       )}
-      {(node.type === "hitl_select" || node.type === "hitl_form") && (
+      {node.type === "hitl_form" && (
         <>
           <TextArea
             id={`${node.id}-config-json`}
