@@ -32,6 +32,7 @@ elif [ "$(id -gn "$SERVICE_USER")" != "$SERVICE_GROUP" ]; then
   usermod --gid "$SERVICE_GROUP" "$SERVICE_USER"
 fi
 mkdir -p "$PREFIX" "$CONFIG_DIR" /var/lib/itsm-workflow
+install -d -m 0700 -o "$SERVICE_USER" -g "$SERVICE_GROUP" /var/lib/itsm-workflow/logs
 if [ -n "$(find "$PREFIX" -mindepth 1 -maxdepth 1 -print -quit)" ] && [ ! -f "$PREFIX/.itsm-workflow-install" ]; then
   echo "Refusing unmanaged non-empty prefix: $PREFIX" >&2; exit 1
 fi
@@ -51,6 +52,22 @@ if ! grep -q '^STUDIO_ADMIN_TOKEN=' "$CONFIG_DIR/service.env"; then
   printf '\nSTUDIO_ADMIN_TOKEN=replace-with-long-random-admin-token\nSTUDIO_SESSION_HOURS=8\nSTUDIO_COOKIE_SECURE=false\n' >> "$CONFIG_DIR/service.env"
   echo "Added Studio authentication settings; configure STUDIO_ADMIN_TOKEN before start." >&2
 fi
+if grep -Eq '^[[:space:]]*(export[[:space:]]+)?STUDIO_DATABASE_PATH[[:space:]]*=' "$CONFIG_DIR/service.env"; then
+  sed -i -E '/^[[:space:]]*(export[[:space:]]+)?STUDIO_DATABASE_PATH[[:space:]]*=/d' "$CONFIG_DIR/service.env"
+  echo "Removed obsolete database path setting; browser IndexedDB stores Studio data. Existing data files were not deleted." >&2
+fi
+if ! grep -q '^TEC01_RUN_CALLBACK_PATH=' "$CONFIG_DIR/service.env"; then
+  printf '\nTEC01_RUN_CALLBACK_PATH=/internal/v1/runs/{runId}/callbacks\n' >> "$CONFIG_DIR/service.env"
+fi
+if ! grep -q '^TEC01_EXTRACTION_CALLBACK_PATH=' "$CONFIG_DIR/service.env"; then
+  printf '\nTEC01_EXTRACTION_CALLBACK_PATH=/internal/v1/extractions/{knowledgeId}/callbacks\n' >> "$CONFIG_DIR/service.env"
+fi
+for setting in LOG_LEVEL=INFO LOG_DIR=/var/lib/itsm-workflow/logs LOG_RETENTION_DAYS=7 LOG_MAX_TOTAL_MB=512 LOG_MAX_FILE_MB=16 LOG_CLEANUP_INTERVAL_SECONDS=60; do
+  key=${setting%%=*}
+  if ! grep -Eq "^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=" "$CONFIG_DIR/service.env"; then
+    printf '\n%s\n' "$setting" >> "$CONFIG_DIR/service.env"
+  fi
+done
 for name in api; do
   sed -e "s|__PREFIX__|$PREFIX|g" -e "s|__CONFIG_DIR__|$CONFIG_DIR|g" -e "s|__SERVICE_USER__|$SERVICE_USER|g" -e "s|__SERVICE_GROUP__|$SERVICE_GROUP|g" "$PACKAGE_DIR/itsm-workflow-$name.service.in" > "/etc/systemd/system/itsm-workflow-$name.service"
 done

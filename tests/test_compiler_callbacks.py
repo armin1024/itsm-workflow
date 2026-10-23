@@ -44,8 +44,11 @@ async def test_compiler_unified_callbacks_have_ordered_stages_and_validation(mon
     assert all(key == "knw-1" for key, _ in client.events)
     assert [event["seq"] for event in events] == list(range(1, len(events) + 1))
     assert all(event["occurredAt"] for event in events)
+    assert all(event["requestId"] == "req-1" for event in events)
     stages = list(dict.fromkeys(event["stage"] for event in events if event["type"] == "PROGRESS"))
     assert stages == ["FILTERING_OPERATIONS", "PARAMETERIZING_SQL", "ANALYZING_EVIDENCE", "BUILDING_WORKFLOW", "VALIDATING_WORKFLOW"]
+    assert [event["stage"] for event in events if event["type"] == "PROGRESS"] == stages
+    assert len(events) == 6 and events[-1]["seq"] == 6
     final = events[-1]
     assert final["type"] == "FINISHED" and final["status"] == "SUCCEEDED"
     assert final["validation"]["valid"]
@@ -56,22 +59,58 @@ async def test_compiler_unified_callbacks_have_ordered_stages_and_validation(mon
 
 
 @pytest.mark.asyncio
-async def test_analysis_heartbeat_shares_sequence_and_stops_before_next_stage(monkeypatch):
+async def test_empty_extraction_reports_only_entered_stage_and_failure():
+    client = Client()
+    service = CompilerService(client)
+    data = job()
+    data["auditTimeline"] = []
+    service.submit(data)
+    await service.tasks["knw-1"]
+    events = [event for _, event in client.events]
+    assert [event["type"] for event in events] == ["PROGRESS", "FINISHED"]
+    assert events[0]["stage"] == "FILTERING_OPERATIONS"
+    assert events[1]["seq"] == 2 and events[1]["error"]["code"] == "NO_VALID_OPERATIONS"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed", [False, True])
+async def test_analysis_reports_once_without_background_heartbeat(monkeypatch, failed):
+    analysis_started = asyncio.Event()
+    finish_analysis = asyncio.Event()
+
     async def slow_assessment(ticket, nodes):
-        await asyncio.sleep(0.025)
+        analysis_started.set()
+        await finish_analysis.wait()
+        if failed:
+            raise ValueError("LLM_ANALYSIS_FAILED")
         return await assessment(ticket, nodes)
 
     monkeypatch.setattr("app.extraction._assess", slow_assessment)
     client = Client()
-    service = CompilerService(client, heartbeat_seconds=0.005)
+    service = CompilerService(client)
     service.submit(job())
+    await asyncio.wait_for(analysis_started.wait(), timeout=2)
+    try:
+        analysis = [event for _, event in client.events if event.get("stage") == "ANALYZING_EVIDENCE"]
+        assert len(analysis) == 1
+        assert not any(task.get_name().startswith("compiler-heartbeat:") for task in asyncio.all_tasks())
+    finally:
+        finish_analysis.set()
     await service.tasks["knw-1"]
     events = [event for _, event in client.events]
     analysis = [event for event in events if event.get("stage") == "ANALYZING_EVIDENCE"]
-    assert len(analysis) >= 2
+    assert len(analysis) == 1
     assert all(event["progress"] == {"current": None, "total": None} for event in analysis)
-    assert max(event["seq"] for event in analysis) < next(event["seq"] for event in events if event.get("stage") == "BUILDING_WORKFLOW")
+    assert analysis[0]["seq"] < events[-1]["seq"]
+    assert events[-1]["type"] == "FINISHED"
+    assert events[-1]["status"] == ("FAILED" if failed else "SUCCEEDED")
+    if failed:
+        assert events[-1]["error"]["code"] == "LLM_ANALYSIS_FAILED"
+        assert events[-1]["seq"] == 4
+    else:
+        assert analysis[0]["seq"] < next(event["seq"] for event in events if event.get("stage") == "BUILDING_WORKFLOW")
     assert events[-1]["seq"] == len(events)
+    assert all(event["requestId"] == "req-1" for event in analysis)
 
 
 @pytest.mark.asyncio
@@ -154,6 +193,9 @@ async def test_submit_is_idempotent_and_failed_retry_keeps_knowledge_id(monkeypa
     await service.tasks["knw-1"]
     assert service.get("knw-1")["status"] == "SUCCEEDED"
     assert service.get("knw-1")["seq"] > failure["seq"]
+    retries = [event for _, event in client.events if event["requestId"] == "retry-2"]
+    assert retries and retries[-1]["type"] == "FINISHED"
+    assert retries[-1]["status"] == "SUCCEEDED"
 
 
 @pytest.mark.parametrize("ticket,rows,message", [
@@ -185,7 +227,7 @@ async def test_empty_timeline_finishes_without_llm_and_invalid_sql_is_filtered(m
         audit("SELECT 1", id="bad-status", result={"status": {"unexpected": True}}),
     ])
     assert not valid
-    assert [item["reason"].split(":")[0] for item in ignored] == ["invalid_read_sql", "failed_result", "failed_result"]
+    assert [item["reason"] for item in ignored] == ["invalid_read_sql", "failed_result", "failed_result"]
 
 
 @pytest.mark.asyncio

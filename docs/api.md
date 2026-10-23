@@ -1,6 +1,50 @@
 # Runtime与Studio REST API
 
+0.12.2增加中文OpenAPI说明与字段级校验提示；技术路径、参数键和错误码不变。日志增加event/operation检索及`GET /api/v1/studio/logs/raw`、`GET /api/v1/studio/logs/journal`两个只读原文入口，字段、权限和主机授权注意事项见[日志手册](logging.md)。
+
+完整生产接入流程、字段表、请求响应及恢复示例见[Workflow全流程接口文档](workflow-full-api-guide-0.12.0.md)。本文中的Studio接口与生产内部接口认证、参数不同，不应混用。
+
+提取各阶段、执行逐节点回报、保存确认、失败与重试的完整说明见[提取与执行全流程回报说明](callbacks-extraction-execution-guide.md)，包括同阶段多条“第1/6次尝试”的含义。
+
+tec01下游开发请使用[提取与执行协议对齐交付文档](tec01-extraction-execution-alignment.md)：当前源码五阶段各一次进度、不发心跳，运行确认采用AopsResult，终止回报为TERMINATED。
+
+前端表单和画布接入请使用[前端JSON约束与交互指南](frontend-json-contract-0.12.0.md)及[0.12.0完整Schema](json-schema-0.12.0.json)，包括节点配置、参数来源、连线及HITL规则。
+
+## 调用日志（0.12.0）
+
+新增只读`GET /api/v1/studio/logs`和`GET /api/v1/studio/logs/status`，均需Studio管理会话。默认100条、最多200条，单次扫描最多8MiB，不返回全量总数；游标因清理失效返回409。字段与示例见[日志运维手册](logging.md)。只读配置响应新增`logging`策略，业务存储仍为browser-indexeddb。
+
+当前版本0.12.3。日志支持调用配对、中文操作说明和spanId/callId/traceId关联查询。运行回调采用HTTP200、整数status=200及data.runId匹配的AopsResult采纳确认，不再要求saved；提取五阶段各一次进度，终止状态TERMINATED。详见[tec01回调API](tec01-to-itsm-workflow-api.md)。旧0.11.0对齐事项为历史设计。
+
+## 只读运行配置
+
+`GET /api/v1/studio/config` 需要Studio登录Cookie；未登录返回401，不提供修改方法。响应使用显式安全字段白名单，不包含任何令牌或密钥。
+
+```json
+{
+  "runtimeVersion": "0.12.1",
+  "readOnly": true,
+  "storage": "browser-indexeddb",
+  "serverDatabase": false,
+  "executorId": "executor-01",
+  "tec01": {
+    "baseUrl": "https://tec01.internal",
+    "serviceTokenConfigured": true,
+    "runCallbackPath": "/internal/v1/runs/{runId}/callbacks",
+    "extractionCallbackPath": "/internal/v1/extractions/{knowledgeId}/callbacks",
+    "runCallbackUrl": "https://tec01.internal/internal/v1/runs/{runId}/callbacks",
+    "extractionCallbackUrl": "https://tec01.internal/internal/v1/extractions/{knowledgeId}/callbacks",
+    "timeoutSeconds": 20,
+    "callbackMaxAttempts": 6,
+    "callbackWaitSeconds": 70,
+    "extractionMaxAttempts": 6
+  }
+}
+```
+
 默认地址 `http://127.0.0.1:8089`。接口JSON使用UTF-8，`/docs`在内网读取本地组件与 `/openapi.json`，无需Swagger CDN。
+
+下游合法性校验接入见[JSON约束说明](json-validation-contract.md)，完整离线Schema见[0.12.0 Schema集合](json-schema-0.12.0.json)。
 
 ## 认证与凭据
 
@@ -26,7 +70,6 @@ Content-Type: application/json
 | GET | `/internal/v1/runtime/schemas/{schemaName}` | 单个JSON Schema |
 | POST | `/internal/v1/runtime/workflows/validate` | Workflow归一化与校验 |
 | POST | `/internal/v1/runtime/workflows/plan` | 预览/联调计划 |
-| POST | `/internal/v1/runtime/nodes/execute` | 同步真实执行单个节点 |
 | POST | `/internal/v1/extractions/{knowledgeId}` | 异步提取草稿 |
 | POST | `/internal/v1/executions/dispatch` | 首次执行、恢复或重试完整Workflow |
 | POST | `/internal/v1/executions/{runId}/commands` | 暂停或取消 |
@@ -44,13 +87,12 @@ curl 'http://127.0.0.1:8089/internal/v1/runtime/schemas' \
 
 ```json
 {
-  "runtimeVersion": "0.10.0",
+  "runtimeVersion": "0.11.0",
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "schemas": {
     "workflowDefinition": {},
     "dispatch": {},
-    "extraction": {},
-    "singleNode": {}
+    "extraction": {}
   },
   "nodes": [
     {"type":"sql_read","schemaVersion":1,"configSchema":{},"inputSchema":{},"outputSchema":{}}
@@ -58,66 +100,13 @@ curl 'http://127.0.0.1:8089/internal/v1/runtime/schemas' \
 }
 ```
 
-示例中的空对象代表服务实际返回的完整Schema，服务另提供`singleNodeResponse`响应约束。单独读取时使用 `/schemas/workflowDefinition`、`/schemas/dispatch`、`/schemas/extraction`、`/schemas/singleNode` 或 `/schemas/singleNodeResponse`。JSON Schema适合生成表单和字段检查；只读SQL、DAG可达性及前置依赖仍以校验接口为准。
-
-### 真实执行单个节点
-
-```bash
-curl -X POST 'http://127.0.0.1:8089/internal/v1/runtime/nodes/execute' \
-  -H 'Authorization: Bearer <RUNTIME_SERVICE_TOKEN>' \
-  -H 'X-AOPS-Api-Key: <AOPS_API_KEY>' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "requestId":"single-sql-001",
-    "ticketId":100173,
-    "node":{
-      "id":"sql-1",
-      "type":"sql_read",
-      "title":"查询客户",
-      "config":{
-        "databaseRef":"124/aops-t/aops-t/readonly/aops-t",
-        "sqlTemplate":"SELECT id FROM users WHERE name={{customer_name}}"
-      },
-      "inputs":[{"name":"customer_name","type":"string","source":{"kind":"RUN_INPUT","key":"customer_name"}}]
-    },
-    "inputs":{"customer_name":"王五"}
-  }'
-```
-
-返回结构：
-
-```json
-{
-  "requestId":"single-sql-001",
-  "nodeId":"sql-1",
-  "status":"SUCCEEDED",
-  "output":{"status":0,"rowCount":1,"data":[{"id":"C001"}]},
-  "diagnostic":null,
-  "interaction":null,
-  "handlerVersion":"1.0.0"
-}
-```
-
-该接口只执行提交的节点，不执行其上游；调用方必须传入已经解析好的 `inputs`。含 `sql_read` 时工单ID与API Key必填。参数在服务端进行类型校验并安全渲染SQL，comment固定为 `#uatu-100173`。
-
-相同 `requestId` 与相同内容在当前服务进程内复用原结果；同ID不同内容返回409。失败重试、HITL回复和新的执行必须使用新的 `requestId`。此内存幂等记录不跨服务重启。
-
-单节点 `hitl_form` 首次返回 `WAITING_INPUT` 与 `interaction`；提交新requestId及相同node/inputs，并附：
-
-```json
-{"resumePayload":{"nodeId":"input-1","action":"SUBMIT","values":{"customer_id":"C001","limit":20}}}
-```
-
-这类调用同步返回结果，由调用方自行保存；不会创建完整运行或自动产生运行回调。
+示例中的空对象代表服务实际返回的完整Schema。单独读取时使用 `/schemas/workflowDefinition`、`/schemas/dispatch` 或 `/schemas/extraction`。JSON Schema适合生成表单和字段检查；只读SQL、DAG可达性及前置依赖仍以校验接口为准。
 
 ## Studio接口
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| GET | `/api/v1/studio/catalog`、`/api/v1/studio/nodes` | Node信息 |
-| PATCH | `/api/v1/studio/nodes/{type}/{schemaVersion}` | 校验Node显示/默认值，实际由浏览器保存 |
-| POST | `/api/v1/studio/node-debug-runs` | 单节点真实调试 |
-| POST | `/api/v1/studio/node-debug-runs/reply` | 单节点人工表单回复 |
+| GET | `/api/v1/studio/catalog` | 画布可用节点目录 |
 | POST | `/api/v1/studio/extractions` | JSON证据异步抽取 |
 | POST | `/api/v1/studio/extractions/from-ticket` | 按工单ID取证并异步抽取 |
 | POST | `/api/v1/studio/compiler/preview`、`/compiler/from-ticket` | 同步抽取预览 |
@@ -125,9 +114,10 @@ curl -X POST 'http://127.0.0.1:8089/internal/v1/runtime/nodes/execute' \
 | POST | `/api/v1/studio/workflows/plan` | 校验并生成本地计划材料 |
 | POST | `/api/v1/studio/executions/dispatch` | 启动/继续本地计划 |
 | POST | `/api/v1/studio/executions/{runId}/commands` | 暂停/取消 |
+| GET | `/api/v1/studio/executions/{runId}` | 查询本执行器实例是否仍有活动任务 |
 | GET | `/api/v1/studio/events/{streamId}?after=0` | 读取新进度与节点事件 |
 
-后台无数据库，Node设置、知识和计划均由浏览器保存；API仅负责计算和活动执行。事件接口是短期内存缓存，页面按事件游标轮询，并把已知结果存回IndexedDB。
+后台无数据库，知识、计划与结果由浏览器保存；API仅负责计算和活动执行。事件接口是短期内存缓存，页面按事件游标轮询，并把已知结果存回IndexedDB。
 
 ### JSON抽取
 
@@ -159,13 +149,17 @@ curl -X POST 'http://127.0.0.1:8089/internal/v1/runtime/nodes/execute' \
 
 按ID取证请求为 `{"knowledgeId":"local_knowledge_2","requestId":"extract_2","ticketId":100173,"syncTec01":false}`，额外传API Key。只有此Studio入口会调用CLI获取证据；tec01集成始终直接传data对象与数组。
 
-### 本地计划执行
+### 最小流程与本地计划执行
+
+测试一条SQL时创建“SQL读→结束”的最小Workflow，保存知识后按创建运行、校验计划、确认执行的流程操作。表单和条件同样放入Workflow测试，统一使用以下计划与下发接口。
 
 先向 `/api/v1/studio/workflows/plan` 提交 `workflowDefinition`、`ticketId`、`inputs`。它返回规范化定义、内容哈希、必填参数和渲染计划，不会执行SQL。
 
 执行请求与内部dispatch相同，可加 `syncTec01:false`。页面保存完整快照、`nodeStates`、`nodeOutputs`、`selectedRoutes`和逐节点结果。继续时换新dispatchId，已成功节点不重放；表单恢复增加 `resumePayload`。暂停/取消命令只包含 `commandId` 与 `type:"PAUSE"|"CANCEL"`。
 
 SQL调试固定为真实执行。API Key每次执行或恢复临时提供，不进入浏览器数据库、事件或导出包。取消从页面移除计划，知识仍可再次创建新计划。
+
+0.11.0页面先无Key确认计划，再提供Key执行；确认摘要与时间保存在浏览器。新的Studio下发带可选`planMaterialHash`，服务端据当前定义、工单和参数重算校验，不一致返回409。为兼容旧Studio API，直接请求暂未强制此字段；它防止陈旧确认，不是生产用户授权。
 
 ### 可选同步tec01
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+from string import Formatter
+from urllib.parse import urlsplit, urlunsplit
 from functools import lru_cache
 from pathlib import Path
 
@@ -33,7 +35,11 @@ class Settings(BaseSettings):
 
     tec01_base_url: str = ""
     tec01_service_token: str = ""
+    tec01_run_callback_path: str = "/internal/v1/runs/{runId}/callbacks"
+    tec01_extraction_callback_path: str = "/internal/v1/extractions/{knowledgeId}/callbacks"
     tec01_timeout_seconds: int = Field(default=20, ge=1, le=180)
+    tec01_callback_max_attempts: int = Field(default=6, ge=1, le=10)
+    tec01_callback_wait_seconds: int = Field(default=70, ge=1, le=300)
     executor_id: str = "executor-01"
     executor_max_active_runs: int = Field(default=32, ge=1, le=128)
     executor_max_active_cli: int = Field(default=8, ge=1, le=64)
@@ -41,6 +47,58 @@ class Settings(BaseSettings):
     node_timeout_seconds: int = Field(default=600, ge=1, le=7200)
     workflow_base_path: str = ""
     static_dir: Path = Path("frontend/dist")
+    log_level: str = "INFO"
+    log_dir: Path = Path("logs")
+    log_retention_days: int = Field(default=7, ge=1, le=365)
+    log_max_total_mb: int = Field(default=512, ge=1, le=10240)
+    log_max_file_mb: int = Field(default=16, ge=1, le=512)
+    log_cleanup_interval_seconds: int = Field(default=60, ge=1, le=3600)
+
+    @field_validator("log_level")
+    @classmethod
+    def validate_log_level(cls, value: str) -> str:
+        value = value.upper()
+        if value not in {"DEBUG", "INFO", "WARNING", "ERROR"}:
+            raise ValueError("LOG_LEVEL仅支持DEBUG/INFO/WARNING/ERROR")
+        return value
+
+    @field_validator("tec01_run_callback_path", "tec01_extraction_callback_path")
+    @classmethod
+    def validate_callback_path(cls, value: str, info) -> str:
+        required = "runId" if info.field_name == "tec01_run_callback_path" else "knowledgeId"
+        if not value.startswith("/") or "//" in value or any(c in value for c in "?#\\") or any(ord(c) <= 32 or ord(c) == 127 for c in value):
+            raise ValueError("回报路径必须为以 / 开头的相对路径，不能包含空白、查询参数或完整URL")
+        if any(part in {".", ".."} for part in value.split("/")) or "%" in value:
+            raise ValueError("回报路径不能包含路径跳转或预编码字符")
+        try:
+            fields = [(field, spec, conversion) for _, field, spec, conversion in Formatter().parse(value) if field is not None]
+        except ValueError as exc:
+            raise ValueError("回报路径占位符格式错误") from exc
+        if fields != [(required, "", None)] or "{{" in value or "}}" in value:
+            raise ValueError(f"回报路径必须且仅能包含一个 {{{required}}} 占位符")
+        return value
+
+    def studio_configuration(self) -> dict:
+        # Explicit allowlist: never serialize Settings or include credentials.
+        parsed = urlsplit(self.tec01_base_url)
+        host = parsed.netloc.rsplit("@", 1)[-1]
+        base_url = urlunsplit((parsed.scheme, host, parsed.path, "", ""))
+        return {
+            "readOnly": True, "storage": "browser-indexeddb", "serverDatabase": False,
+            "executorId": self.executor_id,
+            "logging": {"directory": str(self.log_dir.absolute()), "level": self.log_level, "retentionDays": self.log_retention_days, "maxTotalBytes": self.log_max_total_mb * 1024 * 1024, "maxFileBytes": min(self.log_max_file_mb, self.log_max_total_mb) * 1024 * 1024, "cleanupIntervalSeconds": self.log_cleanup_interval_seconds},
+            "tec01": {
+                "baseUrl": base_url, "serviceTokenConfigured": bool(self.tec01_service_token),
+                "runCallbackPath": self.tec01_run_callback_path,
+                "extractionCallbackPath": self.tec01_extraction_callback_path,
+                "runCallbackUrl": base_url + self.tec01_run_callback_path if base_url else "",
+                "extractionCallbackUrl": base_url + self.tec01_extraction_callback_path if base_url else "",
+                "timeoutSeconds": min(self.tec01_timeout_seconds, 30),
+                "callbackMaxAttempts": self.tec01_callback_max_attempts,
+                "callbackWaitSeconds": self.tec01_callback_wait_seconds,
+                "extractionMaxAttempts": 6,
+            },
+        }
 
     @field_validator("aops_base_url", "llm_base_url", "tec01_base_url")
     @classmethod

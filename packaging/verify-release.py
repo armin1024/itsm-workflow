@@ -8,7 +8,7 @@ with tempfile.TemporaryDirectory() as directory:
     assert not forbidden, f"macOS metadata found: {forbidden[:5]}"
     static_root = package_root / "frontend" / "dist"
     if not static_root.is_dir(): static_root = package_root.parent / "frontend" / "dist"
-    os.environ.update({"ENVIRONMENT": "test", "STATIC_DIR": str(static_root), "STUDIO_ADMIN_TOKEN": "release-test-token"})
+    os.environ.update({"ENVIRONMENT": "test", "STATIC_DIR": str(static_root), "STUDIO_ADMIN_TOKEN": "release-test-token", "LOG_DIR": str(Path(directory) / "logs")})
     from fastapi.testclient import TestClient
     from app import __version__
     from app.main import app
@@ -29,6 +29,23 @@ with tempfile.TemporaryDirectory() as directory:
         assert client.get("/api/v1/studio/catalog").status_code == 401
         assert client.post("/api/v1/studio/session", json={"token": "release-test-token"}).status_code == 200
         assert client.get("/api/v1/studio/catalog").status_code == 200
+        configuration = client.get("/api/v1/studio/config")
+        assert configuration.status_code == 200
+        assert configuration.json()["readOnly"] is True
+        assert configuration.json()["serverDatabase"] is False
+        assert configuration.json()["logging"]["maxTotalBytes"] == 512 * 1024 * 1024
+        assert client.get("/api/v1/studio/logs/status").json()["retentionDays"] == 7
+        assert client.get("/api/v1/studio/logs").status_code == 200
+        assert "STUDIO_DATABASE_PATH=" not in (package_root / "service.env.example").read_text()
+        paths = client.get("/openapi.json").json()["paths"]
+        for removed in (
+            "/api/v1/studio/nodes",
+            "/api/v1/studio/nodes/{node_type}/{schema_version}",
+            "/api/v1/studio/node-debug-runs",
+            "/api/v1/studio/node-debug-runs/reply",
+            "/internal/v1/runtime/nodes/execute",
+        ):
+            assert removed not in paths, f"Obsolete node debug API: {removed}"
         assert client.get("/api/v1/auth/me").status_code == 404
         assert client.get("/mcp").status_code != 200
         page = client.get("/")

@@ -61,21 +61,58 @@ def test_local_dispatch_uses_same_runtime_without_tec01(client):
     assert final["snapshot"]["nodeStates"]["done"] == "SUCCEEDED"
 
 
-def test_plan_preview_and_single_hitl_reply(client):
+def test_plan_preview_and_workflow_hitl_resume(client):
     login(client)
     plan = client.post("/api/v1/studio/workflows/plan", json={"workflowDefinition": workflow(), "ticketId": 100173, "inputs": {}})
     assert plan.status_code == 200 and plan.json()["valid"]
     node = {"id": "form", "type": "hitl_form", "title": "输入编号", "config": {"title": "输入编号", "fields": [{"name": "id", "label": "客户编号", "type": "integer", "required": True, "minimum": 1}]}}
-    response = client.post("/api/v1/studio/node-debug-runs/reply", json={"node": node, "response": {"action": "SUBMIT", "values": {"id": 3}}})
-    assert response.status_code == 200 and response.json()["output"]["values"] == {"id": 3}
-    invalid = client.post("/api/v1/studio/node-debug-runs/reply", json={"node": node, "response": {"action": "SUBMIT", "values": {"id": 0}}})
-    assert invalid.status_code == 422
+    flow = {"entryNodeId": "form", "nodes": [node, {"id": "done", "type": "end", "title": "完成"}], "edges": [{"id": "next", "source": "form", "target": "done"}]}
+    validated = validate_workflow(flow, "TEST")
+    request = {"dispatchId": "local-hitl-open", "runId": "local-hitl", "ticketId": 100173, "workflowContentHash": validated["workflowContentHash"], "workflowSnapshot": validated["normalizedDefinition"], "syncTec01": False}
+    assert client.post("/api/v1/studio/executions/dispatch", json=request).status_code == 200
+
+    def completed_snapshot():
+        for _ in range(100):
+            events = client.get("/api/v1/studio/events/local-hitl").json()
+            if not events["active"]:
+                return events["events"][-1]["snapshot"]
+            time.sleep(0.01)
+        pytest.fail("本地流程未释放")
+
+    waiting = completed_snapshot()
+    assert waiting["status"] == "WAITING_INPUT" and waiting["interaction"]["kind"] == "HITL_FORM"
+    invalid = {**waiting, "dispatchId": "local-hitl-invalid", "syncTec01": False, "resumePayload": {"nodeId": "form", "action": "SUBMIT", "values": {"id": 0}}}
+    assert client.post("/api/v1/studio/executions/dispatch", json=invalid).status_code == 200
+    assert completed_snapshot()["status"] == "FAILED"
+    resume = {**waiting, "dispatchId": "local-hitl-valid", "syncTec01": False, "resumePayload": {"nodeId": "form", "action": "SUBMIT", "values": {"id": 3}}}
+    assert client.post("/api/v1/studio/executions/dispatch", json=resume).status_code == 200
+    result = completed_snapshot()
+    assert result["status"] == "SUCCEEDED" and result["nodeOutputs"]["form"]["values"] == {"id": 3}
 
 
 def test_sql_requires_ephemeral_header(client):
     login(client)
-    response = client.post("/api/v1/studio/node-debug-runs", json={"ticketId": 100173, "node": {"id": "sql", "type": "sql_read", "title": "查询", "config": {"databaseRef": "db/test", "sqlTemplate": "SELECT 1"}}, "inputs": {}})
-    assert response.status_code == 422 and "AOPS_API_KEY" in response.text
+    flow = {"entryNodeId": "sql", "nodes": [{"id": "sql", "type": "sql_read", "title": "查询", "config": {"databaseRef": "db/test", "sqlTemplate": "SELECT 1"}}], "edges": []}
+    validated = validate_workflow(flow, "TEST")
+    response = client.post("/api/v1/studio/executions/dispatch", json={"dispatchId": "local-missing-key", "runId": "local-sql", "ticketId": 100173, "workflowSnapshot": validated["normalizedDefinition"], "workflowContentHash": validated["workflowContentHash"]})
+    assert response.status_code == 422 and "X-AOPS-Api-Key" in response.text
+
+
+def test_removed_node_management_and_debug_interfaces_are_not_exposed(client):
+    login(client)
+    paths = client.get("/openapi.json").json()["paths"]
+    removed = [
+        ("GET", "/api/v1/studio/nodes"),
+        ("PATCH", "/api/v1/studio/nodes/sql_read/1"),
+        ("POST", "/api/v1/studio/node-debug-runs"),
+        ("POST", "/api/v1/studio/node-debug-runs/reply"),
+        ("POST", "/internal/v1/runtime/nodes/execute"),
+    ]
+    for method, path in removed:
+        assert path not in paths
+        assert client.request(method, path, json={} if method != "GET" else None).status_code in {404, 405}
+    assert "/api/v1/studio/nodes/{node_type}/{schema_version}" not in paths
+    assert "/api/v1/studio/executions/dispatch" in paths
 
 
 def test_optional_sync_requires_config_and_missing_stream(client, monkeypatch):

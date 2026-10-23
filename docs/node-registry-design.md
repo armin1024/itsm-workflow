@@ -21,7 +21,7 @@ GET /internal/v1/runtime/schemas
 GET /internal/v1/runtime/schemas/workflowDefinition
 ```
 
-Catalog包含节点名称、类型、Schema/Handler版本和UI信息。schemas端点返回完整Workflow、dispatch、extraction、singleNode约束，并逐节点返回 `configSchema/inputSchema/outputSchema`，便于tec01或其他平台二次开发。
+Catalog包含节点名称、类型、Schema/Handler版本和UI信息。schemas端点返回完整Workflow、dispatch、extraction约束，并逐节点返回 `configSchema/inputSchema/outputSchema`，便于tec01或其他平台二次开发。
 
 ```json
 {
@@ -38,7 +38,7 @@ Catalog包含节点名称、类型、Schema/Handler版本和UI信息。schemas�
 
 示例空对象代表实际完整Schema。结构字段通过Schema检查；DAG可达性、上游依赖、只读SQL等由Workflow校验接口进一步检查。
 
-Studio的Node管理只调整当前浏览器中的启停、显示名称、说明与调试默认值，不修改服务端Handler或Catalog。正式新增节点需要开发、注册、测试和发布服务。
+画布根据服务端Catalog提供可用节点。节点类型、校验规则和Handler由代码统一管理，新增节点需要开发、注册、测试和发布服务。
 
 ## SQL读与条件分支
 
@@ -121,18 +121,18 @@ SQL读 → 条件 rowCount > 0 → 人工表单 → 后续SQL
 
 表单支持字符串、整数、数字、布尔值及必填、长度、数值范围和枚举约束。tec01页面/Hermes收集完整后展示确认，Executor恢复时再次校验值。
 
-## 单节点执行
+## 最小Workflow测试
 
-`POST /internal/v1/runtime/nodes/execute`接收node和已解析inputs，只执行该节点；不自动运行上游，也不替调用方持久化结果。
+测试某项操作时在Studio手工新建最小流程。例如SQL读连接结束节点，保存为本地知识，创建运行、核对计划后执行；必须提供工单ID和临时API Key。需要验证前置输出绑定、条件或人工表单时，把相关节点加入同一测试Workflow。
 
-条件节点单步测试使用 `config.rule` 和传入的上下文。表单第一次执行返回等待交互；使用新requestId提交 `resumePayload` 后返回values。SQL节点使用真实CLI，必须传当前工单ID和请求头API Key。
+三方也使用相同的Workflow校验与dispatch接口，按Catalog和JSON Schema构造最小定义，无需专用调试接口。
 
 ## 新增节点
 
 1. 定义config/input/output Schema。
 2. 实现Handler及安全校验。
-3. 注册到Node Registry并提供调试默认值。
-4. 验证单节点、Workflow依赖和中断恢复语义。
+3. 注册到Node Registry并提供画布配置Schema。
+4. 使用最小Workflow验证操作、依赖和中断恢复语义。
 5. 发布新Catalog，tec01重新获取约束并展示配置表单。
 
 JSON定义不能包含Python代码、任意shell命令或凭据。

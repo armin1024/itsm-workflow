@@ -10,3 +10,4 @@ frontend/dist/
 dist/
 output/
 *.db
+logs/

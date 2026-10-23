@@ -6,6 +6,7 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
+from app import __version__
 from app.runtime import NODE_REGISTRY
 from app.workflow import WorkflowDefinition
 
@@ -86,5 +87,5 @@ def render_plan(*, workflow_version_id: str, workflow_content_hash: str, workflo
         "renderedPlan": {"nodes": nodes, "edges": normalized["edges"], "riskSummary": risks, "requiredInputs": list(required.values())},
         "planMaterialHash": canonical_hash(material),
         "catalogDigest": validated["catalogDigest"],
-        "runtimeVersion": "0.10.0",
+        "runtimeVersion": __version__,
     }

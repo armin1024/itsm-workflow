@@ -1,5 +1,7 @@
 # tec01与itsm-workflow接口约定
 
+当前约定：正常执行为内存连续推进，节点回报不传完整执行快照；运行回调返回HTTP200、整数status=200及匹配data.runId的AopsResult采纳确认，不要求saved或节点身份回显。提取每阶段一次，终止回报TERMINATED。字段以[当前回报契约](tec01-to-itsm-workflow-api.md)及[交付说明](tec01-extraction-execution-alignment.md)为准；0.11.0严格saved确认属于历史设计。
+
 tec01主动提交工单数据、下发Workflow和控制命令。itsm-workflow通过统一回调返回提取进度、节点开始/完成和运行释放。详细字段以两份方向API文档为准：
 
 - [itsm-workflow提供给tec01](itsm-workflow-to-tec01-api.md)
@@ -17,7 +19,7 @@ GET /internal/v1/runtime/schemas
 GET /internal/v1/runtime/schemas/{schemaName}
 ```
 
-schemas返回 `runtimeVersion/jsonSchemaDialect/schemas/nodes`。`schemas`含 `workflowDefinition/dispatch/extraction/singleNode`，另有`singleNodeResponse`响应约束；`nodes`含各节点 `configSchema/inputSchema/outputSchema`。单Schema请求使用相应名称。
+schemas返回 `runtimeVersion/jsonSchemaDialect/schemas/nodes`。`schemas`含 `workflowDefinition/dispatch/extraction`；`nodes`含各节点 `configSchema/inputSchema/outputSchema`。单Schema请求使用相应名称。
 
 当前节点为SQL读、条件判断、人工表单和结束。tec01可按Schema生成配置输入框；DAG、依赖和只读SQL仍调用发布校验。
 
@@ -63,11 +65,12 @@ tec01先创建EXTRACTING记录，再传真实的info.data对象和audit_timeline
 POST /internal/v1/extractions/{knowledgeId}/callbacks
 ```
 
-阶段 `FILTERING_OPERATIONS → PARAMETERIZING_SQL → ANALYZING_EVIDENCE → BUILDING_WORKFLOW → VALIDATING_WORKFLOW`。分析阶段进入时立即上报，之后每15秒心跳。
+阶段 `FILTERING_OPERATIONS → PARAMETERIZING_SQL → ANALYZING_EVIDENCE → BUILDING_WORKFLOW → VALIDATING_WORKFLOW`。分析阶段仅进入时上报一次，不再发送定时心跳；请求超时机制不变。
 
 ```json
 {
   "type":"PROGRESS",
+  "requestId":"extract_100173_1",
   "seq":4,
   "stage":"ANALYZING_EVIDENCE",
   "message":"正在分析工单和操作记录",
@@ -78,7 +81,7 @@ POST /internal/v1/extractions/{knowledgeId}/callbacks
 
 终态为 `FINISHED/SUCCEEDED`，带proposal、validation、diagnostics；失败为 `FINISHED/FAILED`，带稳定error。成功草稿的名称和摘要使用中文，完整筛选账本包含重复SQL。
 
-**失败重试约定：** tec01在接受新的requestId进行显式重试时，将同一knowledgeId重新置为EXTRACTING，并重置该次提取的终态去重窗口。FINISHED“只接受第一次”仅适用于同一次提取，避免上一次FAILED挡住下一次SUCCEEDED。暂存记录仍存在时，执行侧seq继续递增；tec01不得假定跨进程重启后seq仍连续。
+**失败重试约定：** tec01在接受新的requestId进行显式重试时，将同一knowledgeId重新置为EXTRACTING，按knowledgeId+requestId隔离本次进度水位与终态去重窗口。PROGRESS和FINISHED均携带原requestId，旧请求迟到回报不能覆盖当前尝试。FINISHED“只接受第一次”仅适用于同一次提取，避免上一次FAILED挡住下一次SUCCEEDED。进度水位记录最大已接受seq而非事件条数。暂存记录仍存在时，执行侧seq继续递增；tec01不得假定跨进程重启后seq仍连续。
 
 ## 完整Workflow下发
 
@@ -146,10 +149,10 @@ POST /internal/v1/runs/{runId}/callbacks
 | NODE_STARTED | `{attemptId}:started` |
 | NODE_COMPLETED | `{attemptId}:completed` |
 | RUN_RELEASED | `{dispatchId}:released` |
-| PROGRESS | `{knowledgeId}:{seq}` |
-| FINISHED | `{knowledgeId}:finished` |
+| PROGRESS | `{knowledgeId}:{requestId}:{seq}` |
+| FINISHED | `{knowledgeId}:{requestId}:finished` |
 
-成功HTTP200，响应使用 `{status:200,msg:"success",data:{...}}`。HTTP5xx/超时首次失败后重试5次，退避1/2/4/8/16秒，始终复用同一请求ID；4xx不重试。重复回调返回200且不覆盖已提交状态。
+运行回调要求HTTP200、整数status=200、data.runId匹配的AopsResult，不要求saved或其他身份回显；tec01提交并采纳后才确认。旧调度优先409，当前调度已保存的相同消息重试优先200，再拒绝新终态冲突。5xx、连接异常和超时默认最多总6次请求，退避1/2/4/8/16秒，总等待70秒；4xx及无效确认立即停止，不再开启第二轮远程停止回报重试。提取回调保留原额外5次重试策略，不受运行回报总等待限制；确认要求HTTP200、status=200及匹配的data.knowledgeId。PROGRESS/FINISHED都携带原requestId，tec01按knowledgeId+requestId隔离尝试，进度水位取最大已接受seq；旧请求迟到回报忽略，不覆盖当前提取。详见方向API文档。
 
 ## 人工表单与Hermes
 
@@ -180,20 +183,14 @@ POST /internal/v1/executions/{runId}/commands
 {"commandId":"cmd_1","type":"PAUSE"}
 ```
 
-取消使用CANCEL。接受命令HTTP200不代表已暂停；以RUN_RELEASED的最终状态为准。暂停在安全边界生效，取消终止CLI；外部结果不确定时标为UNKNOWN。WAITING_INPUT、PAUSED、FAILED、CANCELLED、UNKNOWN、SUCCEEDED都会释放执行资源。
+取消使用CANCEL。接受命令HTTP200不代表已暂停；以RUN_RELEASED的最终状态为准。暂停在安全边界生效，取消终止CLI；外部结果不确定时标为UNKNOWN。WAITING_INPUT、PAUSED、FAILED、TERMINATED、UNKNOWN、SUCCEEDED都会释放执行资源。
 
-## 单节点接入
+## 最小Workflow测试
 
-```http
-POST /internal/v1/runtime/nodes/execute
-
-{"requestId":"single_1","ticketId":100173,"node":{},"inputs":{},"resumePayload":null}
-```
-
-传完整node及已解析inputs，返回 `requestId/nodeId/status/output/diagnostic/interaction/handlerVersion`。SQL读额外需要API Key；HITL回复使用新requestId。结果同步返回，调用方自行保存。该接口不自动执行上游或生成完整运行回调。
+验证一条SQL时构造“SQL读→结束”的最小Workflow。调用validate取得规范化定义和内容哈希，再通过dispatch执行。请求仍需要工单ID及当前API Key；状态通过统一运行回调返回。HITL和条件测试把相应节点加入同一Workflow，复用暂停、继续和取消协议。
 
 ## Studio与存储
 
-Studio用管理Token登录，知识、计划、结果、Node默认值存浏览器IndexedDB；后台无数据库。默认不访问tec01，勾选同步才回调既有知识/运行ID。暂停保存本地快照，继续提交新dispatchId；取消从本地计划列表移除。Key不入浏览器存储或导出文件。
+Studio用管理Token登录，知识、计划和结果存浏览器IndexedDB；后台无数据库。默认不访问tec01，勾选同步才回调既有知识/运行ID。暂停保存本地快照，继续提交新dispatchId；取消从本地计划列表移除。Key不入浏览器存储或导出文件。
 
 服务内存只用于当前任务和短期幂等/事件记录。重启后由tec01或浏览器重新下发最近已知状态；它不能把未确认的外部SQL当作未执行。

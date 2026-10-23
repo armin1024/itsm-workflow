@@ -39,9 +39,6 @@ export type NodeCatalogItem = {
   inputSchema: Record<string, unknown>;
   outputSchema: Record<string, unknown>;
   uiSchema: Record<string, unknown>;
-  allowSingleNodeDebug: boolean;
-  studioEnabled?: boolean;
-  studioUpdatedAt?: string;
 };
 
 export type WorkflowEdge = {

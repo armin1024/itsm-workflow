@@ -64,7 +64,7 @@ async def execute_single_node(*, node: dict[str, Any], inputs: dict[str, Any], m
     manifest = NODE_REGISTRY.validate_node(node)
     if node.get("handlerVersion") and node["handlerVersion"] != manifest.handler_version:
         raise ValueError(f"节点 {node.get('id')} 的Handler版本不可用：{node['handlerVersion']}")
-    if execution_mode not in manifest.supported_modes or not manifest.allow_single_node_debug:
+    if execution_mode not in manifest.supported_modes:
         raise ValueError(f"节点 {manifest.type} 不允许 {execution_mode.value} 执行")
     input_errors = list(Draft202012Validator(manifest.input_schema).iter_errors(inputs))
     for item in node.get("inputs", []):
@@ -88,7 +88,7 @@ async def execute_single_node(*, node: dict[str, Any], inputs: dict[str, Any], m
             result = await execute_sql_read(database_ref=str(node["config"]["databaseRef"]), sql=render_sql(node, inputs), ticket_id=ticket_id, api_key=api_key, timeout_seconds=int(node.get("timeoutSeconds") or 600), cancel_requested=cancel_requested)
         except CliExecutionError as exc:
             stdout, stdout_cut = redact_diagnostic(exc.stdout, 32 * 1024); stderr, stderr_cut = redact_diagnostic(exc.stderr, 16 * 1024)
-            status = "CANCELLED" if exc.code == "CANCELLED" else "FAILED"
+            status = "TERMINATED" if exc.code == "CANCELLED" else "FAILED"
             return {"status": status, "output": None, "diagnostic": {"errorCode": exc.code, "message": str(exc), "exitCode": exc.exit_code, "stdout": stdout, "stderr": stderr, "truncated": exc.truncated or stdout_cut or stderr_cut}, "interrupt": None, "handlerVersion": manifest.handler_version}
         output = {key: result.payload[key] for key in ("status", "data", "rowCount") if key in result.payload}
         if isinstance(output.get("data"), list): output.setdefault("rowCount", len(output["data"]))

@@ -1,0 +1,1066 @@
+{
+  "runtimeVersion": "0.10.1",
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "schemas": {
+    "workflowDefinition": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "InputSource": {
+          "properties": {
+            "kind": {
+              "enum": [
+                "RUN_INPUT",
+                "NODE_OUTPUT",
+                "LITERAL"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "key": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Key"
+            },
+            "nodeId": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Nodeid"
+            },
+            "jsonPointer": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Jsonpointer"
+            },
+            "value": {
+              "default": null,
+              "title": "Value"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "title": "InputSource",
+          "type": "object"
+        },
+        "NodeInput": {
+          "properties": {
+            "name": {
+              "maxLength": 80,
+              "minLength": 1,
+              "title": "Name",
+              "type": "string"
+            },
+            "type": {
+              "default": "string",
+              "enum": [
+                "string",
+                "number",
+                "integer",
+                "boolean",
+                "object",
+                "array"
+              ],
+              "title": "Type",
+              "type": "string"
+            },
+            "description": {
+              "default": "",
+              "maxLength": 500,
+              "title": "Description",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/$defs/InputSource"
+            },
+            "required": {
+              "default": true,
+              "title": "Required",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "source"
+          ],
+          "title": "NodeInput",
+          "type": "object"
+        },
+        "WorkflowEdge": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "source": {
+              "title": "Source",
+              "type": "string"
+            },
+            "target": {
+              "title": "Target",
+              "type": "string"
+            },
+            "kind": {
+              "default": "NORMAL",
+              "enum": [
+                "NORMAL",
+                "CONDITION"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "label": {
+              "default": "",
+              "title": "Label",
+              "type": "string"
+            },
+            "condition": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Condition"
+            },
+            "default": {
+              "type": "boolean",
+              "default": false,
+              "title": "Default"
+            }
+          },
+          "required": [
+            "id",
+            "source",
+            "target"
+          ],
+          "title": "WorkflowEdge",
+          "type": "object"
+        },
+        "WorkflowNode": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "type": {
+              "maxLength": 80,
+              "minLength": 1,
+              "title": "Type",
+              "type": "string",
+              "enum": [
+                "condition",
+                "end",
+                "hitl_form",
+                "sql_read"
+              ]
+            },
+            "schemaVersion": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Schemaversion",
+              "type": "integer"
+            },
+            "handlerVersion": {
+              "anyOf": [
+                {
+                  "maxLength": 40,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Handlerversion"
+            },
+            "title": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Title",
+              "type": "string"
+            },
+            "config": {
+              "additionalProperties": true,
+              "title": "Config",
+              "type": "object"
+            },
+            "inputs": {
+              "items": {
+                "$ref": "#/$defs/NodeInput"
+              },
+              "title": "Inputs",
+              "type": "array"
+            },
+            "approvalPolicy": {
+              "default": "PLAN",
+              "enum": [
+                "NONE",
+                "PLAN",
+                "NODE"
+              ],
+              "title": "Approvalpolicy",
+              "type": "string"
+            },
+            "timeoutSeconds": {
+              "default": 600,
+              "maximum": 7200,
+              "minimum": 1,
+              "title": "Timeoutseconds",
+              "type": "integer"
+            },
+            "uiPosition": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "type": "number"
+                  },
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Uiposition"
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "title"
+          ],
+          "title": "WorkflowNode",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "schemaVersion": {
+          "default": 1,
+          "enum": [
+            1,
+            2
+          ],
+          "title": "Schemaversion",
+          "type": "integer"
+        },
+        "catalogDigest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Catalogdigest"
+        },
+        "entryNodeId": {
+          "title": "Entrynodeid",
+          "type": "string"
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/$defs/WorkflowNode"
+          },
+          "maxItems": 500,
+          "minItems": 1,
+          "title": "Nodes",
+          "type": "array"
+        },
+        "edges": {
+          "items": {
+            "$ref": "#/$defs/WorkflowEdge"
+          },
+          "maxItems": 1000,
+          "title": "Edges",
+          "type": "array"
+        }
+      },
+      "required": [
+        "entryNodeId",
+        "nodes"
+      ],
+      "title": "WorkflowDefinition",
+      "type": "object"
+    },
+    "dispatch": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "dispatchId": {
+          "maxLength": 160,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "title": "Dispatchid",
+          "type": "string"
+        },
+        "runId": {
+          "maxLength": 160,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "title": "Runid",
+          "type": "string"
+        },
+        "ticketId": {
+          "exclusiveMinimum": 0,
+          "title": "Ticketid",
+          "type": "integer"
+        },
+        "workflowContentHash": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Workflowcontenthash",
+          "type": "string"
+        },
+        "workflowSnapshot": {
+          "$ref": "#/$defs/WorkflowDefinition"
+        },
+        "runInputs": {
+          "additionalProperties": true,
+          "title": "Runinputs",
+          "type": "object"
+        },
+        "nodeStates": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Nodestates",
+          "type": "object"
+        },
+        "nodeOutputs": {
+          "additionalProperties": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Nodeoutputs",
+          "type": "object"
+        },
+        "nodeResults": {
+          "additionalProperties": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Noderesults",
+          "type": "object"
+        },
+        "currentNodeId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Currentnodeid"
+        },
+        "selectedRoutes": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Selectedroutes",
+          "type": "object"
+        },
+        "resumePayload": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resumepayload"
+        }
+      },
+      "required": [
+        "dispatchId",
+        "runId",
+        "ticketId",
+        "workflowContentHash",
+        "workflowSnapshot"
+      ],
+      "title": "ExecutionDispatchRequest",
+      "type": "object",
+      "$defs": {
+        "InputSource": {
+          "properties": {
+            "kind": {
+              "enum": [
+                "RUN_INPUT",
+                "NODE_OUTPUT",
+                "LITERAL"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "key": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Key"
+            },
+            "nodeId": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Nodeid"
+            },
+            "jsonPointer": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Jsonpointer"
+            },
+            "value": {
+              "default": null,
+              "title": "Value"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "title": "InputSource",
+          "type": "object"
+        },
+        "NodeInput": {
+          "properties": {
+            "name": {
+              "maxLength": 80,
+              "minLength": 1,
+              "title": "Name",
+              "type": "string"
+            },
+            "type": {
+              "default": "string",
+              "enum": [
+                "string",
+                "number",
+                "integer",
+                "boolean",
+                "object",
+                "array"
+              ],
+              "title": "Type",
+              "type": "string"
+            },
+            "description": {
+              "default": "",
+              "maxLength": 500,
+              "title": "Description",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/$defs/InputSource"
+            },
+            "required": {
+              "default": true,
+              "title": "Required",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "source"
+          ],
+          "title": "NodeInput",
+          "type": "object"
+        },
+        "WorkflowEdge": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "source": {
+              "title": "Source",
+              "type": "string"
+            },
+            "target": {
+              "title": "Target",
+              "type": "string"
+            },
+            "kind": {
+              "default": "NORMAL",
+              "enum": [
+                "NORMAL",
+                "CONDITION"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "label": {
+              "default": "",
+              "title": "Label",
+              "type": "string"
+            },
+            "condition": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Condition"
+            },
+            "default": {
+              "type": "boolean",
+              "default": false,
+              "title": "Default"
+            }
+          },
+          "required": [
+            "id",
+            "source",
+            "target"
+          ],
+          "title": "WorkflowEdge",
+          "type": "object"
+        },
+        "WorkflowNode": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "type": {
+              "maxLength": 80,
+              "minLength": 1,
+              "title": "Type",
+              "type": "string",
+              "enum": [
+                "condition",
+                "end",
+                "hitl_form",
+                "sql_read"
+              ]
+            },
+            "schemaVersion": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Schemaversion",
+              "type": "integer"
+            },
+            "handlerVersion": {
+              "anyOf": [
+                {
+                  "maxLength": 40,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Handlerversion"
+            },
+            "title": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Title",
+              "type": "string"
+            },
+            "config": {
+              "additionalProperties": true,
+              "title": "Config",
+              "type": "object"
+            },
+            "inputs": {
+              "items": {
+                "$ref": "#/$defs/NodeInput"
+              },
+              "title": "Inputs",
+              "type": "array"
+            },
+            "approvalPolicy": {
+              "default": "PLAN",
+              "enum": [
+                "NONE",
+                "PLAN",
+                "NODE"
+              ],
+              "title": "Approvalpolicy",
+              "type": "string"
+            },
+            "timeoutSeconds": {
+              "default": 600,
+              "maximum": 7200,
+              "minimum": 1,
+              "title": "Timeoutseconds",
+              "type": "integer"
+            },
+            "uiPosition": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "type": "number"
+                  },
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Uiposition"
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "title"
+          ],
+          "title": "WorkflowNode",
+          "type": "object"
+        },
+        "WorkflowDefinition": {
+          "properties": {
+            "schemaVersion": {
+              "default": 1,
+              "enum": [
+                1,
+                2
+              ],
+              "title": "Schemaversion",
+              "type": "integer"
+            },
+            "catalogDigest": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Catalogdigest"
+            },
+            "entryNodeId": {
+              "title": "Entrynodeid",
+              "type": "string"
+            },
+            "nodes": {
+              "items": {
+                "$ref": "#/$defs/WorkflowNode"
+              },
+              "maxItems": 500,
+              "minItems": 1,
+              "title": "Nodes",
+              "type": "array"
+            },
+            "edges": {
+              "items": {
+                "$ref": "#/$defs/WorkflowEdge"
+              },
+              "maxItems": 1000,
+              "title": "Edges",
+              "type": "array"
+            }
+          },
+          "required": [
+            "entryNodeId",
+            "nodes"
+          ],
+          "title": "WorkflowDefinition",
+          "type": "object"
+        }
+      }
+    },
+    "extraction": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "requestId": {
+          "maxLength": 160,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "title": "Requestid",
+          "type": "string"
+        },
+        "ticketId": {
+          "exclusiveMinimum": 0,
+          "title": "Ticketid",
+          "type": "integer"
+        },
+        "ticketInfo": {
+          "additionalProperties": true,
+          "title": "Ticketinfo",
+          "type": "object"
+        },
+        "auditTimeline": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Audittimeline",
+          "type": "array"
+        }
+      },
+      "required": [
+        "requestId",
+        "ticketId",
+        "ticketInfo",
+        "auditTimeline"
+      ],
+      "title": "ExtractionSubmitRequest",
+      "type": "object"
+    }
+  },
+  "nodes": [
+    {
+      "type": "condition",
+      "name": "条件判断",
+      "category": "control",
+      "description": "根据前置结果选择分支",
+      "schemaVersion": 1,
+      "handlerVersion": "1.0.0",
+      "riskLevel": "LOW",
+      "approvalPolicy": "NONE",
+      "idempotencyClass": "PURE",
+      "resumeSemantics": "SAFE_RETRY",
+      "supportedModes": [
+        "PRODUCTION",
+        "TEST",
+        "SIMULATION",
+        "DRY_RUN"
+      ],
+      "configSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": true
+      },
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": true
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "selectedTarget": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "matched": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "matched"
+        ],
+        "additionalProperties": true
+      },
+      "uiSchema": {
+        "icon": "branch",
+        "editor": "condition"
+      },
+      "resultSensitivity": "BUSINESS_DATA",
+      "inputTypes": [
+        "string",
+        "number",
+        "integer",
+        "boolean",
+        "object",
+        "array"
+      ]
+    },
+    {
+      "type": "end",
+      "name": "结束",
+      "category": "control",
+      "description": "汇总并结束运行",
+      "schemaVersion": 1,
+      "handlerVersion": "1.0.0",
+      "riskLevel": "LOW",
+      "approvalPolicy": "NONE",
+      "idempotencyClass": "PURE",
+      "resumeSemantics": "SAFE_RETRY",
+      "supportedModes": [
+        "PRODUCTION",
+        "TEST",
+        "SIMULATION",
+        "DRY_RUN"
+      ],
+      "configSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": true
+      },
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": true
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": true
+      },
+      "uiSchema": {
+        "icon": "end",
+        "editor": "end"
+      },
+      "resultSensitivity": "BUSINESS_DATA",
+      "inputTypes": [
+        "string",
+        "number",
+        "integer",
+        "boolean",
+        "object",
+        "array"
+      ]
+    },
+    {
+      "type": "hitl_form",
+      "name": "人工参数输入",
+      "category": "human",
+      "description": "等待用户填写一个或多个结构化参数",
+      "schemaVersion": 1,
+      "handlerVersion": "1.0.0",
+      "riskLevel": "LOW",
+      "approvalPolicy": "NONE",
+      "idempotencyClass": "PURE",
+      "resumeSemantics": "WAIT_FOR_INPUT",
+      "supportedModes": [
+        "PRODUCTION",
+        "TEST",
+        "SIMULATION",
+        "DRY_RUN"
+      ],
+      "configSchema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string"
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "type": {
+                  "enum": [
+                    "string",
+                    "integer",
+                    "number",
+                    "boolean"
+                  ]
+                },
+                "required": {
+                  "type": "boolean"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "minimum": {
+                  "type": "number"
+                },
+                "maximum": {
+                  "type": "number"
+                },
+                "minLength": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "maxLength": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "enum": {
+                  "type": "array"
+                }
+              },
+              "required": [
+                "name",
+                "label",
+                "type",
+                "required"
+              ],
+              "additionalProperties": true
+            },
+            "minItems": 1,
+            "maxItems": 50
+          }
+        },
+        "required": [
+          "title",
+          "fields"
+        ],
+        "additionalProperties": false
+      },
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": true
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "values": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "values"
+        ],
+        "additionalProperties": false
+      },
+      "uiSchema": {
+        "icon": "form",
+        "editor": "hitl-form"
+      },
+      "resultSensitivity": "BUSINESS_DATA",
+      "inputTypes": [
+        "string",
+        "number",
+        "integer",
+        "boolean",
+        "object",
+        "array"
+      ]
+    },
+    {
+      "type": "sql_read",
+      "name": "SQL只读查询",
+      "category": "data",
+      "description": "使用aops-cli执行单条安全只读SQL",
+      "schemaVersion": 1,
+      "handlerVersion": "1.0.0",
+      "riskLevel": "LOW",
+      "approvalPolicy": "PLAN",
+      "idempotencyClass": "READ_SAFE",
+      "resumeSemantics": "UNKNOWN_REQUIRES_OPERATOR",
+      "supportedModes": [
+        "PRODUCTION",
+        "TEST",
+        "SIMULATION",
+        "DRY_RUN"
+      ],
+      "configSchema": {
+        "type": "object",
+        "properties": {
+          "databaseRef": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          },
+          "sqlTemplate": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "databaseRef",
+          "sqlTemplate"
+        ],
+        "additionalProperties": false
+      },
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": true
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "integer"
+          },
+          "data": {
+            "type": "array"
+          },
+          "rowCount": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "data",
+          "rowCount"
+        ],
+        "additionalProperties": false
+      },
+      "uiSchema": {
+        "icon": "database",
+        "editor": "sql-read"
+      },
+      "resultSensitivity": "BUSINESS_DATA",
+      "inputTypes": [
+        "string",
+        "number",
+        "integer",
+        "boolean"
+      ]
+    }
+  ]
+}

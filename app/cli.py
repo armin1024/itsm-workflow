@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from app.config import settings
+from app.call_logs import logged_cli
 
 
 class CliExecutionError(RuntimeError):
@@ -238,6 +239,7 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
         await process.wait()
 
 
+@logged_cli("sql_read")
 async def execute_sql_read(
     *,
     database_ref: str,
@@ -296,6 +298,7 @@ async def execute_sql_read(
     return CliResult(payload, stdout, stderr, process.returncode, metadata)
 
 
+@logged_cli("aops_command")
 async def execute_json_command(arguments: list[str], *, api_key: str, timeout_seconds: int) -> CliResult:
     """Execute a fixed aops-cli subcommand and require a successful JSON envelope.
 

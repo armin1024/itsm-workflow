@@ -47,7 +47,7 @@ def register_builtin_nodes() -> None:
         config_schema=_object_schema({"databaseRef": {"type": "string", "minLength": 1, "maxLength": 1000}, "sqlTemplate": {"type": "string", "minLength": 1}}, ["databaseRef", "sqlTemplate"]),
         input_schema=_object_schema(additional=True),
         output_schema=_object_schema({"status": {"type": "integer"}, "data": {"type": "array"}, "rowCount": {"type": "integer"}}, ["status", "data", "rowCount"]),
-        ui_schema={"icon": "database", "editor": "sql-read", "debugConfig": {"databaseRef": "test/test/test/readonly/service", "sqlTemplate": "SELECT 1 AS value"}, "debugInputs": {}},
+        ui_schema={"icon": "database", "editor": "sql-read"},
         input_types=("string", "number", "integer", "boolean"),
     ), _sql_validator))
     NODE_REGISTRY.register(NodeRegistration(NodeManifest(
@@ -55,7 +55,7 @@ def register_builtin_nodes() -> None:
         description="根据前置结果选择分支", risk_level="LOW", approval_policy="NONE",
         idempotency_class=IdempotencyClass.PURE, resume_semantics=ResumeSemantics.SAFE_RETRY, supported_modes=ALL_MODES,
         config_schema=_object_schema(additional=True), input_schema=_object_schema(additional=True), output_schema=_object_schema({"selectedTarget": {"type": ["string", "null"]}, "matched": {"type": "boolean"}}, ["matched"], True),
-        ui_schema={"icon": "branch", "editor": "condition", "debugConfig": {"rule": {"path": "/value", "op": "exists"}}, "debugInputs": {"value": "sample"}},
+        ui_schema={"icon": "branch", "editor": "condition"},
     )))
     form_field = _object_schema({"name": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}, "label": {"type": "string"}, "type": {"enum": ["string", "integer", "number", "boolean"]}, "required": {"type": "boolean"}, "description": {"type": "string"}, "minimum": {"type": "number"}, "maximum": {"type": "number"}, "minLength": {"type": "integer", "minimum": 0}, "maxLength": {"type": "integer", "minimum": 1}, "enum": {"type": "array"}}, ["name", "label", "type", "required"], True)
     NODE_REGISTRY.register(NodeRegistration(NodeManifest(
@@ -64,13 +64,13 @@ def register_builtin_nodes() -> None:
         idempotency_class=IdempotencyClass.PURE, resume_semantics=ResumeSemantics.WAIT_FOR_INPUT, supported_modes=ALL_MODES,
         config_schema=_object_schema({"title": {"type": "string", "minLength": 1}, "description": {"type": "string"}, "fields": {"type": "array", "items": form_field, "minItems": 1, "maxItems": 50}}, ["title", "fields"]),
         input_schema=_object_schema(additional=True), output_schema=_object_schema({"values": {"type": "object"}}, ["values"]),
-        ui_schema={"icon": "form", "editor": "hitl-form", "debugConfig": {"title": "填写查询参数", "description": "请确认后续查询参数", "fields": [{"name": "customer_id", "label": "客户编号", "type": "string", "required": True}]}, "debugInputs": {}},
+        ui_schema={"icon": "form", "editor": "hitl-form"},
     )))
     NODE_REGISTRY.register(NodeRegistration(NodeManifest(
         type="end", schema_version=1, handler_version="1.0.0", name="结束", category="control", description="汇总并结束运行",
         risk_level="LOW", approval_policy="NONE", idempotency_class=IdempotencyClass.PURE, resume_semantics=ResumeSemantics.SAFE_RETRY,
         supported_modes=ALL_MODES, config_schema=_object_schema(additional=True), input_schema=_object_schema(additional=True), output_schema=_object_schema(additional=True),
-        ui_schema={"icon": "end", "editor": "end", "debugConfig": {}, "debugInputs": {}},
+        ui_schema={"icon": "end", "editor": "end"},
     )))
 
 

@@ -11,9 +11,11 @@ WorkingDirectory=__PREFIX__
 EnvironmentFile=__CONFIG_DIR__/service.env
 Environment=PYTHONPATH=__PREFIX__/site-packages:__PREFIX__
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=__PREFIX__/python/bin/python3 -m uvicorn app.main:app --host ${WORKFLOW_BIND_HOST} --port ${WORKFLOW_PORT}
+ExecStart=__PREFIX__/python/bin/python3 -m uvicorn app.main:app --host ${WORKFLOW_BIND_HOST} --port ${WORKFLOW_PORT} --workers 1 --no-access-log
 Restart=on-failure
 RestartSec=3
+KillMode=control-group
+TimeoutStopSec=20
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

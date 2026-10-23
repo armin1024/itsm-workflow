@@ -31,7 +31,6 @@ class NodeManifest:
     output_schema: dict[str, Any]
     ui_schema: dict[str, Any] = field(default_factory=dict)
     result_sensitivity: str = "BUSINESS_DATA"
-    allow_single_node_debug: bool = True
     input_types: tuple[str, ...] = ("string", "number", "integer", "boolean", "object", "array")
 
     def public_dict(self) -> dict[str, Any]:
@@ -49,7 +48,6 @@ class NodeManifest:
             "outputSchema": value.pop("output_schema"),
             "uiSchema": value.pop("ui_schema"),
             "resultSensitivity": value.pop("result_sensitivity"),
-            "allowSingleNodeDebug": value.pop("allow_single_node_debug"),
             "inputTypes": value.pop("input_types"),
         })
         value["idempotencyClass"] = str(value["idempotencyClass"])

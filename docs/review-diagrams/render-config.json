@@ -1,0 +1,35 @@
+{
+  "theme": "base",
+  "fontFamily": "PingFang SC, Microsoft YaHei, Arial, sans-serif",
+  "themeVariables": {
+    "fontSize": "18px",
+    "primaryColor": "#f0f5f2",
+    "primaryTextColor": "#1c302a",
+    "primaryBorderColor": "#668477",
+    "lineColor": "#49685b",
+    "actorBkg": "#edf4f0",
+    "actorBorder": "#668477",
+    "actorTextColor": "#1c302a",
+    "signalColor": "#49685b",
+    "signalTextColor": "#1c302a",
+    "noteBkgColor": "#f6f5ec",
+    "noteBorderColor": "#c6c1a5",
+    "noteTextColor": "#3d3b2b",
+    "labelBoxBkgColor": "#edf4f0",
+    "labelBoxBorderColor": "#668477",
+    "labelTextColor": "#1c302a",
+    "loopTextColor": "#1c302a"
+  },
+  "sequence": {
+    "actorMargin": 80,
+    "width": 240,
+    "height": 80,
+    "diagramMarginX": 35,
+    "diagramMarginY": 25,
+    "messageMargin": 32,
+    "noteMargin": 16,
+    "mirrorActors": false,
+    "wrap": true,
+    "wrapPadding": 12
+  }
+}

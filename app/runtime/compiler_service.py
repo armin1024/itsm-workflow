@@ -18,9 +18,8 @@ EventSink = Callable[[dict[str, Any]], Awaitable[None]]
 class CompilerService:
     """Asynchronous compiler with temporary status only; tec01/browser owns storage."""
 
-    def __init__(self, client: Tec01Client | None = None, *, heartbeat_seconds: float = 15, max_completed: int = 64, retention_seconds: float = 3600):
+    def __init__(self, client: Tec01Client | None = None, *, max_completed: int = 64, retention_seconds: float = 3600):
         self.client = client or Tec01Client()
-        self.heartbeat_seconds = heartbeat_seconds
         self.max_completed = max_completed
         self.retention_seconds = retention_seconds
         self.tasks: dict[str, asyncio.Task] = {}
@@ -105,13 +104,12 @@ class CompilerService:
         knowledge_id = str(job["knowledgeId"])
         record = self.records[knowledge_id]
         lock = asyncio.Lock()
-        heartbeat: asyncio.Task | None = None
 
         async def emit(payload: dict[str, Any]) -> None:
-            # One lock orders stage events, heartbeat and final event.
+            # Keep stage and final events ordered, including their delivery.
             async with lock:
                 record["seq"] += 1
-                event = {**payload, "seq": record["seq"], "occurredAt": datetime.now(UTC).isoformat()}
+                event = {**payload, "requestId": job["requestId"], "seq": record["seq"], "occurredAt": datetime.now(UTC).isoformat()}
                 record["_updated"] = time.monotonic()
                 record["events"].append(copy.deepcopy(event))
                 record["events"] = record["events"][-256:]
@@ -124,31 +122,13 @@ class CompilerService:
                 if sync_tec01:
                     await self._deliver(knowledge_id, event)
 
-        async def stop_heartbeat() -> None:
-            nonlocal heartbeat
-            if heartbeat:
-                heartbeat.cancel()
-                await asyncio.gather(heartbeat, return_exceptions=True)
-                heartbeat = None
-
-        async def analysis_heartbeat() -> None:
-            while True:
-                await asyncio.sleep(self.heartbeat_seconds)
-                await emit({"type": "PROGRESS", "stage": "ANALYZING_EVIDENCE", "message": "正在分析工单和操作记录", "progress": {"current": None, "total": None}})
-
         async def progress(stage: str, message: str, current: int | None, total: int | None) -> None:
-            nonlocal heartbeat
-            if stage != "ANALYZING_EVIDENCE":
-                await stop_heartbeat()
             record["status"] = stage
             self.statuses[knowledge_id] = stage
             await emit({"type": "PROGRESS", "stage": stage, "message": message, "progress": {"current": current, "total": total}})
-            if stage == "ANALYZING_EVIDENCE" and heartbeat is None:
-                heartbeat = asyncio.create_task(analysis_heartbeat(), name="compiler-heartbeat:" + knowledge_id)
 
         try:
             proposal, diagnostics = await compile_ticket_evidence(job["ticketInfo"], job["auditTimeline"], progress=progress)
-            await stop_heartbeat()
             validated = validate_workflow(proposal["workflowDefinition"], "DRAFT")
             proposal["workflowDefinition"] = validated["normalizedDefinition"]
             validation = {key: validated[key] for key in ("catalogDigest", "workflowContentHash", "valid")}
@@ -166,7 +146,6 @@ class CompilerService:
                 record["status"] = "FAILED"
                 self.statuses[knowledge_id] = "FAILED"
         except Exception as exc:
-            await stop_heartbeat()
             error = self._safe_error(exc)
             record.update({"status": "FAILED", "error": error})
             self.statuses[knowledge_id] = "FAILED"
@@ -175,7 +154,6 @@ class CompilerService:
             except Tec01Error as callback_error:
                 record["callbackError"] = {"code": callback_error.code, "message": "tec01提取失败回调未确认", "retryable": callback_error.retryable}
         finally:
-            await stop_heartbeat()
             record["_updated"] = time.monotonic()
 
     @staticmethod

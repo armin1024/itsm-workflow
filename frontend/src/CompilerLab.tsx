@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Button, Checkbox, InlineNotification, TextArea, TextInput } from "@carbon/react";
 import { useNavigate } from "react-router-dom";
 import { api } from "./api";
-import { browserStore, localCatalog, localId, now, useBrowserItems, type LocalExtraction, type LocalKnowledge } from "./browserStore";
+import { browserStore, localId, now, useBrowserItems, type LocalExtraction, type LocalKnowledge } from "./browserStore";
 import WorkflowEditor, { type EditableWorkflow } from "./WorkflowEditor";
 import { parseArray, parseObject, pretty, Status } from "./ui";
 
@@ -15,7 +15,7 @@ export default function CompilerLab() {
   const { items: extractions, error: storageError } = useBrowserItems<LocalExtraction>("extraction"), navigate = useNavigate();
   const task = extractions.find((item) => item.id === selectedId), proposal = task?.proposal;
   useEffect(() => { if (!selectedId && extractions[0]) setSelectedId(extractions[0].id); }, [selectedId, extractions]);
-  useEffect(() => { api.studioCatalog().then(async (value) => setAllowed(new Set((await localCatalog(value.nodes)).filter((item) => item.studioEnabled !== false).map((item) => item.type)))).catch((error) => setError(error.message)); }, []);
+  useEffect(() => { api.studioCatalog().then((value) => setAllowed(new Set(value.nodes.map((item) => item.type)))).catch((error) => setError(error.message)); }, []);
   useEffect(() => {
     if (task?.status === "SUCCEEDED" && task.proposal && loadedId !== task.id) {
       setDefinition(task.proposal.workflowDefinition as EditableWorkflow); setName(String(task.proposal.name)); setSummary(String(task.proposal.summary)); setLoadedId(task.id);

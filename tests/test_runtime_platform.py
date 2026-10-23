@@ -9,7 +9,7 @@ from app.runtime.compiler_service import CompilerService
 from app.runtime.executor import execute_single_node
 from app.runtime.planner import render_plan, validate_workflow
 from app.runtime.push_executor import PushExecutor
-from app.studio.debug import reject_credentials, run_single_node
+from app.studio.validation import reject_credentials
 from app.tec01_client import Tec01Client, Tec01Error
 
 

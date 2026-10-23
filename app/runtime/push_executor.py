@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable
 from app.cli import redact_diagnostic
 from app.conditions import evaluate, pointer
 from app.config import settings
+from app.call_logs import log_context
 from app.runtime import NODE_REGISTRY
 from app.runtime.executor import execute_single_node
 from app.runtime.planner import canonical_hash, validate_workflow
@@ -19,7 +20,7 @@ from app.workflow import WorkflowDefinition, WorkflowEdge, WorkflowNode
 
 
 EventSink = Callable[[dict[str, Any]], Awaitable[None]]
-NODE_STATES = {"PENDING", "READY", "RUNNING", "WAITING", "WAITING_INPUT", "SUCCEEDED", "SKIPPED", "FAILED", "PAUSED", "CANCELLED", "UNKNOWN"}
+NODE_STATES = {"PENDING", "READY", "RUNNING", "WAITING", "WAITING_INPUT", "SUCCEEDED", "SKIPPED", "FAILED", "PAUSED", "TERMINATED", "CANCELLED", "UNKNOWN"}
 
 
 def _now() -> str:
@@ -33,6 +34,8 @@ class ActiveRun:
     pause: asyncio.Event = field(default_factory=asyncio.Event)
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
     current_node_id: str | None = None
+    phase: str = "QUEUED"
+    last_acknowledged_node_id: str | None = None
 
 
 class PushExecutor:
@@ -40,6 +43,7 @@ class PushExecutor:
 
     def __init__(self, client: Tec01Client | None = None):
         self.client = client or Tec01Client()
+        self.instance_id = uuid.uuid4().hex
         self.active: dict[str, ActiveRun] = {}
         self.accepted: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._fingerprints: dict[str, str] = {}
@@ -85,8 +89,8 @@ class PushExecutor:
         for node in definition.nodes:
             if node.type == "condition" and states.get(node.id) == "SUCCEEDED" and node.id not in (payload.get("selectedRoutes") or {}):
                 raise ValueError(f"已完成条件节点 {node.id} 缺少已提交的分支")
-        accepted = {"dispatchId": dispatch_id, "runId": run_id, "accepted": True, "executorId": settings.executor_id, "acceptedAt": _now(), "status": "RUNNING"}
-        active = ActiveRun(dispatch_id)
+        accepted = {"dispatchId": dispatch_id, "runId": run_id, "accepted": True, "executorId": settings.executor_id, "executorInstanceId": self.instance_id, "acceptedAt": _now(), "status": "RUNNING"}
+        active = ActiveRun(dispatch_id, current_node_id=payload.get("currentNodeId") or (payload.get("resumePayload") or {}).get("nodeId") or definition.entryNodeId)
         self.active[run_id] = active
         self.accepted[dispatch_id] = accepted
         self._fingerprints[dispatch_id] = fingerprint
@@ -94,6 +98,21 @@ class PushExecutor:
         active.task = asyncio.create_task(self._run(copy.deepcopy(payload), definition, api_key, active, event_sink, sync_tec01), name="execution:" + run_id)
         active.task.add_done_callback(lambda _: self.active.pop(run_id, None) if self.active.get(run_id) is active else None)
         return dict(accepted), True
+
+    def activity(self, run_id: str) -> dict[str, Any]:
+        """Liveness only, never historical business state or sensitive payloads."""
+        active = self.active.get(run_id)
+        return {
+            "runId": run_id, "executorId": settings.executor_id,
+            "executorInstanceId": self.instance_id, "active": active is not None,
+            "dispatchId": active.dispatch_id if active else None,
+            "currentNodeId": active.current_node_id if active else None,
+            "phase": active.phase if active else "INACTIVE",
+            "pauseRequested": active.pause.is_set() if active else False,
+            "cancelRequested": active.cancel.is_set() if active else False,
+            "lastAcknowledgedNodeId": active.last_acknowledged_node_id if active else None,
+            "observedAt": _now(),
+        }
 
     def _trim_metadata(self) -> None:
         active_ids = {item.dispatch_id for item in self.active.values()}
@@ -187,17 +206,21 @@ class PushExecutor:
         async def notify(kind: str, body: dict[str, Any], *, remote: bool = True) -> None:
             nonlocal completion_committed
             if sync_tec01 and remote:
+                active.phase = {"NODE_STARTED": "WAITING_START_ACK", "NODE_COMPLETED": "WAITING_RESULT_ACK"}.get(kind, "WAITING_STOP_ACK")
                 if kind == "NODE_STARTED":
                     await self.client.node_started(run_id, str(body["nodeId"]), body)
                 elif kind == "NODE_COMPLETED":
                     await self.client.node_completed(run_id, str(body["nodeId"]), body)
                     completion_committed = True
+                    active.last_acknowledged_node_id = str(body["nodeId"])
                 else:
                     await self.client.run_released(run_id, body)
             if event_sink:
                 await event_sink(copy.deepcopy({**body, "type": kind, "runId": run_id, "occurredAt": _now(), "snapshot": snapshot()}))
             if kind == "NODE_COMPLETED" and not sync_tec01:
                 completion_committed = True
+                active.last_acknowledged_node_id = str(body["nodeId"])
+            active.phase = "EXECUTING" if kind == "NODE_STARTED" else "BETWEEN_NODES"
 
         async def release(value: str, reason: str, *, remote: bool = True) -> None:
             nonlocal status
@@ -211,7 +234,7 @@ class PushExecutor:
             for _ in range(len(nodes) + 1):
                 active.current_node_id = current
                 if active.cancel.is_set():
-                    await release("CANCELLED", "用户取消")
+                    await release("TERMINATED", "用户取消")
                     return
                 if active.pause.is_set():
                     await release("PAUSED", "用户暂停")
@@ -226,7 +249,7 @@ class PushExecutor:
                         return
                     current = edge.target
                     continue
-                if states[current] == "CANCELLED":
+                if states[current] in {"TERMINATED", "CANCELLED"}:
                     raise ValueError("已取消节点不能自动重新执行")
                 attempt_id = "attempt_" + uuid.uuid4().hex
                 external_completed = False
@@ -256,20 +279,24 @@ class PushExecutor:
                                     except TimeoutError:
                                         pass
                                 if active.cancel.is_set():
-                                    result = {"status": "CANCELLED", "output": None, "diagnostic": None, "interrupt": None}
+                                    result = {"status": "TERMINATED", "output": None, "diagnostic": None, "interrupt": None}
                                 else:
-                                    result = await execute_single_node(**args)
+                                    with log_context(nodeId=current, attemptId=attempt_id):
+                                        result = await execute_single_node(**args)
                             finally:
                                 if acquired:
                                     self.cli_slots.release()
                         else:
-                            result = await execute_single_node(**args)
+                            with log_context(nodeId=current, attemptId=attempt_id):
+                                result = await execute_single_node(**args)
                     external_completed = node.type == "sql_read" and result["status"] == "SUCCEEDED"
                 except Exception as exc:
                     result = {"status": "FAILED", "output": None, "diagnostic": {"errorCode": "NODE_EXECUTION_FAILED", "message": safe_message(exc)}, "interrupt": None}
                     edge, skipped = None, []
 
-                result_status = str(result["status"])
+                # Legacy/custom handlers may still use the CLI's cancellation
+                # name; never send CANCELLED as a callback status to tec01.
+                result_status = "TERMINATED" if result["status"] == "CANCELLED" else str(result["status"])
                 states[current] = "WAITING" if result_status == "WAITING_INPUT" else result_status
                 if result_status == "SUCCEEDED":
                     outputs[current] = result["output"]
@@ -291,14 +318,15 @@ class PushExecutor:
                     summary = f"查询返回 {result['output'].get('rowCount', 0)} 行"
                 elif diagnostic:
                     summary = safe_message(diagnostic.get("message") or summary)
-                callback = {"dispatchId": dispatch_id, "attemptId": attempt_id, "nodeId": current, "status": result_status, "safeSummary": summary, "result": result.get("output"), "diagnostic": diagnostic, "interaction": interaction, "selectedEdgeId": edge.id if edge and result_status == "SUCCEEDED" else None, "skippedNodeIds": skipped if result_status == "SUCCEEDED" else []}
+                run_status = result_status if result_status != "SUCCEEDED" else "TERMINATED" if active.cancel.is_set() else "PAUSED" if active.pause.is_set() else "SUCCEEDED" if edge is None else "RUNNING"
+                callback = {"dispatchId": dispatch_id, "attemptId": attempt_id, "nodeId": current, "status": result_status, "runStatus": run_status, "safeSummary": summary, "result": result.get("output"), "diagnostic": diagnostic, "interaction": interaction, "selectedEdgeId": edge.id if edge and result_status == "SUCCEEDED" else None, "skippedNodeIds": skipped if result_status == "SUCCEEDED" else []}
                 await notify("NODE_COMPLETED", callback)
                 external_completed = False
                 if result_status != "SUCCEEDED":
                     await release(result_status, summary)
                     return
                 if active.cancel.is_set():
-                    await release("CANCELLED", "用户取消；已完成节点结果保留")
+                    await release("TERMINATED", "用户取消；已完成节点结果保留")
                     return
                 if active.pause.is_set():
                     await release("PAUSED", "当前节点已完成，运行暂停")
@@ -312,23 +340,25 @@ class PushExecutor:
             terminal = "UNKNOWN" if status != "RUNNING" else "PAUSED"
             if (external_completed and not completion_committed) or (states.get(current) == "RUNNING" and nodes[current].type == "sql_read"):
                 states[current], terminal = "UNKNOWN", "UNKNOWN"
-            try:
-                await release(terminal, "执行服务关闭，请根据已保存快照确认后继续")
-            except Exception:
-                await release(terminal, "执行服务关闭，状态回调未确认", remote=False)
+            await release(terminal, "执行服务关闭，请根据已保存记录确认后继续", remote=False)
         except Exception as exc:
             # A lost completion acknowledgement makes the SQL outcome uncertain.
             # A lost release acknowledgement only affects the run: the node's
             # already committed result must remain SUCCEEDED and never replay.
-            uncertain = external_completed and not completion_committed
+            uncertain = not completion_committed and (external_completed or isinstance(exc, Tec01Error) and active.phase == "WAITING_RESULT_ACK")
             if uncertain:
                 states[current] = "UNKNOWN"
             release_unconfirmed = isinstance(exc, Tec01Error) and status != "RUNNING"
-            terminal = "UNKNOWN" if uncertain or release_unconfirmed else "FAILED"
-            try:
-                await release(terminal, safe_message(exc))
-            except Exception:
-                await release(terminal, "tec01状态回调未确认，请人工核实后恢复", remote=False)
+            terminal = "UNKNOWN" if uncertain or release_unconfirmed or isinstance(exc, Tec01Error) else "FAILED"
+            # A failed acknowledgement must end the activity. Do not start a
+            # second remote retry cycle to report that the first one failed.
+            if isinstance(exc, Tec01Error):
+                await release(terminal, safe_message(exc), remote=False)
+            else:
+                try:
+                    await release(terminal, safe_message(exc))
+                except Tec01Error:
+                    await release("UNKNOWN", "停止状态未确认，请核对tec01记录后恢复", remote=False)
 
     async def shutdown(self, timeout: float = 10) -> None:
         tasks = [active.task for active in self.active.values() if active.task]

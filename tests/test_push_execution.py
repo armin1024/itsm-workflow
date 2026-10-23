@@ -107,8 +107,8 @@ async def test_cancel_terminates_actual_cli_and_releases_active_slot(fake_cli):
     await await_trace(trace)
     executor.command("run-test", "cancel1", "CANCEL")
     await asyncio.wait_for(task, 4)
-    assert events[-1]["status"] == "CANCELLED" and not executor.active
-    assert events[-1]["snapshot"]["nodeStates"]["sql1"] == "CANCELLED"
+    assert events[-1]["status"] == "TERMINATED" and not executor.active
+    assert events[-1]["snapshot"]["nodeStates"]["sql1"] == "TERMINATED"
 
 
 @pytest.mark.asyncio
@@ -203,7 +203,8 @@ async def test_callback_failure_after_sql_does_not_replay_or_mark_node_failed(fa
     workflow = {"entryNodeId": "sql1", "nodes": [sql_node("sql1"), sql_node("sql2")], "edges": [{"id": "next", "source": "sql1", "target": "sql2"}]}
     executor.dispatch(dispatch_payload(workflow), "test-credential", event_sink=sink)
     await executor.active["run-test"].task
-    assert events[-1]["status"] == "UNKNOWN"
+    assert events == []  # No second remote retry cycle after the result ACK failed.
+    assert snapshots[-1]["status"] == "UNKNOWN"
     saved = snapshots[-1]["snapshot"]
     assert saved["nodeStates"]["sql1"] == "UNKNOWN" and saved["nodeStates"]["sql2"] == "READY"
     assert len(fake_cli[0].read_text().splitlines()) == 1

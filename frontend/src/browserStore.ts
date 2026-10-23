@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import type { EditableWorkflow } from "./WorkflowEditor";
-import type { NodeCatalogItem } from "./types";
 
 export type LocalKnowledge = {
   id: string; kind: "knowledge"; name: string; summary: string;
@@ -18,6 +17,7 @@ export type LocalRun = {
   nodeResults?: Record<string, Record<string, unknown>>;
   syncTec01: boolean; tec01RunId?: string; events: Record<string, unknown>[];
   plan?: Record<string, unknown>; removeAfterCancel?: boolean;
+  confirmation?: { planHash: string; confirmedAt: string };
   syncStatus?: string; callbackError?: unknown;
   createdAt: string; updatedAt: string;
 };
@@ -28,8 +28,7 @@ export type LocalExtraction = {
   diagnostics?: unknown; error?: unknown; createdAt: string; updatedAt: string;
   syncStatus?: string; callbackError?: unknown;
 };
-type NodeOverride = { id: string; kind: "node"; override: Record<string, unknown> };
-type LocalItem = LocalKnowledge | LocalRun | LocalExtraction | NodeOverride;
+type LocalItem = LocalKnowledge | LocalRun | LocalExtraction;
 const changeEvent = "itsm-studio-browser-data";
 let database: Promise<IDBDatabase> | undefined;
 function db() {
@@ -64,8 +63,8 @@ export const browserStore = {
   all: () => transaction<LocalItem[]>("readonly", (store) => store.getAll()),
   get: <T extends LocalItem>(id: string) => transaction<T | undefined>("readonly", (store) => store.get(id)),
   put: async (value: LocalItem) => {
-    // SQL result columns are data; only definitions, configured inputs and node
-    // defaults can accidentally carry an execution credential into storage.
+    // SQL result columns are data; inspect definitions and configured inputs
+    // so execution credentials cannot accidentally enter browser storage.
     if (value.kind === "run") rejectStoredCredentials({ workflowSnapshot: value.workflowSnapshot, runInputs: value.runInputs, plan: value.plan });
     else if (value.kind === "extraction") rejectStoredCredentials(value.proposal);
     else rejectStoredCredentials(value);
@@ -82,15 +81,6 @@ export function useBrowserItems<T extends LocalItem>(kind: T["kind"]) {
     return () => { live = false; window.removeEventListener(changeEvent, load); };
   }, [kind]);
   return { items: items.sort((a, b) => ("updatedAt" in b ? b.updatedAt : "").localeCompare("updatedAt" in a ? a.updatedAt : "")), error };
-}
-export async function localCatalog(nodes: NodeCatalogItem[]) {
-  const values = await browserStore.all();
-  return nodes.map((node) => {
-    const item = values.find((item) => item.kind === "node" && item.id === `node:${node.type}:${node.schemaVersion}`) as NodeOverride | undefined;
-    if (!item) return node;
-    const override = item.override;
-    return { ...node, name: String(override.name || node.name), description: String(override.description || node.description), studioEnabled: override.enabled !== false, uiSchema: { ...node.uiSchema, debugConfig: override.debugConfig, debugInputs: override.debugInputs, debugFixture: override.debugFixture } };
-  });
 }
 export function downloadJson(name: string, value: unknown) {
   const href = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: "application/json;charset=utf-8" }));

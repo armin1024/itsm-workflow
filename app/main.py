@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import secrets
+import time
 import uuid
+import asyncio
+import re
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -13,6 +16,11 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
+from app.api_metadata import localize_openapi, validation_message
+from app.log_filters import LogFilters, OptionalDate, time_bounds
+from app.journal_reader import read_journal, redact_raw
+from app import call_logs as log_module
+from app.call_logs import emit, log_context, hide_credentials, LogCursorExpired
 from app.cli import CliExecutionError, inspect_cli
 from app.config import settings
 from app.extraction import compile_ticket_evidence, compile_ticket_id, fetch_ticket_evidence
@@ -21,17 +29,14 @@ from app.runtime.compiler_service import compiler_service
 from app.runtime.executor import render_sql
 from app.runtime.planner import render_plan, validate_workflow
 from app.runtime.push_executor import push_executor
-from app.runtime.single_executor import single_executor
 from app.schemas import (
     CompilerPreviewRequest, CompilerTicketRequest, ExecutionCommandRequest,
     ExecutionDispatchRequest, ExtractionSubmitRequest, RuntimePlanRequest,
     RuntimeValidateRequest, StudioExecutionRequest, StudioExtractionRequest,
-    SingleNodeRequest, SingleNodeResponse,
-    StudioInterruptReply, StudioLoginRequest, StudioNodeDebugRequest, StudioNodeUpdate,
-    StudioTicketExtractionRequest, StudioWorkflowDebugRequest,
+    StudioLoginRequest, StudioTicketExtractionRequest,
 )
 from app.studio.auth import COOKIE_NAME, create_session, require_studio_admin, valid_session, verify_admin_token
-from app.studio.debug import reject_credentials, run_single_node
+from app.studio.validation import reject_credentials
 from app.studio.events import studio_events
 from app.workflow import WorkflowDefinition
 
@@ -39,13 +44,48 @@ from app.workflow import WorkflowDefinition
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings.validate_service()
-    yield
-    await push_executor.shutdown()
-    await compiler_service.shutdown()
-    await single_executor.shutdown()
+    log_module.initialize()
+    try:
+        yield
+    finally:
+        try:
+            await push_executor.shutdown()
+            await compiler_service.shutdown()
+        finally:
+            if log_module.call_logs:
+                await asyncio.to_thread(log_module.call_logs.stop)
 
 
 app = FastAPI(title="ITSM Workflow Runtime", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None)
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.monotonic()
+    tracked = request.url.path.startswith(("/internal/", "/api/")) and not request.url.path.startswith("/api/v1/studio/logs")
+    polling = request.method == "GET" and (request.url.path in {"/api/v1/health", "/api/v1/studio/session"} or request.url.path.startswith(("/api/v1/studio/events/", "/api/v1/studio/executions/", "/internal/v1/executions/")))
+    route_path = "[unmatched-route]"
+    for candidate in app.router.routes:
+        match, _ = candidate.matches(request.scope)
+        if match.name == "FULL":
+            route_path = getattr(candidate, "path", "[matched-route]")
+            break
+    request_id = request.headers.get("X-Request-Id", "")
+    request_id = request_id if re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", request_id) else None
+    with hide_credentials(request.headers.get("X-AOPS-Api-Key"), request.headers.get("Authorization"), *request.cookies.values()), log_context(traceId=uuid.uuid4().hex, spanId=uuid.uuid4().hex, requestId=request_id, direction="INBOUND", peer="TEC01" if request.url.path.startswith("/internal/") else "STUDIO", method=request.method, url=route_path):
+        if tracked and not polling:
+            emit("REQUEST_STARTED", operation="http_request")
+        try:
+            response = await call_next(request)
+        except Exception:
+            emit("REQUEST_FAILED", "ERROR", operation="http_request", errorCode="UNHANDLED_ERROR", httpStatus=500, durationMs=round((time.monotonic() - start) * 1000, 2))
+            detail = {"code": "INTERNAL_ERROR", "message": "请求处理失败，请根据关联日志排查", "retryable": False}
+            return JSONResponse(detail if request.url.path.startswith("/internal/") else {"detail": detail}, status_code=500)
+        route = request.scope.get("route")
+        route_path = getattr(route, "path", "[unmatched-route]")
+        if (tracked and not polling) or response.status_code >= 400:
+            emit("REQUEST_COMPLETED" if response.status_code < 400 else "REQUEST_FAILED", "INFO" if response.status_code < 400 else "WARNING", operation=getattr(request.state, "log_operation", "http_request"), runId=getattr(request.state, "log_run_id", None), url=route_path, httpStatus=response.status_code, durationMs=round((time.monotonic() - start) * 1000, 2))
+        return response
 
 
 @app.exception_handler(HTTPException)
@@ -60,7 +100,7 @@ async def http_error(request: Request, exc: HTTPException):
 async def request_error(request: Request, exc: RequestValidationError):
     # ValidationError input/context can contain a submitted credential. Return
     # field locations and messages only, never echo request contents or headers.
-    fields = [{"field": ".".join(str(item) for item in error["loc"]), "message": error["msg"]} for error in exc.errors()]
+    fields = [{"field": ".".join(str(item) for item in error["loc"]), "message": validation_message(error)} for error in exc.errors()]
     detail = {"code": "REQUEST_VALIDATION_FAILED", "message": "请求字段校验失败", "retryable": False, "details": {"fields": fields}}
     return JSONResponse(detail if request.url.path.startswith("/internal/") else {"detail": detail}, status_code=422)
 
@@ -121,46 +161,48 @@ async def studio_logout(response: Response):
 @app.get("/api/v1/studio/catalog", dependencies=[Depends(require_studio_admin)])
 async def studio_catalog():
     catalog = NODE_REGISTRY.catalog()
-    return {**catalog, "runtimeVersion": __version__, "testOnly": True, "nodes": [{**node, "studioEnabled": True} for node in catalog["nodes"]]}
+    return {**catalog, "runtimeVersion": __version__, "testOnly": True}
 
 
-@app.get("/api/v1/studio/nodes", dependencies=[Depends(require_studio_admin)])
-async def studio_nodes():
-    catalog = await studio_catalog()
-    return {"items": catalog["nodes"], "total": len(catalog["nodes"]), "catalogDigest": catalog["catalogDigest"]}
+@app.get("/api/v1/studio/config", dependencies=[Depends(require_studio_admin)])
+async def studio_configuration():
+    """只读运行配置；凭据只返回是否配置，不提供修改接口。"""
+    return {**settings.studio_configuration(), "runtimeVersion": __version__}
 
 
-@app.patch("/api/v1/studio/nodes/{node_type}/{schema_version}", dependencies=[Depends(require_studio_admin)])
-async def studio_node_update(node_type: str, schema_version: int, body: StudioNodeUpdate):
+@app.get("/api/v1/studio/logs/status", dependencies=[Depends(require_studio_admin)])
+async def log_status():
+    return await asyncio.to_thread(log_module.call_logs.status) if log_module.call_logs else {"available": False}
+
+
+@app.get("/api/v1/studio/logs", dependencies=[Depends(require_studio_admin)])
+async def log_query(filters: LogFilters = Depends()):
+    if not log_module.call_logs:
+        return {"items": [], "nextCursor": None, "scannedBytes": 0, "unavailable": True}
     try:
-        NODE_REGISTRY.get(node_type, schema_version)
-        reject_credentials(body.model_dump(mode="json"))
-        return {"type": node_type, "schemaVersion": schema_version, **body.model_dump(mode="json"), "storage": "browser"}
-    except ValueError as exc:
-        raise invalid(exc) from exc
+        return await asyncio.to_thread(log_module.call_logs.query, **filters.options)
+    except LogCursorExpired as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
-@app.post("/api/v1/studio/node-debug-runs", dependencies=[Depends(require_studio_admin)])
-async def single_node(body: StudioNodeDebugRequest, x_aops_api_key: str | None = Header(default=None, alias="X-AOPS-Api-Key")):
+@app.get("/api/v1/studio/logs/raw", dependencies=[Depends(require_studio_admin)])
+async def raw_log_query(filters: LogFilters = Depends()):
+    if not log_module.call_logs:
+        return {"rawLines": [], "nextCursor": None, "unavailable": True}
     try:
-        result = await run_single_node(node=body.node, inputs=body.inputs, mode=body.mode, simulation=body.simulation, ticket_id=body.ticketId, api_key=x_aops_api_key)
-        return {"debugRunId": "test_node_" + uuid.uuid4().hex, "node": body.node, "inputs": body.inputs, "mode": body.mode, "testOnly": True, **result}
-    except (ValueError, KeyError) as exc:
-        raise invalid(exc) from exc
+        result = await asyncio.to_thread(log_module.call_logs.query, raw=True, **filters.options)
+        for line in result.get("rawLines", []):
+            line["text"] = redact_raw(line["text"])
+        result.pop("items", None)
+        return result
+    except LogCursorExpired as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
-@app.post("/api/v1/studio/node-debug-runs/reply", dependencies=[Depends(require_studio_admin)])
-async def node_reply(body: StudioInterruptReply):
-    try:
-        reject_credentials(body.model_dump(mode="json"))
-        if body.node.get("type") != "hitl_form":
-            raise ValueError("该节点不支持人工回复")
-        if body.response.get("action") == "CANCEL":
-            return {"status": "CANCELLED", "output": None, "interrupt": None}
-        result = await run_single_node(node=body.node, inputs=body.inputs, mode="TEST", resume_payload={**body.response, "nodeId": body.node.get("id")})
-        return {"node": body.node, "inputs": body.inputs, "mode": "TEST", "testOnly": True, **result}
-    except ValueError as exc:
-        raise invalid(exc) from exc
+@app.get("/api/v1/studio/logs/journal", dependencies=[Depends(require_studio_admin)])
+async def journal_logs(limit: int = Query(default=100, ge=1, le=200), keyword: str = Query(default="", max_length=200), fromTime: OptionalDate = None, toTime: OptionalDate = None):
+    time_bounds(fromTime, toTime)
+    return await read_journal(limit=limit, keyword=keyword.strip(), from_time=fromTime, to_time=toTime)
 
 
 @app.post("/api/v1/studio/compiler/preview", dependencies=[Depends(require_studio_admin)])
@@ -188,7 +230,9 @@ def submit_extraction(payload: dict[str, Any], sync: bool, local: bool):
     knowledge_id = payload["knowledgeId"]
     async def sink(event):
         await studio_events.publish(knowledge_id, event)
-    created = compiler_service.submit(payload, event_sink=sink if local else None, sync_tec01=sync)
+    with log_context(knowledgeId=knowledge_id, requestId=payload["requestId"], ticketId=payload["ticketId"]):
+        emit("EXTRACTION_SUBMITTED", operation="extraction")
+        created = compiler_service.submit(payload, event_sink=sink if local else None, sync_tec01=sync)
     if created and local:
         studio_events.open(knowledge_id, reset=True)
     return {"knowledgeId": knowledge_id, "accepted": True, "duplicate": not created}
@@ -230,7 +274,7 @@ async def studio_plan(body: dict[str, Any]):
             raise ValueError("工单ID必须是正整数")
         inputs = body.get("inputs") or {}
         reject_credentials(inputs)
-        result = validate_workflow(body["workflowDefinition"], "TEST")
+        result = validate_workflow(body["workflowDefinition"], "EXECUTE" if body.get("preserveCatalog") is True else "TEST")
         plan = render_plan(workflow_version_id="local-browser", workflow_content_hash=result["workflowContentHash"], workflow_snapshot=result["normalizedDefinition"], ticket_id=ticket_id, parameters=inputs, actor_uid="studio")
         originals = {node["id"]: node for node in result["normalizedDefinition"]["nodes"]}
         for node in plan["renderedPlan"]["nodes"]:
@@ -256,16 +300,22 @@ async def studio_plan(body: dict[str, Any]):
 def dispatch(body: ExecutionDispatchRequest, key: str | None, *, local: bool, sync: bool):
     if sync:
         configured_callbacks()
-    payload = body.model_dump(mode="json", exclude={"syncTec01"})
+    payload = body.model_dump(mode="json", exclude={"syncTec01", "planMaterialHash"})
     reject_credentials({"workflowSnapshot": payload["workflowSnapshot"], "runInputs": payload["runInputs"]})
     nodes = payload["workflowSnapshot"].get("nodes") or []
     if not isinstance(nodes, list) or not all(isinstance(node, dict) for node in nodes):
         raise ValueError("workflowSnapshot.nodes必须为节点对象数组")
     if any(node.get("type") == "sql_read" for node in nodes) and not key:
         raise ValueError("包含SQL读节点时必须通过X-AOPS-Api-Key提供当前用户凭据")
+    if local and getattr(body, "planMaterialHash", None):
+        checked = render_plan(workflow_version_id="local-browser", workflow_content_hash=body.workflowContentHash, workflow_snapshot=body.workflowSnapshot, ticket_id=body.ticketId, parameters=body.runInputs, actor_uid="studio")
+        if not checked["valid"] or body.planMaterialHash != checked["planMaterialHash"]:
+            raise HTTPException(409, {"code": "PLAN_CONFIRMATION_MISMATCH", "message": "计划定义、工单或参数已变化，请重新创建并确认计划", "retryable": False})
     async def sink(event):
         await studio_events.publish(body.runId, event)
-    accepted, created = push_executor.dispatch(payload, key, event_sink=sink if local else None, sync_tec01=sync)
+    with log_context(runId=body.runId, dispatchId=body.dispatchId, ticketId=body.ticketId), hide_credentials(key):
+        emit("EXECUTION_DISPATCHED", operation="dispatch")
+        accepted, created = push_executor.dispatch(payload, key, event_sink=sink if local else None, sync_tec01=sync)
     if local and created:
         studio_events.open(body.runId, reset=True)
     return accepted
@@ -282,8 +332,15 @@ async def studio_dispatch(body: StudioExecutionRequest, x_aops_api_key: str | No
 
 
 @app.post("/api/v1/studio/executions/{run_id}/commands", dependencies=[Depends(require_studio_admin)])
-async def studio_command(run_id: str, body: ExecutionCommandRequest):
+async def studio_command(run_id: str, body: ExecutionCommandRequest, request: Request):
+    request.state.log_operation = "pause_run" if body.type == "PAUSE" else "cancel_run"
+    request.state.log_run_id = run_id
     return push_executor.command(run_id, body.commandId, body.type)
+
+
+@app.get("/api/v1/studio/executions/{run_id}", dependencies=[Depends(require_studio_admin)])
+async def studio_activity(run_id: str):
+    return push_executor.activity(run_id)
 
 
 @app.get("/api/v1/studio/events/{stream_id}", dependencies=[Depends(require_studio_admin)])
@@ -317,14 +374,13 @@ async def runtime_validate(body: RuntimeValidateRequest):
 
 
 def schema_catalog():
-    models = {"workflowDefinition": WorkflowDefinition, "dispatch": ExecutionDispatchRequest, "extraction": ExtractionSubmitRequest, "singleNode": SingleNodeRequest, "singleNodeResponse": SingleNodeResponse}
+    models = {"workflowDefinition": WorkflowDefinition, "dispatch": ExecutionDispatchRequest, "extraction": ExtractionSubmitRequest}
     dialect = "https://json-schema.org/draft/2020-12/schema"
     schemas = {name: {"$schema": dialect, **model.model_json_schema()} for name, model in models.items()}
     definitions = schemas["workflowDefinition"].get("$defs", {})
     definitions["WorkflowNode"]["properties"]["type"]["enum"] = [node["type"] for node in NODE_REGISTRY.catalog()["nodes"]]
-    for name, field, reference in (("dispatch", "workflowSnapshot", "WorkflowDefinition"), ("singleNode", "node", "WorkflowNode")):
-        schemas[name]["$defs"] = {**definitions, "WorkflowDefinition": {key: value for key, value in schemas["workflowDefinition"].items() if key not in {"$defs", "$schema"}}}
-        schemas[name]["properties"][field] = {"$ref": f"#/$defs/{reference}"}
+    schemas["dispatch"]["$defs"] = {**definitions, "WorkflowDefinition": {key: value for key, value in schemas["workflowDefinition"].items() if key not in {"$defs", "$schema"}}}
+    schemas["dispatch"]["properties"]["workflowSnapshot"] = {"$ref": "#/$defs/WorkflowDefinition"}
     return {"runtimeVersion": __version__, "jsonSchemaDialect": dialect, "schemas": schemas, "nodes": NODE_REGISTRY.catalog()["nodes"]}
 
 
@@ -339,17 +395,6 @@ async def runtime_schema(schema_name: str):
     if schema is None:
         raise HTTPException(404, {"code": "SCHEMA_NOT_FOUND", "message": "该约束名称不存在", "retryable": False})
     return schema
-
-
-@app.post("/internal/v1/runtime/nodes/execute", response_model=SingleNodeResponse, dependencies=[Depends(runtime_service)])
-async def runtime_node_execute(body: SingleNodeRequest, x_aops_api_key: str | None = Header(default=None, alias="X-AOPS-Api-Key")):
-    try:
-        reject_credentials({"node": body.node, "inputs": body.inputs, "resumePayload": body.resumePayload})
-        return await single_executor.execute(body.model_dump(mode="json"), x_aops_api_key)
-    except (ValueError, RuntimeError) as exc:
-        if "NO_CAPACITY" in str(exc):
-            raise HTTPException(429, {"code": "EXECUTOR_NO_CAPACITY", "message": "Executor当前无可用容量", "retryable": True}, headers={"Retry-After": "3"}) from exc
-        raise invalid(exc) from exc
 
 
 @app.post("/internal/v1/runtime/workflows/plan", dependencies=[Depends(runtime_service)])
@@ -379,8 +424,15 @@ async def execution_dispatch(body: ExecutionDispatchRequest, x_aops_api_key: str
 
 
 @app.post("/internal/v1/executions/{run_id}/commands", dependencies=[Depends(runtime_service)])
-async def execution_command(run_id: str, body: ExecutionCommandRequest):
+async def execution_command(run_id: str, body: ExecutionCommandRequest, request: Request):
+    request.state.log_operation = "pause_run" if body.type == "PAUSE" else "cancel_run"
+    request.state.log_run_id = run_id
     return push_executor.command(run_id, body.commandId, body.type)
+
+
+@app.get("/internal/v1/executions/{run_id}", dependencies=[Depends(runtime_service)])
+async def execution_activity(run_id: str):
+    return push_executor.activity(run_id)
 
 
 static_dir = settings.static_dir.resolve()
@@ -409,3 +461,6 @@ else:
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     async def placeholder():
         return "<main><h1>ITSM Workflow Runtime</h1><p>Frontend has not been built.</p></main>"
+
+
+localize_openapi(app)

@@ -1,0 +1,45 @@
+---
+title: tec01逐节点调度｜执行主流程（待评审）
+---
+sequenceDiagram
+    autonumber
+    actor U as 用户
+    participant H as 页面 / Hermes
+    participant T as tec01（调度与存储）
+    participant E as itsm-workflow（执行器）
+    participant A as aops-cli / AOPS
+
+    U->>H: 确认本次完整执行计划
+    H->>T: 保存计划与用户确认
+    loop 运行中且允许继续时，tec01再次下发
+        T->>E: 下发完整流程、已保存的执行快照与本次凭据
+        E->>E: 校验流程与快照<br/>确定本次处理的节点
+        E-->>T: 当前节点开始
+        T->>T: 保存执行中状态
+        alt SQL读节点
+            E->>A: 执行本节点的只读查询
+            A-->>E: 返回数据或错误
+        else 条件节点
+            E->>E: 完成条件判断<br/>记录选中的分支
+        else 人工表单节点
+            E->>E: 首次返回待填写字段<br/>有用户回复时校验输入
+        else 结束节点
+            E->>E: 标记流程完成
+        end
+        E->>T: 回报节点结果和更新后的执行快照
+        T->>T: 保存结果和执行快照
+        T-->>E: 确认保存成功
+        E->>E: 释放本次活动执行资源
+        E-->>T: 本次执行结束
+        T-->>H: 更新结果与流程进度
+        H-->>U: 展示当前状态与结果
+        alt 运行中，且未被暂停或取消
+            T->>T: 使用已保存的快照<br/>再次下发完整流程
+        else 等待人工输入
+            T->>T: 停止下发<br/>等待用户填写
+        else 暂停、失败、取消或完成
+            T->>T: 保存状态，停止下发
+        end
+    end
+    Note over T,E: tec01决定是否再次下发；执行器根据流程和快照判断本次处理哪个节点
+    Note over T,E: 结果保存成功且本次执行结束后，才能再次下发；成功节点不重复执行

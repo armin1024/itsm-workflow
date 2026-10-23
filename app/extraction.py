@@ -12,6 +12,7 @@ from sqlglot import exp, parse, parse_one
 
 from app.cli import CliExecutionError, execute_json_command, redact_diagnostic
 from app.config import settings
+from app.call_logs import call_span
 from app.workflow import WorkflowDefinition, WorkflowEdge, WorkflowNode
 
 
@@ -110,7 +111,7 @@ def extract_operations(rows: list[dict[str, Any]]) -> tuple[list[Operation], lis
                 raise ValueError("SQL is not a permitted read statement")
             normalized = expression.sql(dialect="mysql", pretty=False)
         except Exception:
-            ignored.append({"operationId": operation_id, "reason": "invalid_read_sql:SQL必须是安全只读单语句"})
+            ignored.append({"operationId": operation_id, "reason": "invalid_read_sql"})
             continue
         database_values = [sql_data.get(key) for key in ("serverid", "dbid", "dbname", "dbuser", "service_name")]
         if not all(value is not None and str(value).strip() for value in database_values):
@@ -176,30 +177,37 @@ async def _assess(ticket: dict[str, Any], nodes: list[dict[str, Any]]) -> dict[s
             body = dict(base_body)
             if mode == "json_object":
                 body["response_format"] = {"type": "json_object"}
-            try:
-                response = await client.post(url, headers=headers, json=body)
-                if response.is_error:
-                    failures.append(f"{mode}: 模型接口返回HTTP {response.status_code}")
-                    continue
-                payload = response.json()
-                content = payload.get("choices", [{}])[0].get("message", {}).get("content") if isinstance(payload, dict) else None
-                if isinstance(content, list):
-                    content = "".join(str(item.get("text") or item.get("content") or "") for item in content if isinstance(item, dict))
-                if isinstance(content, dict):
-                    result = content
-                elif isinstance(content, str):
-                    cleaned = content.strip()
-                    fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", cleaned, re.I | re.S)
-                    result = json.loads(fenced.group(1) if fenced else cleaned)
-                if isinstance(result, dict):
-                    break
-                failures.append(f"{mode}: 响应缺少 JSON 对象")
-            except httpx.TimeoutException:
-                failures.append(f"{mode}: 请求超时")
-            except httpx.HTTPError as exc:
-                failures.append(f"{mode}: 连接失败 {type(exc).__name__}")
-            except (ValueError, KeyError, IndexError, TypeError, json.JSONDecodeError):
-                failures.append(f"{mode}: content 不是有效 JSON")
+            with call_span(peer="LLM", direction="OUTBOUND", operation="analyze_evidence", method="POST", url=url, model=settings.llm_model, attempt=modes.index(mode) + 1, maxAttempts=len(modes)) as outcome:
+                try:
+                    response = await client.post(url, headers=headers, json=body)
+                    outcome["httpStatus"] = response.status_code
+                    if response.is_error:
+                        outcome["errorCode"] = "LLM_HTTP_ERROR"
+                        failures.append(f"{mode}: 模型接口返回HTTP {response.status_code}")
+                        continue
+                    payload = response.json()
+                    content = payload.get("choices", [{}])[0].get("message", {}).get("content") if isinstance(payload, dict) else None
+                    if isinstance(content, list):
+                        content = "".join(str(item.get("text") or item.get("content") or "") for item in content if isinstance(item, dict))
+                    if isinstance(content, dict):
+                        result = content
+                    elif isinstance(content, str):
+                        cleaned = content.strip()
+                        fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", cleaned, re.I | re.S)
+                        result = json.loads(fenced.group(1) if fenced else cleaned)
+                    if isinstance(result, dict):
+                        break
+                    outcome["errorCode"] = "LLM_INVALID_RESPONSE"
+                    failures.append(f"{mode}: 响应缺少 JSON 对象")
+                except httpx.TimeoutException:
+                    outcome["errorCode"] = "LLM_TIMEOUT"
+                    failures.append(f"{mode}: 请求超时")
+                except httpx.HTTPError as exc:
+                    outcome["errorCode"] = "LLM_UNAVAILABLE"
+                    failures.append(f"{mode}: 连接失败 {type(exc).__name__}")
+                except (ValueError, KeyError, IndexError, TypeError, json.JSONDecodeError):
+                    outcome["errorCode"] = "LLM_INVALID_RESPONSE"
+                    failures.append(f"{mode}: content 不是有效 JSON")
     if not isinstance(result, dict):
         raise ValueError("LLM_ANALYSIS_FAILED：" + "；".join(failures[:2]))
     return result
@@ -262,27 +270,21 @@ async def compile_ticket_evidence(ticket: dict[str, Any], rows: list[dict[str, A
     if progress:
         await progress("FILTERING_OPERATIONS", "正在过滤有效 SQL", 0, len(rows))
     operations, ignored = extract_operations(rows)
-    if progress:
-        await progress("FILTERING_OPERATIONS", "已完成有效 SQL 过滤", len(rows), len(rows))
     if not operations:
         raise ValueError("NO_VALID_OPERATIONS：没有成功且安全的 SQL 读操作")
     nodes: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     if progress:
         await progress("PARAMETERIZING_SQL", "正在参数化 SQL", 0, len(operations))
-    for index, operation in enumerate(operations):
+    for operation in operations:
         key = (operation.database_ref, operation.normalized_sql)
         if key in seen:
             ignored.append({"operationId": operation.operation_id, "reason": "duplicate_read_operation"})
-            if progress:
-                await progress("PARAMETERIZING_SQL", "正在参数化 SQL", index + 1, len(operations))
             continue
         seen.add(key)
         number = len(nodes) + 1
         sql, inputs = parameterize_sql(operation.sql, number)
         nodes.append({"id": f"sql-{number}", "type": "sql_read", "title": f"只读查询步骤 {number}", "config": {"databaseRef": operation.database_ref, "sqlTemplate": sql}, "inputs": inputs, "approvalPolicy": "PLAN", "timeoutSeconds": 600})
-        if progress:
-            await progress("PARAMETERIZING_SQL", "正在参数化 SQL", index + 1, len(operations))
     if progress:
         await progress("ANALYZING_EVIDENCE", "正在分析工单和操作记录", None, None)
     assessed = await _assess(ticket, nodes)

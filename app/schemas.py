@@ -31,40 +31,8 @@ class CompilerTicketRequest(BaseModel):
     targetCatalogDigest: str | None = None
 
 
-class StudioNodeDebugRequest(BaseModel):
-    workspaceId: str | None = None
-    ticketId: int | None = Field(default=None, gt=0)
-    node: dict[str, Any]
-    inputs: dict[str, Any] = Field(default_factory=dict)
-    mode: str = Field(default="TEST", pattern="^(TEST|SIMULATION|DRY_RUN)$")
-    simulation: dict[str, Any] = Field(default_factory=dict)
-
-
-class StudioInterruptReply(BaseModel):
-    node: dict[str, Any]
-    inputs: dict[str, Any] = Field(default_factory=dict)
-    response: dict[str, Any]
-
-
 class StudioLoginRequest(BaseModel):
     token: str = Field(min_length=1, max_length=1000)
-
-
-class StudioNodeUpdate(BaseModel):
-    enabled: bool = True
-    name: str = Field(min_length=1, max_length=120)
-    description: str = Field(min_length=1, max_length=1000)
-    debugConfig: dict[str, Any] = Field(default_factory=dict)
-    debugInputs: dict[str, Any] = Field(default_factory=dict)
-    debugFixture: dict[str, Any] = Field(default_factory=dict)
-
-
-class StudioWorkflowDebugRequest(BaseModel):
-    workflowDefinition: dict[str, Any]
-    ticketId: int | None = Field(default=None, gt=0)
-    inputs: dict[str, Any] = Field(default_factory=dict)
-    mode: str = Field(default="TEST", pattern="^(TEST|SIMULATION|DRY_RUN)$")
-    simulation: dict[str, Any] = Field(default_factory=dict)
 
 
 class ExtractionSubmitRequest(BaseModel):
@@ -108,21 +76,4 @@ class ExecutionCommandRequest(BaseModel):
 
 class StudioExecutionRequest(ExecutionDispatchRequest):
     syncTec01: bool = False
-
-
-class SingleNodeRequest(BaseModel):
-    requestId: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9_.:-]+$")
-    ticketId: int | None = Field(default=None, gt=0)
-    node: dict[str, Any]
-    inputs: dict[str, Any] = Field(default_factory=dict)
-    resumePayload: dict[str, Any] | None = None
-
-
-class SingleNodeResponse(BaseModel):
-    requestId: str
-    nodeId: str
-    status: str
-    output: dict[str, Any] | None = None
-    diagnostic: dict[str, Any] | None = None
-    interaction: dict[str, Any] | None = None
-    handlerVersion: str
+    planMaterialHash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")

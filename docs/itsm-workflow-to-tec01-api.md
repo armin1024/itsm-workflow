@@ -1,289 +1,129 @@
-# itsm-workflow提供给tec01的接口文档
+# itsm-workflow提供给tec01的API（0.11.0）
 
-本文描述执行侧对外提供的现行API。默认地址 `http://itsm-workflow:8089`，接口使用UTF-8 JSON。配套回调见[tec01提供给itsm-workflow](tec01-to-itsm-workflow-api.md)。
+现行0.12.0完整字段、节点/连线约束、计划执行和回报示例，请使用[Workflow全流程接口文档](workflow-full-api-guide-0.12.0.md)。本页保留接口概要。
+
+当前源码五个提取阶段各回报一次，不发送逐项进度或定时心跳；运行确认采用AopsResult，终止回报TERMINATED。tec01需配套的采纳确认、幂等及异常处理见[提取与执行对齐交付文档](tec01-extraction-execution-alignment.md)。
+
+单服务、单进程部署。默认地址`http://itsm-workflow:8089`，UTF-8 JSON。配套见[tec01回调API](tec01-to-itsm-workflow-api.md)和[对齐与待补充约定](runtime-alignment-0.11.0.md)。
 
 ## 认证与错误
 
-所有内部接口必须传：
+内部接口要求`Authorization: Bearer <RUNTIME_SERVICE_TOKEN>`。真实SQL执行另传`X-AOPS-Api-Key: <当前用户AOPS_API_KEY>`；Key不写入JSON或日志。
 
-```http
-Authorization: Bearer <RUNTIME_SERVICE_TOKEN>
-```
-
-真实SQL执行额外传 `X-AOPS-Api-Key: <当前用户AOPS_API_KEY>`。该Key只用于当前CLI子进程，不进入Workflow、回调、日志或浏览器持久化数据。
-
-统一错误结构：
-
-```json
-{"code":"WORKFLOW_VALIDATION_FAILED","message":"节点配置校验失败","retryable":false,"details":{}}
-```
-
-401为服务身份失败；409为内容或活动状态冲突；422为请求/Workflow校验失败；429为并发容量不足；503为未配置必要回调或依赖不可用。
+错误使用非2xx HTTP状态及`{code,message,retryable}`：401身份失败，409冲突，422校验失败，429容量不足，503必要回调未配置。429可带`Retry-After`，不表示SQL已经开始。
 
 ## 接口索引
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/internal/v1/runtime/catalog` | Node Catalog |
-| GET | `/internal/v1/runtime/schemas` | 全部JSON Schema与节点约束 |
-| GET | `/internal/v1/runtime/schemas/{schemaName}` | 单份JSON Schema |
-| POST | `/internal/v1/runtime/workflows/validate` | 校验并规范化Workflow |
-| POST | `/internal/v1/runtime/workflows/plan` | 预览计划，供联调使用 |
-| POST | `/internal/v1/runtime/nodes/execute` | 同步真实执行单个节点 |
-| POST | `/internal/v1/extractions/{knowledgeId}` | 异步提交草稿提取 |
-| POST | `/internal/v1/executions/dispatch` | 下发完整Workflow |
-| POST | `/internal/v1/executions/{runId}/commands` | 暂停或取消 |
+| GET | `/internal/v1/runtime/catalog` | 节点目录，支持ETag/304 |
+| GET | `/internal/v1/runtime/schemas` | Workflow、dispatch、extraction及各节点Schema |
+| GET | `/internal/v1/runtime/schemas/{schemaName}` | 单份Schema |
+| POST | `/internal/v1/runtime/workflows/validate` | 归一化与发布校验 |
+| POST | `/internal/v1/runtime/workflows/plan` | 联调计划预览，不执行SQL |
+| POST | `/internal/v1/extractions/{knowledgeId}` | 提交工单证据，202异步受理 |
+| POST | `/internal/v1/executions/dispatch` | 一次下发、后台连续执行，200受理 |
+| GET | `/internal/v1/executions/{runId}` | 查询本实例是否仍有活动任务 |
+| POST | `/internal/v1/executions/{runId}/commands` | 暂停/取消，受理不等于生效 |
 
-## 获取Node Catalog
+## 发布校验与计划
 
-`GET /internal/v1/runtime/catalog`支持 `If-None-Match`，匹配Catalog摘要返回304。200响应：
+`validate`接收`workflowDefinition`、`validationMode:DRAFT|PUBLISH|EXECUTE|TEST`及可选`targetCatalogDigest`。返回规范化定义、目录摘要、内容哈希、警告及兼容版本。目录不符返回409。
 
-```json
-{
-  "catalogDigest":"<sha256>",
-  "runtimeVersion":"0.10.0",
-  "generatedAt":"2026-10-16T10:00:00+08:00",
-  "testOnly":false,
-  "nodes":[
-    {
-      "type":"sql_read",
-      "name":"SQL只读查询",
-      "schemaVersion":1,
-      "handlerVersion":"1.0.0",
-      "description":"使用aops-cli执行单条安全只读SQL",
-      "configSchema":{},
-      "inputSchema":{},
-      "outputSchema":{},
-      "uiSchema":{},
-      "riskLevel":"LOW"
-    }
-  ]
-}
-```
+`plan`接收`workflowVersionId/workflowContentHash/workflowSnapshot/ticketId/parameters/actorUid`，返回渲染节点、必填参数、风险摘要、缺失输入与`planMaterialHash`。SQL结果绑定和人工输入可延迟到运行时，不能猜测值。
 
-节点类型为 `sql_read/condition/hitl_form/end`。示例Schema空对象仅为简写，实际返回完整约束。Node类型与Handler由执行侧代码发布管理。
+tec01保存不可变发布版本，并在执行前保存对应计划和用户确认。`workflowSnapshot`是保留的字段名，内容为固定Workflow定义，不表示正常每步来回传整份执行状态。
 
-## 获取JSON Schema
-
-`GET /internal/v1/runtime/schemas`返回：
+## 下发执行
 
 ```json
 {
-  "runtimeVersion":"0.10.0",
-  "jsonSchemaDialect":"https://json-schema.org/draft/2020-12/schema",
-  "schemas":{
-    "workflowDefinition":{},
-    "dispatch":{},
-    "extraction":{},
-    "singleNode":{}
-  },
-  "nodes":[
-    {"type":"sql_read","schemaVersion":1,"configSchema":{},"inputSchema":{},"outputSchema":{}}
-  ]
-}
-```
-
-`GET /internal/v1/runtime/schemas/{schemaName}`读取单份Schema，schemaName可用 `workflowDefinition/dispatch/extraction/singleNode`；另提供`singleNodeResponse`用于校验单节点响应。未知名称返回404。
-
-tec01可用这些约束生成配置表单、检查必填项与类型。只读SQL、DAG、上游依赖与条件默认边通过后续validate接口检查，不仅依赖前端Schema。
-
-## 校验并规范化Workflow
-
-```http
-POST /internal/v1/runtime/workflows/validate
-```
-
-```json
-{
-  "workflowDefinition":{
-    "schemaVersion":2,
-    "entryNodeId":"sql-1",
-    "nodes":[
-      {
-        "id":"sql-1",
-        "type":"sql_read",
-        "schemaVersion":1,
-        "title":"查询客户",
-        "config":{"databaseRef":"124/aops-t/aops-t/readonly/aops-t","sqlTemplate":"SELECT id FROM users WHERE name={{customer_name}}"},
-        "inputs":[{"name":"customer_name","type":"string","source":{"kind":"RUN_INPUT","key":"customer_name"},"required":true}],
-        "approvalPolicy":"PLAN",
-        "timeoutSeconds":600
-      },
-      {"id":"done","type":"end","title":"完成","config":{},"inputs":[]}
-    ],
-    "edges":[{"id":"next","source":"sql-1","target":"done","kind":"NORMAL"}]
-  },
-  "validationMode":"PUBLISH"
-}
-```
-
-可选 `targetCatalogDigest` 指定预期目录，变化返回409。validationMode为 `DRAFT/PUBLISH/EXECUTE/TEST`，默认DRAFT。成功200：
-
-```json
-{
-  "valid":true,
-  "normalizedDefinition":{},
-  "catalogDigest":"<sha256>",
-  "workflowContentHash":"<sha256>",
-  "requiredRuntimeVersion":">=0.10.0,<1.0.0",
-  "warnings":[]
-}
-```
-
-tec01发布前必须调用，保存规范化Workflow、Catalog摘要与内容哈希。创建计划时从该不可变版本生成快照，检查权限、工单ID及当前输入，保存planHash并请用户确认，无需每次重新校验整张DAG。
-
-## 同步单节点执行
-
-```http
-POST /internal/v1/runtime/nodes/execute
-X-AOPS-Api-Key: <SQL读时必填>
-```
-
-```json
-{
-  "requestId":"single_sql_001",
-  "ticketId":100173,
-  "node":{
-    "id":"sql-1",
-    "type":"sql_read",
-    "title":"查询客户",
-    "config":{"databaseRef":"124/aops-t/aops-t/readonly/aops-t","sqlTemplate":"SELECT id FROM users WHERE name={{customer_name}}"},
-    "inputs":[{"name":"customer_name","type":"string","source":{"kind":"RUN_INPUT","key":"customer_name"}}]
-  },
-  "inputs":{"customer_name":"王五"},
-  "resumePayload":null
-}
-```
-
-| 字段 | 类型 | 必填 | 说明 |
-|---|---|---|---|
-| requestId | string | 是 | 当前进程内幂等标识 |
-| ticketId | 正整数 | SQL读时是 | comment使用当前工单ID |
-| node | object | 是 | 完整单节点定义 |
-| inputs | object | 否 | 已解析的真实输入，默认空对象 |
-| resumePayload | object | 否 | 人工表单回复 |
-
-结果同步200：
-
-```json
-{
-  "requestId":"single_sql_001",
-  "nodeId":"sql-1",
-  "status":"SUCCEEDED",
-  "output":{"status":0,"rowCount":1,"data":[{"id":"C001"}]},
-  "diagnostic":null,
-  "interaction":null,
-  "handlerVersion":"1.0.0"
-}
-```
-
-不自动执行前置节点，调用方应按绑定规则取好inputs。相同requestId同内容返回原结果，同ID不同内容返回409；重试或HITL回复使用新requestId。幂等记录只在当前进程内暂存，不跨服务重启。节点执行失败返回FAILED与脱敏diagnostic，调用方自行保存结果；该接口不创建完整运行回调。
-
-表单首次执行返回WAITING_INPUT；新requestId携带：
-
-```json
-{"resumePayload":{"nodeId":"input-1","action":"SUBMIT","values":{"customer_id":"C001","limit":20}}}
-```
-
-## 异步草稿提取
-
-```http
-POST /internal/v1/extractions/knw_100173
-```
-
-```json
-{
-  "requestId":"extract_100173_1",
-  "ticketId":100173,
-  "ticketInfo":{"id":100173,"incident_id":"INC-1","event_title":"客户查询"},
-  "auditTimeline":[
-    {
-      "id":19,
-      "operation":"sql_exec_read",
-      "result":"{\"r\":true,\"e\":\"\"}",
-      "details":"{\"sql\":{\"serverid\":124,\"dbid\":\"aops-t\",\"dbname\":\"aops-t\",\"dbuser\":\"readonly\",\"service_name\":\"aops-t\",\"command\":\"SELECT id FROM users\"}}"
-    }
-  ]
-}
-```
-
-tec01先生成knowledgeId并建EXTRACTING记录，再提交。knowledgeId就是任务ID，不再有独立jobId。ticketInfo必须为info.data对象，auditTimeline必须为timeline.data对象数组；不接受完整响应信封。ticketId正整数且必须与ticketInfo.id一致。
-
-响应202：
-
-```json
-{"knowledgeId":"knw_100173","accepted":true,"duplicate":false}
-```
-
-同knowledgeId、requestId、证据内容重复提交不重复提取；内容冲突返回409。失败后显式重试使用同knowledgeId和新requestId。tec01应把该记录重新设为EXTRACTING，重置本次提取的终态去重窗口，避免前一次FAILED屏蔽本次结果。
-
-后台阶段为过滤、参数化、分析、生成、校验；分析阶段每15秒心跳。成功回调含中文草稿、校验摘要与完整过滤账本。所有回调到 `/internal/v1/extractions/{knowledgeId}/callbacks`。
-
-## 下发完整Workflow
-
-```http
-POST /internal/v1/executions/dispatch
-X-AOPS-Api-Key: <含SQL读时必填>
-```
-
-```json
-{
-  "dispatchId":"dispatch_100173_1",
+  "dispatchId":"dispatch_1",
   "runId":"run_100173",
   "ticketId":100173,
   "workflowContentHash":"<validate返回的哈希>",
   "workflowSnapshot":{},
-  "runInputs":{},
+  "runInputs":{"customerName":"当前用户确认的参数"},
   "nodeStates":{},
   "nodeOutputs":{},
+  "nodeResults":{},
   "currentNodeId":null,
   "selectedRoutes":{},
   "resumePayload":null
 }
 ```
 
-workflowSnapshot必须填完整规范化Workflow。nodeStates保存 `PENDING/RUNNING/WAITING/SUCCEEDED/SKIPPED/FAILED/UNKNOWN` 等当前事实；nodeOutputs为已完成节点的真实输出，selectedRoutes为已选条件路径。可附nodeResults保留调试/交互结果。
+`workflowSnapshot`必须填完整规范化定义，上例空对象仅表示该位置，不能作为合法流程执行。节点类型为`sql_read/condition/hitl_form/end`。工单ID为正整数，SQL注释固定`#uatu-<ticketId>`。
 
-每次首次、继续或重试生成新的dispatchId。相同dispatchId与相同内容重发返回原受理结果；相同ID不同内容、同runId已活动返回409。并发已满返回429并给Retry-After。
-
-响应200仅表示受理：
+200响应示例：
 
 ```json
-{"dispatchId":"dispatch_100173_1","runId":"run_100173","accepted":true,"executorId":"executor-01","acceptedAt":"2026-10-16T10:00:00+08:00"}
+{
+  "accepted":true,
+  "runId":"run_100173",
+  "dispatchId":"dispatch_1",
+  "executorId":"executor-01",
+  "executorInstanceId":"<本次服务启动标识>",
+  "status":"RUNNING",
+  "acceptedAt":"2026-10-19T10:00:00+08:00"
+}
 ```
 
-真实状态按逐节点回调判断。已成功/跳过节点不重放；tec01提供半途运行的状态与结果，执行器继续当前未完成节点。未知外部执行结果必须先人工核实。
+这只代表受理，SQL可能还未开始。执行器将计划放入内存，每个节点结果获得tec01的AopsResult保存及采纳确认后，直接推进下一节点，无需tec01重新下发。
 
-| 恢复场景 | currentNodeId | resumePayload |
-|---|---|---|
-| 暂停后继续 | 当前节点 | `{"action":"continue"}` |
-| 人工表单回复 | 表单节点 | `{"nodeId":"input-1","action":"SUBMIT","values":{...}}` |
-| 失败后明确重试 | 失败节点 | null或保留的表单恢复载荷 |
+同dispatchId、同内容在本进程有限受理记录内返回原结果；内容不一致409。同runId仍活动时拒绝另一份下发。重启后不保证历史去重，不能透明重放结果未知的请求。
 
-## 暂停与取消
-
-```http
-POST /internal/v1/executions/run_100173/commands
-
-{"commandId":"cmd_1","type":"PAUSE"}
-```
-
-type只能PAUSE或CANCEL，继续走新的dispatch。200响应：
+## 活动查询与恢复前核实
 
 ```json
-{"commandId":"cmd_1","runId":"run_100173","accepted":true,"currentNodeId":"sql-1"}
+{
+  "runId":"run_100173",
+  "executorId":"executor-01",
+  "executorInstanceId":"<本次服务启动标识>",
+  "active":true,
+  "dispatchId":"dispatch_1",
+  "currentNodeId":"sql-1",
+  "phase":"WAITING_RESULT_ACK",
+  "pauseRequested":false,
+  "cancelRequested":false,
+  "lastAcknowledgedNodeId":null,
+  "observedAt":"2026-10-19T10:00:00+08:00"
+}
 ```
 
-accepted=false时HTTP仍为200，并给reason。受理不代表已经暂停；当前SQL安全结束后回调PAUSED。取消会终止本地进程，如外部结果不能确认，返回UNKNOWN。每次释放都通过RUN_RELEASED回调，tec01保存最终状态。
+phase为`QUEUED/EXECUTING/WAITING_START_ACK/WAITING_RESULT_ACK/WAITING_STOP_ACK/BETWEEN_NODES/INACTIVE`。此接口仅返回活动信息，不含SQL、参数、Key、输出或完整计划。
 
-## Workflow关键结构
+无活动时返回200与`active:false,phase:INACTIVE`，其余活动字段为null或false。**不表示历史成功、不表示从未执行，也不证明AOPS远端请求已撤销。** 必须查询原服务实例；实例变化说明重启，不能因此自动重跑SQL。
 
-- 定义：schemaVersion为1或2，entryNodeId、nodes、edges；可有catalogDigest。
-- 节点：id、type、title、config、inputs、schemaVersion、handlerVersion、approvalPolicy、timeoutSeconds、uiPosition。
-- 输入：name、type、description、required、source。type为string/number/integer/boolean/object/array。
-- source：RUN_INPUT使用key，NODE_OUTPUT使用nodeId与jsonPointer，LITERAL使用value。
-- 边：id、source、target、kind（NORMAL/CONDITION）、label、condition、default。
-- 条件支持eq/ne/gt/gte/lt/lte/in/contains/exists/empty及all/any/not，条件节点必须有默认边。
-- 人工表单输出固定为 `{"values":{...}}`，下游绑定 `/values/<字段名>`。
+恢复前先确认旧活动已停止；仍活动则请求暂停/取消并再次查询。服务不可达或SQL事实不明时，tec01提示未知，由用户核对审计。单进程实例不支持被随机负载均衡成多个独立执行器。
 
-获取上述结构的精确JSON约束请调用schemas接口。
+## 暂停、取消与恢复
+
+控制请求：`{"commandId":"command_1","type":"PAUSE"}`或`CANCEL`。返回accepted表示控制意图已记录，最终以执行器停止事实为准；不承诺点击即生效。
+
+暂停在安全边界生效。取消尽力终止CLI，不能撤销已经到达AOPS的请求。控制遇到无活动返回accepted=false，仍不代表历史SQL未执行。
+
+HITL、暂停、失败或未知核实后，以新dispatchId重新下发固定计划，以及必要的已确认状态和前置输出。SUCCEEDED节点不重放；RUNNING/UNKNOWN必须先人工核实并修正，不能原样恢复。成功条件节点需保留selectedRoutes，防止恢复时重新改变分支。
+
+人工回复示例：
+
+```json
+{"nodeId":"input-1","action":"SUBMIT","values":{"customer_id":"C001","limit":10}}
+```
+
+将该对象放在`resumePayload`；同时填写当前节点、必要输出及原计划定义。只传“从第几步开始”而缺少后续绑定使用的数据会失败。
+
+## 草稿提取
+
+```json
+{
+  "requestId":"extract_100173_1",
+  "ticketId":100173,
+  "ticketInfo":{"id":100173,"incident_id":"INC-1","event_title":"客户查询"},
+  "auditTimeline":[]
+}
+```
+
+ticketInfo为info.data对象，auditTimeline为操作记录data数组，ticketId需一致。空数组可验证无有效操作的失败路径，不能提取有效草稿。tec01先建立知识/提取记录，服务端通过PROGRESS/FINISHED回调进度与结果。 PROGRESS和FINISHED均回传原提交requestId，回报幂等键包含该requestId；tec01按knowledgeId+requestId隔离提取尝试，旧请求迟到回报不得覆盖新请求，具体确认格式见回调API文档。
+
+不依赖tec01任务领取或轮询。发布前校验、人工审核、知识存储由tec01负责；LLM只用于提取。

@@ -18,8 +18,10 @@ def test_installer_creates_and_renders_service_group():
     assert not (root / "packaging" / "itsm-workflow-migrate.service.in").exists()
     assert not (root / "packaging" / "itsm-workflow-compiler.service.in").exists()
     env_example = (root / "packaging" / "service.env.example").read_text()
-    for removed in ("DATABASE_URL", "LANGGRAPH_DATABASE_URL", "WORKFLOW_ADMIN_UIDS", "WORKFLOW_OPERATOR_UIDS", "MCP_PORT", "EMBEDDING_BASE_URL", "RERANK_BASE_URL"):
+    for removed in ("DATABASE_URL", "STUDIO_DATABASE_PATH", "LANGGRAPH_DATABASE_URL", "WORKFLOW_ADMIN_UIDS", "WORKFLOW_OPERATOR_UIDS", "MCP_PORT", "EMBEDDING_BASE_URL", "RERANK_BASE_URL"):
         assert removed not in env_example
+    assert 'TEC01_RUN_CALLBACK_PATH=/internal/v1/runs/{runId}/callbacks' in env_example
+    assert 'TEC01_EXTRACTION_CALLBACK_PATH=/internal/v1/extractions/{knowledgeId}/callbacks' in env_example
     assert "ReadWritePaths=/var/lib/itsm-workflow" in (root / "packaging" / "itsm-workflow-api.service.in").read_text()
 
 
