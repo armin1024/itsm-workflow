@@ -17,7 +17,7 @@ def test_published_json_schemas_keep_workflow_and_node_constraints(client):
     response = client.get("/internal/v1/runtime/schemas", headers=headers)
     assert response.status_code == 200
     document = response.json()
-    assert set(document["schemas"]) == {"workflowDefinition", "dispatch", "extraction"}
+    assert set(document["schemas"]) == {"workflowDefinition", "dispatch", "extraction", "extractionDiagnostics", "extractionFinished"}
     for schema in document["schemas"].values():
         Draft202012Validator.check_schema(schema)
     node_types = document["schemas"]["workflowDefinition"]["$defs"]["WorkflowNode"]["properties"]["type"]["enum"]

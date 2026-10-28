@@ -9,6 +9,7 @@ import LocalRuntimeMonitor from "./LocalRuntimeMonitor";
 import RuntimeConfig from "./RuntimeConfig";
 import CallLogs from "./CallLogs";
 import RawLogs from "./RawLogs";
+import BrowserStoragePanel from "./BrowserStoragePanel";
 
 function Login({ onReady }: { onReady: () => void }) {
   const [token, setToken] = useState("");
@@ -24,7 +25,7 @@ function Login({ onReady }: { onReady: () => void }) {
 }
 
 function Shell({ onLogout }: { onLogout: () => void }) {
-  return <div className="runtime-shell"><header className="topbar"><Link className="wordmark" to="/runs"><span>IW</span><strong>Runtime Studio</strong></Link><nav aria-label="主导航"><NavLink to="/runs" end>执行中心</NavLink><NavLink to="/runs/new">创建运行</NavLink><NavLink to="/knowledge">知识与版本</NavLink><NavLink to="/compiler">知识抽取</NavLink><NavLink to="/logs">日志</NavLink><NavLink to="/config">运行配置</NavLink><NavLink to="/docs">API文档</NavLink></nav><div className="identity"><span>TEST_ONLY</span><button onClick={onLogout}>退出</button></div></header><LocalRuntimeMonitor /><Routes><Route path="/studio" element={<Navigate to="/knowledge" replace />} /><Route path="/nodes" element={<Navigate to="/knowledge" replace />} /><Route path="/runs" element={<WorkflowLab key="runs" />} /><Route path="/runs/new" element={<WorkflowLab key="new-run" />} /><Route path="/knowledge" element={<WorkflowLab key="knowledge" />} /><Route path="/workflow" element={<WorkflowLab key="legacy" />} /><Route path="/compiler" element={<CompilerLab />} /><Route path="/logs" element={<CallLogs />} /><Route path="/logs/raw" element={<RawLogs />} /><Route path="/config" element={<RuntimeConfig />} /><Route path="/docs" element={<ApiDocs />} /><Route path="*" element={<Navigate to="/runs" replace />} /></Routes></div>;
+  return <div className="runtime-shell"><header className="topbar"><Link className="wordmark" to="/runs"><span>IW</span><strong>Runtime Studio</strong></Link><nav aria-label="主导航"><NavLink to="/runs" end>执行中心</NavLink><NavLink to="/runs/new">创建运行</NavLink><NavLink to="/knowledge">知识与版本</NavLink><NavLink to="/compiler">知识抽取</NavLink><NavLink to="/logs">日志</NavLink><NavLink to="/config">运行配置</NavLink><NavLink to="/docs">API文档</NavLink></nav><div className="identity"><span>TEST_ONLY</span><button onClick={onLogout}>退出</button></div></header><LocalRuntimeMonitor /><BrowserStoragePanel /><Routes><Route path="/studio" element={<Navigate to="/knowledge" replace />} /><Route path="/nodes" element={<Navigate to="/knowledge" replace />} /><Route path="/runs" element={<WorkflowLab key="runs" />} /><Route path="/runs/new" element={<WorkflowLab key="new-run" />} /><Route path="/knowledge" element={<WorkflowLab key="knowledge" />} /><Route path="/workflow" element={<WorkflowLab key="legacy" />} /><Route path="/compiler" element={<CompilerLab />} /><Route path="/logs" element={<CallLogs />} /><Route path="/logs/raw" element={<RawLogs />} /><Route path="/config" element={<RuntimeConfig />} /><Route path="/docs" element={<ApiDocs />} /><Route path="*" element={<Navigate to="/runs" replace />} /></Routes></div>;
 }
 
 export default function App() {

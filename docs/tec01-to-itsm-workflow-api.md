@@ -401,6 +401,8 @@ tec01 在同一事务中保存 `proposal`、`validation`、`diagnostics`，将�
 
 ### 6.3 FINISHED 失败
 
+0.13.2起error保留code/message/retryable，新增可选errorId及details（stage、reasonCode、field、类型及安全代码位置）。message现在说明具体原因，例如parameters应为数组但实际null；tec01应原样保存并向页面/Hermes展示，严格DTO需允许新增字段。完整示例和原因码见[失败诊断与日志检索](compiler-failure-diagnostics.md)。回报确认及重试不变。
+
 ```json
 {
   "type":"FINISHED",
@@ -478,3 +480,6 @@ tec01 知识状态：
 - [集成约定](tec01-integration-contract.md)
 - [总体拆分设计](tec01-control-plane-split.md)
 - [独立 Studio 手册](standalone-studio-guide.md)
+## 提取完整性扩展（0.13.3）
+
+提取结果新增`extractionOutcome`和`publishable`，诊断新增异常操作和依赖阻断项；部分成功继续使用原SUCCEEDED状态，不新增任务状态或回报。下游须保存并展示诊断，发布时结合人工处理和当前Workflow校验。详细字段与上线顺序见[提取完整性补充说明](extraction-partial-success-addendum.md)。执行下发及确认协议不变。

@@ -1,5 +1,11 @@
 # Runtime与Studio REST API
 
+0.13.3成功提取结果新增`extractionOutcome=SUCCESS|PARTIAL_SUCCESS`和`publishable`，diagnostics新增异常SQL与阻断项。部分成功仍为`status=SUCCEEDED`，仅表示生成结构合法的草稿，不代表可以直接发布。整体失败的已完成统计在`error.details.diagnostics`。见[完整性接入补充说明](extraction-partial-success-addendum.md)。新增Schema可从`/internal/v1/runtime/schemas/extractionFinished`和`/internal/v1/runtime/schemas/extractionDiagnostics`获取；Workflow定义不变。
+
+0.13.2提取错误增加安全具体原因、errorId和details；日志可按errorCode/reasonCode/errorField/errorId/stage精确过滤，并支持中文原因片段。见[提取失败诊断与日志检索](compiler-failure-diagnostics.md)。新增COMPILER内部ERROR不依赖tec01回报，旧日志不补造。
+
+0.13.0保留既有回报字段与协议，新增只读performance、health.dataBudget及Schema.limits，Studio事件可返回historyGap。大请求/证据413，容量429及Retry-After: 3，结构/候选/模型输入超限422；详见[资源限制与接口兼容说明](performance-optimization.md)。
+
 0.12.2增加中文OpenAPI说明与字段级校验提示；技术路径、参数键和错误码不变。日志增加event/operation检索及`GET /api/v1/studio/logs/raw`、`GET /api/v1/studio/logs/journal`两个只读原文入口，字段、权限和主机授权注意事项见[日志手册](logging.md)。
 
 完整生产接入流程、字段表、请求响应及恢复示例见[Workflow全流程接口文档](workflow-full-api-guide-0.12.0.md)。本文中的Studio接口与生产内部接口认证、参数不同，不应混用。
@@ -14,7 +20,7 @@ tec01下游开发请使用[提取与执行协议对齐交付文档](tec01-extrac
 
 新增只读`GET /api/v1/studio/logs`和`GET /api/v1/studio/logs/status`，均需Studio管理会话。默认100条、最多200条，单次扫描最多8MiB，不返回全量总数；游标因清理失效返回409。字段与示例见[日志运维手册](logging.md)。只读配置响应新增`logging`策略，业务存储仍为browser-indexeddb。
 
-当前版本0.12.3。日志支持调用配对、中文操作说明和spanId/callId/traceId关联查询。运行回调采用HTTP200、整数status=200及data.runId匹配的AopsResult采纳确认，不再要求saved；提取五阶段各一次进度，终止状态TERMINATED。详见[tec01回调API](tec01-to-itsm-workflow-api.md)。旧0.11.0对齐事项为历史设计。
+当前版本0.13.2。日志支持调用配对、中文操作说明和spanId/callId/traceId关联查询。运行回调继续采用HTTP200、整数status=200及data.runId匹配的AopsResult采纳确认，不要求saved；提取五阶段各一次进度，终止状态TERMINATED。性能优化不改变这些确认规则。详见[tec01回调API](tec01-to-itsm-workflow-api.md)。旧0.11.0对齐事项为历史设计。
 
 ## 只读运行配置
 

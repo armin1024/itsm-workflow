@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -24,6 +24,48 @@ class CompilerPreviewRequest(BaseModel):
     ticketInfo: dict[str, Any]
     auditTimeline: list[dict[str, Any]]
     targetCatalogDigest: str | None = None
+
+
+class FailedSqlOperation(BaseModel):
+    operationId: str | None
+    auditIndex: int = Field(ge=0)
+    stage: Literal["FILTERING_OPERATIONS", "PARAMETERIZING_SQL"]
+    code: Literal["SQL_PARSE_FAILED", "SQL_NOT_READ_ONLY", "SQL_MULTIPLE_STATEMENTS", "SQL_TEMPLATE_TOO_LARGE", "SQL_PARAMETERIZATION_FAILED", "SQL_NODE_VALIDATION_FAILED"]
+    message: str
+
+
+class ExtractionBlockingIssue(BaseModel):
+    code: Literal["DEPENDENCY_REQUIRES_REVIEW", "EXTRACTION_INCOMPLETE"]
+    message: str
+    nodeIds: list[str]
+    operationIds: list[str]
+
+
+class ExtractionDiagnostics(BaseModel):
+    ticketNo: str | None = None
+    auditOperationCount: int = Field(ge=0)
+    acceptedOperationCount: int = Field(ge=0)
+    ignoredOperationCount: int = Field(ge=0)
+    ignoredOperations: list[dict[str, Any]]
+    failedOperationCount: int = Field(ge=0)
+    failedOperations: list[FailedSqlOperation]
+    blockingIssues: list[ExtractionBlockingIssue]
+    llmMode: Literal["structured"] = "structured"
+
+
+class ExtractionFinished(BaseModel):
+    """Success callback only; FAILED continues using the existing error envelope."""
+    knowledgeId: str
+    requestId: str
+    type: Literal["FINISHED"]
+    status: Literal["SUCCEEDED"]
+    seq: int = Field(ge=1)
+    occurredAt: str
+    extractionOutcome: Literal["SUCCESS", "PARTIAL_SUCCESS"]
+    publishable: bool
+    proposal: dict[str, Any]
+    validation: dict[str, Any]
+    diagnostics: ExtractionDiagnostics
 
 
 class CompilerTicketRequest(BaseModel):

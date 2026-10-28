@@ -2,6 +2,7 @@ export type CallLog = {
   logId: string; timestamp: string; level: string; event: string; direction?: string; peer?: string;
   operation?: string; operationLabel?: string; operationDescription?: string; durationMs?: number;
   method?: string; url?: string; nodeId?: string; runId?: string; knowledgeId?: string; requestId?: string;
+  errorMessage?: string; reasonCode?: string; errorField?: string; errorId?: string; stage?: string; exceptionType?: string; errorLocation?: string;
   httpStatus?: number; exitCode?: number; errorCode?: string; businessErrorCode?: string;
   businessStatus?: string; acknowledged?: boolean; spanId?: string; traceId?: string; callId?: string;
   attempt?: number; maxAttempts?: number; retryDelaySeconds?: number; [key: string]: unknown;
@@ -13,7 +14,7 @@ export type LogGroup = {
 };
 
 export const businessLabels: Record<string, string> = {
-  SUCCEEDED: "成功", FAILED: "失败", WAITING_INPUT: "等待用户输入", PAUSED: "已暂停",
+  SUCCEEDED: "成功", PARTIAL_SUCCESS: "部分成功，待审核", FAILED: "失败", WAITING_INPUT: "等待用户输入", PAUSED: "已暂停",
   TERMINATED: "已终止", CANCELLED: "已取消", UNKNOWN: "结果未知", RUNNING: "进行中",
 };
 const stageLabels: Record<string, string> = {
@@ -21,7 +22,7 @@ const stageLabels: Record<string, string> = {
   ANALYZING_EVIDENCE: "分析工单与操作证据", BUILDING_WORKFLOW: "组装流程草稿", VALIDATING_WORKFLOW: "校验流程定义",
 };
 const operationLabels: Record<string, string> = {
-  NODE_STARTED: "回报节点开始执行", NODE_COMPLETED: "回报节点执行结果", RUN_RELEASED: "回报运行结束或释放",
+  compile_evidence: "知识提取失败诊断", NODE_STARTED: "回报节点开始执行", NODE_COMPLETED: "回报节点执行结果", RUN_RELEASED: "回报运行结束或释放",
   FINISHED: "回报知识提取终态", analyze_evidence: "调用LLM提炼经验草稿", sql_read: "执行AOPS SQL只读查询",
   ticket_info: "获取AOPS工单详情", audit_timeline: "获取AOPS工单操作记录", aops_command: "调用AOPS CLI",
   dispatch: "提交Workflow执行任务", extraction: "提交工单证据提取任务",
@@ -30,6 +31,7 @@ const operationLabels: Record<string, string> = {
 
 export function operationLabel(entry: CallLog): string {
   if (entry.operationLabel) return entry.operationLabel;
+  if (entry.event === "COMPILER_PARTIAL_SUCCESS") return "知识提取部分成功：完整性待审核";
   if (entry.operation === "PROGRESS") return `回报提取进度：${stageLabels[String(entry.stage)] || "阶段进度"}`;
   if (entry.operation === "http_request") {
     const path = String(entry.url || "");
@@ -79,6 +81,8 @@ export function groupLogs(items: CallLog[], merge = true): LogGroup[] {
 }
 
 export function statusLabel(group: LogGroup): string {
+  if (group.entry.event === "COMPILER_FAILED") return "提取失败";
+  if (group.entry.event === "COMPILER_REPORT_FAILED") return "终态同步失败";
   if (group.phase === "START_ONLY") return "已开始 · 未见结束记录";
   if (group.phase === "FAILED") return "调用失败";
   if (group.phase === "COMPLETED") return group.entry.acknowledged ? "回报已确认" : "调用完成";

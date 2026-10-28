@@ -39,10 +39,12 @@ export default function LocalRunPanel({ run }: { run: LocalRun }) {
       const observed = await api.activity(run.syncTec01 ? run.tec01RunId || run.id : run.id);
       if (observed.active) throw new Error("旧执行仍在活动中，请先暂停或取消并确认结束，不能并发恢复同一运行");
       if (uncertain && !uncertainConfirmed) throw new Error("请先核对上次执行是否到达 AOPS，再确认重新执行不确定节点");
-      const prepared: LocalRun = { ...run, dispatchId: localId("dispatch"), status: "DISPATCHING", nodeStates: Object.fromEntries(Object.entries(run.nodeStates).map(([id, status]) => [id, ["UNKNOWN", "RUNNING", "FAILED", "PAUSED"].includes(status) ? "READY" : status])), lastEventId: 0, interaction: null, diagnostic: undefined, updatedAt: now() };
+      const full = await browserStore.get<LocalRun>(run.id);
+      if (!full || full.outputsCleared) throw new Error("运行不存在或所需结果已手动清理，请重新创建计划，不能把缺失结果当作可恢复状态");
+      const prepared: LocalRun = { ...full, dispatchId: localId("dispatch"), status: "DISPATCHING", nodeStates: Object.fromEntries(Object.entries(full.nodeStates).map(([id, status]) => [id, ["UNKNOWN", "RUNNING", "FAILED", "PAUSED"].includes(status) ? "READY" : status])), lastEventId: 0, interaction: null, diagnostic: undefined, updatedAt: now() };
       await browserStore.put(prepared);
       try {
-        await api.dispatch({ dispatchId: prepared.dispatchId, runId: run.syncTec01 ? run.tec01RunId : run.id, ticketId: run.ticketId, workflowSnapshot: run.workflowSnapshot, workflowContentHash: run.workflowContentHash, runInputs: run.runInputs, nodeStates: prepared.nodeStates, nodeOutputs: run.nodeOutputs, nodeResults: run.nodeResults || {}, currentNodeId: run.currentNodeId, selectedRoutes: run.selectedRoutes, resumePayload: resume ? { nodeId: run.currentNodeId, ...resume } : null, syncTec01: run.syncTec01, planMaterialHash: planHash }, key || undefined);
+        await api.dispatch({ dispatchId: prepared.dispatchId, runId: run.syncTec01 ? run.tec01RunId : run.id, ticketId: run.ticketId, workflowSnapshot: full.workflowSnapshot, workflowContentHash: full.workflowContentHash, runInputs: full.runInputs, nodeStates: prepared.nodeStates, nodeOutputs: full.nodeOutputs, nodeResults: full.nodeResults || {}, currentNodeId: full.currentNodeId, selectedRoutes: full.selectedRoutes, resumePayload: resume ? { nodeId: full.currentNodeId, ...resume } : null, syncTec01: full.syncTec01, planMaterialHash: planHash }, key || undefined);
         setKey(""); setConfirmed(false);
       } catch (error) {
         // A definitive rejection did not start work. A lost response may already have started it.
@@ -104,7 +106,7 @@ export default function LocalRunPanel({ run }: { run: LocalRun }) {
         <div><p className="overline">BROWSER SAVED RUN</p><h2>{run.name}</h2><p>工单 {run.ticketId} · {run.syncTec01 ? `同步 tec01：${run.tec01RunId}` : "仅本地调试"}</p></div>
         <div className="header-actions">
           <Status value={run.status} label={run.status === "PLANNED" && approved ? "已确认，待执行" : undefined} />
-          <Button kind="ghost" size="sm" onClick={() => downloadJson(`${run.id}.json`, { schema: "itsm-studio-run", schemaVersion: 1, run })}>导出计划与结果</Button>
+          <Button kind="ghost" size="sm" onClick={async () => { try { const full = await browserStore.get<LocalRun>(run.id); if (!full) throw new Error("本地运行不存在"); downloadJson(`${run.id}.json`, { schema: "itsm-studio-run", schemaVersion: 1, run: full }); } catch (value) { setError((value as Error).message); } }}>导出完整计划与结果</Button>
           <Button kind="danger--ghost" size="sm" disabled={busy || run.status === "CANCEL_REQUESTED"} onClick={cancel}>{active.has(run.status) ? "取消并移除" : "移除计划"}</Button>
         </div>
       </header>
@@ -162,6 +164,7 @@ export default function LocalRunPanel({ run }: { run: LocalRun }) {
         </section>
       )}
       <section className="local-event-list"><h3>节点事件</h3>
+        {run.eventHistoryIncomplete && <p className="muted">部分早期时间线已从服务端临时事件环移除；当前状态与结果已按最新快照恢复，不会为补齐时间线而重新执行SQL。</p>}
         {run.events.length ? <ol>{run.events.slice(-50).map((event, index) => <li key={`${String(event.eventId)}-${index}`}><time>{new Date(String(event.occurredAt || run.updatedAt)).toLocaleTimeString("zh-CN")}</time><code>{String(event.nodeId || "运行")}</code><span>{String(event.safeSummary || event.reason || event.status || event.type)}</span></li>)}</ol> : <p className="muted">计划尚未执行。</p>}
       </section>
     </section>

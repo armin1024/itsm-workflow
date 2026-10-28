@@ -6,12 +6,14 @@ import json
 import os
 import re
 import signal
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
 
 from app.config import settings
 from app.call_logs import logged_cli
+from app.resources import cpu_run, cpu_slot
 
 
 class CliExecutionError(RuntimeError):
@@ -26,10 +28,28 @@ class CliExecutionError(RuntimeError):
 
 _SECRET_PATTERNS = (
     (re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;]+"), r"\1***"),
-    (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}"), r"\1***"),
+    (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"), r"\1***"),
     (re.compile(r"(?i)((?:aops[_-]?api[_-]?key|api[_-]?key|token|password|passwd)\s*[:=]\s*)[^\s,;]+"), r"\1***"),
     (re.compile(r"(postgres(?:ql)?(?:\+asyncpg)?://[^:/\s]+:)[^@\s]+@", re.I), r"\1***@"),
 )
+
+
+def _sql_error_summary(value: object) -> str:
+    """Extract an explicit upstream error, never serialize its whole envelope."""
+    item = value
+    if isinstance(value, str):
+        try:
+            item = json.loads(value)
+        except (ValueError, RecursionError):
+            pass
+    for _ in range(4):
+        if not isinstance(item, dict):
+            break
+        item = next((item[key] for key in ("message", "msg", "error", "detail", "reason") if item.get(key)), None)
+    if not isinstance(item, (str, int, float)) or isinstance(item, bool):
+        return "服务返回错误，未提供可读说明"
+    text, _ = redact_diagnostic(str(item), 4096)
+    return re.sub(r"\s+", " ", text).strip()[:500] or "服务返回错误，未提供可读说明"
 
 
 def redact_diagnostic(value: bytes | str, limit: int) -> tuple[str, bool]:
@@ -117,10 +137,15 @@ def parse_sql_read_output(stdout: bytes) -> dict:
             payload = json.loads(stripped)
         except json.JSONDecodeError as exc:
             raise CliExecutionError("INVALID_JSON", "aops-cli 未返回有效 JSON") from exc
-        if not isinstance(payload, dict) or payload.get("status") != 0:
+        if not isinstance(payload, dict) or type(payload.get("status")) is not int or payload.get("status") != 0:
             status = payload.get("status") if isinstance(payload, dict) else None
-            raise CliExecutionError("AOPS_BUSINESS_ERROR", f"AOPS 返回失败状态：{status!r}")
+            message = _sql_error_summary(payload)
+            status_note = str(status) if type(status) is int else "缺失或类型非法"
+            raise CliExecutionError("AOPS_BUSINESS_ERROR", f"AOPS 返回失败状态：{status_note}；{message}")
         return payload
+
+    if stripped.startswith("<"):
+        raise CliExecutionError("NON_SSE_RESPONSE", "aops-cli返回HTML/XML页面而非SQL读结果，请核查AOPS鉴权、接口地址及代理；CLI未提供实际HTTP状态")
 
     events: list[tuple[str, str]] = []
     event_name = "message"
@@ -146,8 +171,15 @@ def parse_sql_read_output(stdout: bytes) -> dict:
         elif line.startswith("data:"):
             data_lines.append(line[5:].lstrip())
     flush()
-    if not events or not any(name == "done" for name, _ in events):
-        raise CliExecutionError("INVALID_SSE", "aops-cli SQL 读 SSE 缺少 done 终止事件")
+    # A server may close an error stream without emitting done. The explicit
+    # error is the cause; do not replace it with a secondary framing failure.
+    for name, data in events:
+        if name.lower() in {"error", "failed", "failure"}:
+            raise CliExecutionError("AOPS_BUSINESS_ERROR", "AOPS SQL读返回错误：" + _sql_error_summary(data))
+    if not events:
+        raise CliExecutionError("NON_SSE_RESPONSE", "aops-cli返回非JSON且非SSE内容，请查看节点脱敏stdout/stderr并核查鉴权、接口地址和CLI版本")
+    if not any(name == "done" for name, _ in events):
+        raise CliExecutionError("INVALID_SSE", "SQL读SSE已结束但缺少done终止事件，结果可能不完整；请核查AOPS或代理断流及CLI输出，勿自动重试SQL")
 
     titles: list[str] = []
     fields: list[dict] = []
@@ -156,8 +188,6 @@ def parse_sql_read_output(stdout: bytes) -> dict:
     done_value: str | None = None
     for name, data in events:
         value = data.strip()
-        if name in {"error", "failed", "failure"}:
-            raise CliExecutionError("AOPS_BUSINESS_ERROR", f"AOPS SQL 读 SSE 返回错误事件：{value[:300]}")
         if name == "done":
             done_value = value.strip('"')
             continue
@@ -176,7 +206,7 @@ def parse_sql_read_output(stdout: bytes) -> dict:
         elif name == "message":
             messages.append(decoded)
     if done_value != "!ok":
-        raise CliExecutionError("AOPS_BUSINESS_ERROR", f"AOPS SQL 读 SSE 未成功结束：{done_value or '<empty>'}")
+        raise CliExecutionError("AOPS_BUSINESS_ERROR", "AOPS SQL读SSE终止但未成功：" + _sql_error_summary(done_value or "未返回成功标记"))
 
     rows: list[dict | object] = []
     for message in messages:
@@ -194,19 +224,80 @@ def parse_sql_read_output(stdout: bytes) -> dict:
     }
 
 
-async def inspect_cli(path: Path | None = None) -> CliMetadata:
-    executable = path or settings.aops_cli_path
+_metadata_cache: OrderedDict[tuple, CliMetadata] = OrderedDict()
+_metadata_flights: dict[tuple, asyncio.Task] = {}
+
+
+def _cli_signature(executable: Path) -> tuple:
+    executable = executable.resolve()
     if not executable.is_file() or not os.access(executable, os.X_OK):
         raise CliExecutionError("CLI_NOT_FOUND", f"aops-cli 不可执行：{executable}")
-    digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+    info = executable.stat()
+    return (str(executable), info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size)
+
+
+def _binary_digest(executable: Path) -> str:
+    digest = hashlib.sha256()
+    with executable.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(256 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+async def _inspect_uncached(executable: Path, signature: tuple) -> CliMetadata:
+    digest = await cpu_run(_binary_digest, executable)
     process = await asyncio.create_subprocess_exec(str(executable), "--version", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    stdout, _ = await asyncio.wait_for(process.communicate(), timeout=10)
+    stdout_task = asyncio.create_task(_read_limited(process.stdout, 64 * 1024))
+    stderr_task = asyncio.create_task(_read_limited(process.stderr, 64 * 1024))
+    try:
+        stdout, _, _ = await asyncio.wait_for(asyncio.gather(stdout_task, stderr_task, process.wait()), timeout=10)
+    finally:
+        if process.returncode is None:
+            await _terminate(process)
+        for task in (stdout_task, stderr_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
     if process.returncode != 0:
         raise CliExecutionError("CLI_VERSION_FAILED", "无法读取 aops-cli 版本", exit_code=process.returncode)
     version = stdout.decode("utf-8", "replace").strip()[:120]
-    if settings.aops_cli_version_requirement and settings.aops_cli_version_requirement not in version:
+    result = CliMetadata(version, digest)
+    if await cpu_run(_cli_signature, executable) == signature:
+        _metadata_cache[signature] = result
+        _metadata_cache.move_to_end(signature)
+        while len(_metadata_cache) > 8:
+            _metadata_cache.popitem(last=False)
+    return result
+
+
+async def inspect_cli(path: Path | None = None) -> CliMetadata:
+    # Metadata stat is I/O, not parsing work. Keep health checks off the CPU
+    # parsing queue so a large result does not delay cached CLI readiness.
+    signature = await asyncio.to_thread(_cli_signature, path or settings.aops_cli_path)
+    result = _metadata_cache.get(signature)
+    if result is None:
+        task = _metadata_flights.get(signature)
+        if task is None:
+            task = asyncio.create_task(_inspect_uncached(Path(signature[0]), signature), name="cli-metadata")
+            _metadata_flights[signature] = task
+
+            def finished(done: asyncio.Task) -> None:
+                if _metadata_flights.get(signature) is done:
+                    _metadata_flights.pop(signature, None)
+                if not done.cancelled():
+                    done.exception()  # Consume failures even if all callers disconnect.
+
+            task.add_done_callback(finished)
+        try:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Metadata work is shared; do not cancel another caller's probe or
+            # release this run while its owned offloaded work is still active.
+            await asyncio.gather(asyncio.shield(task), return_exceptions=True)
+            raise
+    if settings.aops_cli_version_requirement and settings.aops_cli_version_requirement not in result.version:
         raise CliExecutionError("CLI_VERSION_MISMATCH", f"aops-cli 版本不满足要求：{settings.aops_cli_version_requirement}")
-    return CliMetadata(version, digest)
+    return result
 
 
 async def _read_limited(stream: asyncio.StreamReader, limit: int) -> bytes:
@@ -250,6 +341,11 @@ async def execute_sql_read(
     cancel_requested: Callable[[], Awaitable[bool]] | None = None,
 ) -> CliResult:
     metadata = await inspect_cli()
+    async with cpu_slot() as lease:
+        return await _execute_sql_read(database_ref=database_ref, sql=sql, ticket_id=ticket_id, api_key=api_key, timeout_seconds=timeout_seconds, cancel_requested=cancel_requested, metadata=metadata, lease=lease)
+
+
+async def _execute_sql_read(*, database_ref: str, sql: str, ticket_id: int, api_key: str, timeout_seconds: int, cancel_requested: Callable[[], Awaitable[bool]] | None, metadata: CliMetadata, lease) -> CliResult:
     environment = _cli_environment(api_key)
     process = await asyncio.create_subprocess_exec(
         str(settings.aops_cli_path), "db", "read",
@@ -286,10 +382,12 @@ async def execute_sql_read(
         for task in (stdout_task, stderr_task):
             if not task.done():
                 task.cancel()
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
     if process.returncode != 0:
-        raise CliExecutionError("NON_ZERO_EXIT", _failure_message(stdout, stderr, "aops-cli 返回非零退出码"), exit_code=process.returncode, stdout=stdout, stderr=stderr)
+        message = await lease.run(_failure_message, stdout, stderr, "aops-cli 返回非零退出码")
+        raise CliExecutionError("NON_ZERO_EXIT", message, exit_code=process.returncode, stdout=stdout, stderr=stderr)
     try:
-        payload = parse_sql_read_output(stdout)
+        payload = await lease.run(parse_sql_read_output, stdout)
     except CliExecutionError as exc:
         exc.exit_code = process.returncode
         exc.stdout = stdout
@@ -306,23 +404,36 @@ async def execute_json_command(arguments: list[str], *, api_key: str, timeout_se
     places the credential in argv or logs.
     """
     metadata = await inspect_cli()
+    async with cpu_slot() as lease:
+        return await _execute_json_command(arguments, api_key=api_key, timeout_seconds=timeout_seconds, metadata=metadata, lease=lease)
+
+
+async def _execute_json_command(arguments: list[str], *, api_key: str, timeout_seconds: int, metadata: CliMetadata, lease) -> CliResult:
     environment = _cli_environment(api_key)
     process = await asyncio.create_subprocess_exec(
         str(settings.aops_cli_path), *arguments,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         env=environment, start_new_session=True,
     )
+    stdout_task = asyncio.create_task(_read_limited(process.stdout, 20 * 1024 * 1024))
+    stderr_task = asyncio.create_task(_read_limited(process.stderr, 1024 * 1024))
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+        stdout, stderr, _ = await asyncio.wait_for(asyncio.gather(stdout_task, stderr_task, process.wait()), timeout=timeout_seconds)
     except TimeoutError as exc:
         await _terminate(process)
         raise CliExecutionError("TIMEOUT", "aops-cli 获取工单证据超时") from exc
-    if len(stdout) > 20 * 1024 * 1024 or len(stderr) > 1024 * 1024:
-        raise CliExecutionError("OUTPUT_LIMIT_EXCEEDED", "aops-cli 获取工单证据的输出超过限制")
+    finally:
+        if process.returncode is None:
+            await _terminate(process)
+        for task in (stdout_task, stderr_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
     if process.returncode != 0:
-        raise CliExecutionError("NON_ZERO_EXIT", _failure_message(stdout, stderr, "aops-cli 获取工单证据失败"), exit_code=process.returncode, stdout=stdout, stderr=stderr)
+        message = await lease.run(_failure_message, stdout, stderr, "aops-cli 获取工单证据失败")
+        raise CliExecutionError("NON_ZERO_EXIT", message, exit_code=process.returncode, stdout=stdout, stderr=stderr)
     try:
-        payload = json.loads(stdout.decode("utf-8"))
+        payload = await lease.run(json.loads, stdout)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CliExecutionError("INVALID_JSON", "aops-cli 获取工单证据时未返回有效 JSON") from exc
     if not isinstance(payload, dict) or payload.get("status") != 0:

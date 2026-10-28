@@ -10,6 +10,7 @@ from app.cli import CliExecutionError, execute_sql_read, redact_diagnostic
 from app.conditions import evaluate
 from app.runtime import NODE_REGISTRY
 from app.runtime.contracts import ExecutionMode
+from app.resources import cpu_run
 
 
 PLACEHOLDER = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}")
@@ -58,14 +59,10 @@ def form_schema(fields: list[dict[str, Any]]) -> dict[str, Any]:
     return {"type": "object", "properties": properties, "required": required, "additionalProperties": False}
 
 
-async def execute_single_node(*, node: dict[str, Any], inputs: dict[str, Any], mode: str, simulation: dict[str, Any] | None = None, api_key: str | None = None, ticket_id: int | None = None, resume_payload: dict[str, Any] | None = None, cancel_requested: Callable[[], Awaitable[bool]] | None = None) -> dict[str, Any]:
-    """Execute one registered node. Credentials never enter output or storage."""
-    execution_mode = ExecutionMode(mode)
+def _validate_inputs(node: dict[str, Any], inputs: dict[str, Any]):
     manifest = NODE_REGISTRY.validate_node(node)
     if node.get("handlerVersion") and node["handlerVersion"] != manifest.handler_version:
         raise ValueError(f"节点 {node.get('id')} 的Handler版本不可用：{node['handlerVersion']}")
-    if execution_mode not in manifest.supported_modes:
-        raise ValueError(f"节点 {manifest.type} 不允许 {execution_mode.value} 执行")
     input_errors = list(Draft202012Validator(manifest.input_schema).iter_errors(inputs))
     for item in node.get("inputs", []):
         if item.get("name") in inputs:
@@ -73,6 +70,21 @@ async def execute_single_node(*, node: dict[str, Any], inputs: dict[str, Any], m
         elif item.get("required", True):
             raise ValueError(f"缺少节点输入：{item['name']}")
     if input_errors: raise ValueError(f"节点输入不符合Schema：{input_errors[0].message}")
+    return manifest
+
+
+def _cli_diagnostic(exc: CliExecutionError) -> dict[str, Any]:
+    stdout, stdout_cut = redact_diagnostic(exc.stdout, 32 * 1024)
+    stderr, stderr_cut = redact_diagnostic(exc.stderr, 16 * 1024)
+    return {"errorCode": exc.code, "message": str(exc), "exitCode": exc.exit_code, "stdout": stdout, "stderr": stderr, "truncated": exc.truncated or stdout_cut or stderr_cut}
+
+
+async def execute_single_node(*, node: dict[str, Any], inputs: dict[str, Any], mode: str, simulation: dict[str, Any] | None = None, api_key: str | None = None, ticket_id: int | None = None, resume_payload: dict[str, Any] | None = None, cancel_requested: Callable[[], Awaitable[bool]] | None = None) -> dict[str, Any]:
+    """Execute one registered node. Credentials never enter output or storage."""
+    execution_mode = ExecutionMode(mode)
+    manifest = await cpu_run(_validate_inputs, node, inputs)
+    if execution_mode not in manifest.supported_modes:
+        raise ValueError(f"节点 {manifest.type} 不允许 {execution_mode.value} 执行")
     simulation = simulation or {}
     if execution_mode == ExecutionMode.DRY_RUN:
         return {"status": "SUCCEEDED", "output": {"plan": {"type": manifest.type, "title": node.get("title"), "config": node.get("config"), "inputs": inputs}}, "diagnostic": None, "interrupt": None, "handlerVersion": manifest.handler_version}
@@ -85,11 +97,11 @@ async def execute_single_node(*, node: dict[str, Any], inputs: dict[str, Any], m
         if not api_key: raise ValueError("SQL读执行必须提供AOPS_API_KEY")
         if not ticket_id: raise ValueError("SQL读执行必须提供正整数工单ID")
         try:
-            result = await execute_sql_read(database_ref=str(node["config"]["databaseRef"]), sql=render_sql(node, inputs), ticket_id=ticket_id, api_key=api_key, timeout_seconds=int(node.get("timeoutSeconds") or 600), cancel_requested=cancel_requested)
+            sql = await cpu_run(render_sql, node, inputs)
+            result = await execute_sql_read(database_ref=str(node["config"]["databaseRef"]), sql=sql, ticket_id=ticket_id, api_key=api_key, timeout_seconds=int(node.get("timeoutSeconds") or 600), cancel_requested=cancel_requested)
         except CliExecutionError as exc:
-            stdout, stdout_cut = redact_diagnostic(exc.stdout, 32 * 1024); stderr, stderr_cut = redact_diagnostic(exc.stderr, 16 * 1024)
             status = "TERMINATED" if exc.code == "CANCELLED" else "FAILED"
-            return {"status": status, "output": None, "diagnostic": {"errorCode": exc.code, "message": str(exc), "exitCode": exc.exit_code, "stdout": stdout, "stderr": stderr, "truncated": exc.truncated or stdout_cut or stderr_cut}, "interrupt": None, "handlerVersion": manifest.handler_version}
+            return {"status": status, "output": None, "diagnostic": await cpu_run(_cli_diagnostic, exc), "interrupt": None, "handlerVersion": manifest.handler_version}
         output = {key: result.payload[key] for key in ("status", "data", "rowCount") if key in result.payload}
         if isinstance(output.get("data"), list): output.setdefault("rowCount", len(output["data"]))
     elif manifest.type == "hitl_form":
@@ -105,10 +117,10 @@ async def execute_single_node(*, node: dict[str, Any], inputs: dict[str, Any], m
     elif manifest.type == "condition":
         rule = simulation.get("rule") or (node.get("config") or {}).get("rule")
         if not isinstance(rule, dict): raise ValueError("condition节点需要config.rule")
-        output = {"matched": evaluate(rule, inputs)}
+        output = {"matched": await cpu_run(evaluate, rule, inputs)}
     else:
         output = {"ok": True}
 
     if not isinstance(output, dict): raise ValueError("节点没有生成JSON对象输出")
-    _validate_output(manifest, output)
+    await cpu_run(_validate_output, manifest, output)
     return {"status": "SUCCEEDED", "output": output, "diagnostic": None, "interrupt": None, "handlerVersion": manifest.handler_version}

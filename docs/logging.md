@@ -111,3 +111,8 @@ Cookie文件是凭据，使用后自行安全删除，勿提交或传入日志�
 筛选稀疏时本批可能无匹配但仍有nextCursor，可继续读取。文件清理或筛选改变后旧游标失效。未登录401，参数非法422，游标失效409，存储不可读返回空列表及unavailable:true。接口不接受文件路径，不提供写入或清理方法。
 
 `GET /api/v1/studio/logs/status`返回目录、级别、保留与容量、清理间隔、占用、文件数、最近清理、删除数、写入/清理错误、丢弃、待写、最后错误及available。日志为空可能是级别过滤、清理、丢弃或磁盘失败，不能据此认定未执行；生产状态以tec01为准。
+# 提取失败检索补充（0.13.2）
+
+提取器在失败发生时写独立COMPILER_FAILED/ERROR，peer=COMPILER、direction=INTERNAL；不是HTTP调用，不补造响应码。记录受控errorMessage、具体reasonCode、errorField、errorId、stage、异常类别及安全代码位置。关闭tec01同步也能查询；如果回报通信成功则仍可能另有INFO/HTTP200，两者不矛盾。
+
+日志页关键词可以搜索中文原因、字段和错误编号，高级筛选可组合errorCode、reasonCode、errorField、errorId、stage及既有knowledgeId/requestId；不同条件AND组合。提取页提供按错误编号跳转。详情见[失败诊断说明](compiler-failure-diagnostics.md)。不记录原始异常文字、SQL、参数、模型原文或locals，不补造历史缺失诊断。

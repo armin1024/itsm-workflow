@@ -41,7 +41,7 @@ export const api = {
   health: () => request<Record<string, unknown>>("/api/v1/health"),
   studioCatalog: () => request<{ catalogDigest: string; catalogVersion: string; runtimeVersion: string; nodes: NodeCatalogItem[]; testOnly: boolean }>("/api/v1/studio/catalog"),
   extract: (body: Record<string, unknown>, apiKey?: string, fromTicket = false) => request<Record<string, unknown>>(`/api/v1/studio/extractions${fromTicket ? "/from-ticket" : ""}`, { method: "POST", headers: apiKey ? { "X-AOPS-Api-Key": apiKey } : {}, body: JSON.stringify(body) }),
-  studioEvents: (id: string, after: number) => request<{ events: Array<Record<string, unknown> & { eventId: number }>; active: boolean; syncStatus?: string; callbackError?: unknown }>(`/api/v1/studio/events/${encodeURIComponent(id)}?after=${after}`),
+  studioEvents: (id: string, after: number) => request<{ events: Array<Record<string, unknown> & { eventId: number }>; active: boolean; historyGap?: boolean; syncStatus?: string; callbackError?: unknown }>(`/api/v1/studio/events/${encodeURIComponent(id)}?after=${after}`),
   dispatch: (body: Record<string, unknown>, apiKey?: string) => request<Record<string, unknown>>("/api/v1/studio/executions/dispatch", { method: "POST", headers: apiKey ? { "X-AOPS-Api-Key": apiKey } : {}, body: JSON.stringify(body) }),
   command: (runId: string, type: "PAUSE" | "CANCEL") => request<Record<string, unknown>>(`/api/v1/studio/executions/${encodeURIComponent(runId)}/commands`, { method: "POST", body: JSON.stringify({ commandId: localId("command"), type }) }),
   activity: (runId: string) => request<{ runId: string; active: boolean; dispatchId: string | null; executorInstanceId: string; phase: string }>(`/api/v1/studio/executions/${encodeURIComponent(runId)}`),

@@ -8,7 +8,15 @@
 
 新增只读“日志”菜单，覆盖tec01、LLM和AOPS CLI关键调用；7天、最多512MiB滚动文件，终端同步输出，不保存正文或凭据。配置和清理见[日志运维手册](docs/logging.md)。
 
-当前版本 `0.12.3`。本服务负责节点定义、工单知识抽取、Workflow校验和真实执行；tec01负责生产知识、计划、权限、MCP、Hermes消息渠道和运行数据。
+当前源码版本 `0.13.3`。本服务负责节点定义、工单知识抽取、Workflow校验和真实执行；tec01负责生产知识、计划、权限、MCP、Hermes消息渠道和运行数据。
+
+0.13.3逐条隔离SQL解析、参数化与节点校验异常，保留有效草稿并回报完整性诊断；部分成功须由tec01配套审核后发布，详见[提取完整性接入补充说明](docs/extraction-partial-success-addendum.md)。
+
+0.13.2提取失败返回安全的具体原因、字段、阶段和错误编号，并独立记录可检索ERROR日志；关闭tec01同步也可查，详见[提取失败诊断与日志检索](docs/compiler-failure-diagnostics.md)。
+
+0.13.1修正SQL读错误诊断：显式SSE错误优先于缺少done，HTML/文本单独识别，未完整结束的结果仍失败并停止后续节点。见[SQL读故障排查](docs/sql-read-troubleshooting.md)。
+
+性能与容量：[实现说明](docs/performance-optimization.md) · [四档机器参数与配置方法](docs/machine-sizing.md) · [模拟性能报告与复测方式](docs/performance-report-0.13.0.md)。新默认为4核8GiB起始档（8个活动运行、2个CLI、1个提取、1个CPU线程），既有显式配置升级不覆盖；不是容量承诺。
 
 “运行配置”菜单只读展示当前tec01连接、回报接口与重试策略，不提供网页修改入口。回报路径由 `TEC01_RUN_CALLBACK_PATH`、`TEC01_EXTRACTION_CALLBACK_PATH` 配置，默认沿用文档；修改 `service.env` 后重启服务。Studio知识、草稿、计划和调试结果只存当前浏览器IndexedDB，不需要服务端数据库。
 

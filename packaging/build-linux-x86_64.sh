@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] || { echo "Linux x86_64 build host required" >&2; exit 1; }
-VERSION=${1:-0.12.3}
+VERSION=${1:-0.13.3}
 OUTPUT=${2:-dist}
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 STAGE="$ROOT/.package-stage/itsm-workflow-$VERSION-linux-x86_64"
@@ -12,14 +12,25 @@ rm -rf "$STAGE" "$RUNTIME" "$REQ"
 mkdir -p "$STAGE/frontend" "$OUTPUT"
 cd "$ROOT"
 [ -f frontend/dist/index.html ] || { echo "Run frontend build before packaging" >&2; exit 1; }
-uv python install --install-dir "$RUNTIME" 3.12
-PYTHON=$(find "$RUNTIME" -path '*/bin/python3' -print -quit)
-PYTHON_ROOT=$(dirname "$(dirname "$PYTHON")")
+if [ -n "${PYTHON_RUNTIME_SOURCE:-}" ]; then
+  [ -x "$PYTHON_RUNTIME_SOURCE/bin/python3" ] || { echo "PYTHON_RUNTIME_SOURCE must contain bin/python3" >&2; exit 1; }
+  cp -R "$PYTHON_RUNTIME_SOURCE" "$RUNTIME"
+  PYTHON="$RUNTIME/bin/python3"
+  PYTHON_ROOT="$RUNTIME"
+  "$PYTHON" -c 'import platform,sys; assert sys.version_info[:2] == (3,12) and platform.system() == "Linux" and platform.machine() == "x86_64", "Linux x86_64 CPython 3.12 runtime required"'
+else
+  uv python install --install-dir "$RUNTIME" 3.12
+  PYTHON=$(find "$RUNTIME" -path '*/bin/python3' -print -quit)
+  PYTHON_ROOT=$(dirname "$(dirname "$PYTHON")")
+fi
 uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file "$REQ" >/dev/null
 # Force the oldest supported enterprise Linux ABI. Without this flag uv sees
 # the Debian build container's newer glibc and may select incompatible wheels.
 uv pip install --python "$PYTHON" --python-platform x86_64-manylinux_2_17 --only-binary :all: --target "$STAGE/site-packages" --requirement "$REQ"
 cp -R app docs "$STAGE/"
+cp -R packaging/profiles "$STAGE/"
+mkdir -p "$STAGE/tools"
+cp tools/benchmark_runtime.py "$STAGE/tools/"
 cp -R frontend/dist "$STAGE/frontend/"
 cp -R "$PYTHON_ROOT" "$STAGE/python"
 cp pyproject.toml uv.lock README.md "$STAGE/"

@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
 import type { EditableWorkflow } from "./WorkflowEditor";
+import { createLocalDatabase, type LocalSummary, type ListQuery } from "./localDatabase";
+export { BrowserStorageError, RESULT_BUDGET_BYTES, type LocalSummary } from "./localDatabase";
 
 export type LocalKnowledge = {
   id: string; kind: "knowledge"; name: string; summary: string;
   matchPhrases: string[]; negativePhrases: string[]; systemKeys: string[];
   workflowDefinition: EditableWorkflow; source: "MANUAL" | "EXTRACTION";
   ticketId?: number; createdAt: string; updatedAt: string;
+  extractionReview?: { extractionOutcome?: string; publishable?: boolean; diagnostics?: unknown; requestId?: string };
 };
 export type LocalRun = {
   id: string; kind: "run"; knowledgeId: string; name: string; ticketId: number;
@@ -15,6 +18,7 @@ export type LocalRun = {
   currentNodeId: string; interaction?: Record<string, unknown> | null;
   diagnostic?: unknown; dispatchId?: string; lastEventId: number;
   nodeResults?: Record<string, Record<string, unknown>>;
+  outputNodeIds?: string[]; outputsCleared?: boolean; eventHistoryIncomplete?: boolean;
   syncTec01: boolean; tec01RunId?: string; events: Record<string, unknown>[];
   plan?: Record<string, unknown>; removeAfterCancel?: boolean;
   confirmation?: { planHash: string; confirmedAt: string };
@@ -26,29 +30,12 @@ export type LocalExtraction = {
   syncTec01: boolean; lastEventId: number; events: Record<string, unknown>[];
   proposal?: Record<string, unknown>; validation?: Record<string, unknown>;
   diagnostics?: unknown; error?: unknown; createdAt: string; updatedAt: string;
+  extractionOutcome?: string; publishable?: boolean;
   syncStatus?: string; callbackError?: unknown;
 };
-type LocalItem = LocalKnowledge | LocalRun | LocalExtraction;
-const changeEvent = "itsm-studio-browser-data";
-let database: Promise<IDBDatabase> | undefined;
-function db() {
-  if (!database) database = new Promise((resolve, reject) => {
-    const open = indexedDB.open("itsm-runtime-studio", 1);
-    open.onupgradeneeded = () => open.result.createObjectStore("items", { keyPath: "id" });
-    open.onsuccess = () => resolve(open.result);
-    open.onerror = () => reject(new Error("浏览器本地存储不可用，请检查隐私模式或存储权限"));
-  });
-  return database;
-}
-async function transaction<T>(mode: IDBTransactionMode, operation: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
-  const database = await db();
-  return new Promise((resolve, reject) => {
-    const tx = database.transaction("items", mode), request = operation(tx.objectStore("items"));
-    tx.oncomplete = () => { if (mode === "readwrite") window.dispatchEvent(new Event(changeEvent)); resolve(request.result); };
-    tx.onerror = () => reject(new Error(tx.error?.name === "QuotaExceededError" ? "浏览器存储已满，请导出并删除旧的调试结果" : "无法保存浏览器本地数据"));
-    tx.onabort = () => reject(new Error("浏览器存储事务未完成"));
-  });
-}
+export type LocalItem = LocalKnowledge | LocalRun | LocalExtraction;
+let database: ReturnType<typeof createLocalDatabase> | undefined;
+const db = () => database ||= createLocalDatabase();
 export const localId = (prefix: string) => `${prefix}_${Array.from(crypto.getRandomValues(new Uint8Array(16)), (value) => value.toString(16).padStart(2, "0")).join("")}`;
 export const now = () => new Date().toISOString();
 const credentialKeys = new Set(["authorization", "aopsapikey", "aopsbottoken", "apikey", "accesstoken", "refreshtoken", "studioadmintoken", "runtimeservicetoken", "token", "password", "passwd", "secret"]);
@@ -60,27 +47,48 @@ export function rejectStoredCredentials(value: unknown, path = "$"): void {
   }
 }
 export const browserStore = {
-  all: () => transaction<LocalItem[]>("readonly", (store) => store.getAll()),
-  get: <T extends LocalItem>(id: string) => transaction<T | undefined>("readonly", (store) => store.get(id)),
+  summaries: (kind?: LocalItem["kind"]) => db().summaries(kind),
+  list: (query: ListQuery) => db().list(query),
+  active: () => db().active(),
+  get: <T extends LocalItem>(id: string) => db().get<T>(id),
+  metadata: <T extends LocalItem>(id: string) => db().get<T>(id, false),
+  output: (runId: string, nodeId: string) => db().output(runId, nodeId),
+  status: () => db().status(),
+  warning: () => db().warning(),
+  exportAll: () => db().exportAll(),
+  clearResults: (runId: string) => db().clearResults(runId),
+  subscribe: (listener: (changes: Array<{ id: string; kind: LocalItem["kind"] }>) => void) => db().subscribe(listener),
+  update: <T extends LocalItem>(id: string, updater: (item: T) => T | undefined) => db().update(id, updater),
   put: async (value: LocalItem) => {
     // SQL result columns are data; inspect definitions and configured inputs
     // so execution credentials cannot accidentally enter browser storage.
     if (value.kind === "run") rejectStoredCredentials({ workflowSnapshot: value.workflowSnapshot, runInputs: value.runInputs, plan: value.plan });
     else if (value.kind === "extraction") rejectStoredCredentials(value.proposal);
     else rejectStoredCredentials(value);
-    await transaction("readwrite", (store) => store.put(value));
+    await db().put(value);
   },
-  remove: async (id: string) => { await transaction("readwrite", (store) => store.delete(id)); },
+  remove: (id: string) => db().remove(id),
 };
-export function useBrowserItems<T extends LocalItem>(kind: T["kind"]) {
-  const [items, setItems] = useState<T[]>([]), [error, setError] = useState("");
+export function useLocalDetail<T extends LocalItem>(id: string | null) {
+  const [item, setItem] = useState<T>(), [error, setError] = useState("");
   useEffect(() => {
-    let live = true;
-    const load = () => browserStore.all().then((values) => { if (live) setItems(values.filter((item) => item.kind === kind) as T[]); }).catch((error) => { if (live) setError(error.message); });
-    void load(); window.addEventListener(changeEvent, load);
-    return () => { live = false; window.removeEventListener(changeEvent, load); };
-  }, [kind]);
-  return { items: items.sort((a, b) => ("updatedAt" in b ? b.updatedAt : "").localeCompare("updatedAt" in a ? a.updatedAt : "")), error };
+    let live = true, generation = 0;
+    const load = () => { const current = ++generation; if (!id) { setItem(undefined); return; } void browserStore.metadata<T>(id).then(value => { if (live && current === generation) { setItem(value); setError(""); } }).catch(value => { if (live && current === generation) setError(value.message); }); };
+    setItem(undefined); load(); const stop = browserStore.subscribe(changes => { if (changes.some(change => change.id === id)) load(); });
+    return () => { live = false; stop(); };
+  }, [id]);
+  return { item, error };
+}
+export function useLocalPage(query: ListQuery) {
+  const [page, setPage] = useState({ items: [] as LocalSummary[], total: 0, page: 1, totalPages: 0 }), [error, setError] = useState(""), [loading, setLoading] = useState(true), [refresh, setRefresh] = useState(0);
+  const key = JSON.stringify(query);
+  useEffect(() => {
+    let live = true, generation = 0;
+    const load = async () => { const current = ++generation; setLoading(true); try { const value = await browserStore.list(query); if (live && current === generation) { setPage(value); setError(""); } } catch (value) { if (live && current === generation) setError((value as Error).message); } finally { if (live && current === generation) setLoading(false); } };
+    void load(); const stop = browserStore.subscribe(changes => { if (changes.some(change => change.kind === query.kind)) void load(); });
+    return () => { live = false; stop(); };
+  }, [key, refresh]);
+  return { ...page, error, loading, reload: () => setRefresh(value => value + 1) };
 }
 export function downloadJson(name: string, value: unknown) {
   const href = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: "application/json;charset=utf-8" }));

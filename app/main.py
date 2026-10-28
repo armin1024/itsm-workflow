@@ -23,7 +23,7 @@ from app import call_logs as log_module
 from app.call_logs import emit, log_context, hide_credentials, LogCursorExpired
 from app.cli import CliExecutionError, inspect_cli
 from app.config import settings
-from app.extraction import compile_ticket_evidence, compile_ticket_id, fetch_ticket_evidence
+from app.extraction import compile_ticket_evidence, fetch_ticket_evidence
 from app.runtime import NODE_REGISTRY
 from app.runtime.compiler_service import compiler_service
 from app.runtime.executor import render_sql
@@ -39,24 +39,49 @@ from app.studio.auth import COOKIE_NAME, create_session, require_studio_admin, v
 from app.studio.validation import reject_credentials
 from app.studio.events import studio_events
 from app.workflow import WorkflowDefinition
+from app.resources import ResourceError, cpu_run, data_budget, shutdown_resources
+from app.request_limits import BoundedJsonRoute
+from app.http_clients import start_http_clients, close_http_clients
+from app.compiler_errors import failure_details, log_compiler_failure
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings.validate_service()
     log_module.initialize()
+    await start_http_clients()
+    try:
+        await inspect_cli()
+    except (CliExecutionError, TimeoutError, OSError):
+        # Extraction-only/local deployments may start without a CLI. The health
+        # response reports it; SQL execution still validates before launching.
+        pass
+    async def maintenance():
+        while True:
+            await asyncio.sleep(60)
+            compiler_service._cleanup()
+            studio_events.cleanup()
+    maintenance_task = asyncio.create_task(maintenance(), name="runtime-cache-cleanup")
     try:
         yield
     finally:
         try:
             await push_executor.shutdown()
             await compiler_service.shutdown()
+            for knowledge_id in list(compiler_service.records):
+                compiler_service._evict(knowledge_id)
         finally:
+            maintenance_task.cancel()
+            await asyncio.gather(maintenance_task, return_exceptions=True)
+            studio_events.clear()
+            await close_http_clients()
+            await shutdown_resources()
             if log_module.call_logs:
                 await asyncio.to_thread(log_module.call_logs.stop)
 
 
 app = FastAPI(title="ITSM Workflow Runtime", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None)
+app.router.route_class = BoundedJsonRoute
 
 
 @app.middleware("http")
@@ -96,6 +121,13 @@ async def http_error(request: Request, exc: HTTPException):
     return JSONResponse({"detail": exc.detail}, status_code=exc.status_code, headers=exc.headers)
 
 
+@app.exception_handler(ResourceError)
+async def resource_error(request: Request, exc: ResourceError):
+    detail = {"code": exc.code, "message": str(exc), "retryable": exc.retryable}
+    headers = {"Retry-After": "3"} if exc.status_code == 429 else None
+    return JSONResponse(detail if request.url.path.startswith("/internal/") else {"detail": detail}, status_code=exc.status_code, headers=headers)
+
+
 @app.exception_handler(RequestValidationError)
 async def request_error(request: Request, exc: RequestValidationError):
     # ValidationError input/context can contain a submitted credential. Return
@@ -118,16 +150,31 @@ def configured_callbacks() -> None:
 
 
 def invalid(exc: Exception) -> HTTPException:
+    if isinstance(exc, ResourceError):
+        return HTTPException(exc.status_code, {"code": exc.code, "message": str(exc), "retryable": exc.retryable}, headers={"Retry-After": "3"} if exc.status_code == 429 else None)
     text = str(exc)
     conflict = any(code in text for code in ("CONFLICT", "ALREADY_ACTIVE"))
     return HTTPException(409 if conflict else 422, {"code": text.split(":")[0] if conflict else "WORKFLOW_VALIDATION_FAILED", "message": text, "retryable": False})
 
 
-def validated(body: RuntimeValidateRequest) -> dict[str, Any]:
-    result = validate_workflow(body.workflowDefinition, body.validationMode)
+def compiler_http_failure(exc: Exception, stage="ACCEPTED", *, knowledge_id="", request_id="") -> HTTPException:
+    error = failure_details(exc, stage)
+    log_compiler_failure(error, knowledge_id=knowledge_id, request_id=request_id)
+    status = exc.status_code if isinstance(exc, ResourceError) else 409 if error["code"] == "EXTRACTION_CONFLICT" else 422 if isinstance(exc, ValueError) else 500
+    return HTTPException(status, error, headers={"Retry-After": "3"} if status == 429 else None)
+
+
+async def validated(body: RuntimeValidateRequest) -> dict[str, Any]:
+    result = await cpu_run(validate_workflow, body.workflowDefinition, body.validationMode)
     if body.targetCatalogDigest and body.targetCatalogDigest != result["catalogDigest"]:
         raise HTTPException(409, {"code": "CATALOG_DIGEST_CONFLICT", "message": "目标Catalog已变化", "retryable": True})
     return result
+
+
+async def data_response(value):
+    """Serialize potentially large definitions/results off the API loop."""
+    encoded = await cpu_run(lambda data: json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8"), value)
+    return Response(encoded, media_type="application/json")
 
 
 @app.get("/api/v1/health")
@@ -137,7 +184,7 @@ async def health() -> dict[str, Any]:
         cli = {"status": "ok", "version": metadata.version, "sha256": metadata.sha256}
     except (CliExecutionError, TimeoutError):
         cli = {"status": "unavailable", "message": "aops-cli不可用，请检查路径与执行权限"}
-    return {"status": "ok", "version": __version__, "role": "runtime-compiler-studio", "authentication": "studio-token", "storage": "browser", "cli": cli, "executorId": settings.executor_id, "activeRuns": len(push_executor.active)}
+    return {"status": "ok", "version": __version__, "role": "runtime-compiler-studio", "authentication": "studio-token", "storage": "browser", "cli": cli, "executorId": settings.executor_id, "activeRuns": len(push_executor.active), "activeExtractions": compiler_service.active_jobs, "dataBudget": data_budget.status()}
 
 
 @app.post("/api/v1/studio/session")
@@ -207,41 +254,72 @@ async def journal_logs(limit: int = Query(default=100, ge=1, le=200), keyword: s
 
 @app.post("/api/v1/studio/compiler/preview", dependencies=[Depends(require_studio_admin)])
 async def compiler_preview(body: CompilerPreviewRequest):
+    current_stage = "ACCEPTED"
+    async def track(stage, *_):
+        nonlocal current_stage
+        current_stage = stage
     try:
-        proposal, diagnostics = await compile_ticket_evidence(body.ticketInfo, body.auditTimeline)
-        result = validate_workflow(proposal["workflowDefinition"], "DRAFT")
+        async with compiler_service.admission() as reservation:
+            await compiler_service.charge_evidence(reservation, body.ticketInfo, body.auditTimeline)
+            proposal, diagnostics = await compile_ticket_evidence(body.ticketInfo, body.auditTimeline, progress=track)
+        result = await cpu_run(validate_workflow, proposal["workflowDefinition"], "DRAFT")
         proposal["workflowDefinition"] = result["normalizedDefinition"]
-        return {"proposal": proposal, "diagnostics": diagnostics, "validation": result, "catalogDigest": result["catalogDigest"]}
-    except ValueError as exc:
-        raise invalid(exc) from exc
+        from app.extraction import extraction_outcome
+        return await data_response({"proposal": proposal, "diagnostics": diagnostics, "validation": result, "catalogDigest": result["catalogDigest"], **extraction_outcome(diagnostics)})
+    except Exception as exc:
+        raise compiler_http_failure(exc, current_stage) from exc
 
 
 @app.post("/api/v1/studio/compiler/from-ticket", dependencies=[Depends(require_studio_admin)])
 async def compiler_ticket(body: CompilerTicketRequest, x_aops_api_key: str | None = Header(default=None, alias="X-AOPS-Api-Key")):
     if not x_aops_api_key:
         raise HTTPException(422, "请提供X-AOPS-Api-Key")
-    proposal, diagnostics = await compile_ticket_id(body.ticketId, x_aops_api_key)
-    return {"proposal": proposal, "diagnostics": diagnostics}
+    current_stage = "FETCHING_EVIDENCE"
+    async def track(stage, *_):
+        nonlocal current_stage
+        current_stage = stage
+    try:
+        async with compiler_service.admission() as reservation:
+            ticket, timeline = await fetch_ticket_evidence(body.ticketId, x_aops_api_key)
+            await compiler_service.charge_evidence(reservation, ticket, timeline)
+            proposal, diagnostics = await compile_ticket_evidence(ticket, timeline, progress=track)
+        from app.extraction import extraction_outcome
+        return await data_response({"proposal": proposal, "diagnostics": diagnostics, **extraction_outcome(diagnostics)})
+    except Exception as exc:
+        raise compiler_http_failure(exc, current_stage) from exc
 
 
-def submit_extraction(payload: dict[str, Any], sync: bool, local: bool):
+async def submit_extraction(payload: dict[str, Any], sync: bool, local: bool, reservation=None):
     if sync:
         configured_callbacks()
     knowledge_id = payload["knowledgeId"]
     async def sink(event):
         await studio_events.publish(knowledge_id, event)
-    with log_context(knowledgeId=knowledge_id, requestId=payload["requestId"], ticketId=payload["ticketId"]):
-        emit("EXTRACTION_SUBMITTED", operation="extraction")
-        created = compiler_service.submit(payload, event_sink=sink if local else None, sync_tec01=sync)
+    previous, reserved = None, False
+    try:
+        if local:
+            previous = studio_events.reserve(knowledge_id, settings.compiler_cache_max_mb * 1024 * 1024)
+            reserved = True
+        with log_context(knowledgeId=knowledge_id, requestId=payload["requestId"], ticketId=payload["ticketId"]):
+            emit("EXTRACTION_SUBMITTED", operation="extraction")
+            created = await compiler_service.submit_async(payload, reservation=reservation, event_sink=sink if local else None, sync_tec01=sync)
+    except BaseException as exc:
+        if reserved:
+            studio_events.restore_reservation(knowledge_id, previous)
+        if isinstance(exc, Exception):
+            raise compiler_http_failure(exc, "ACCEPTED", knowledge_id=knowledge_id, request_id=payload["requestId"]) from exc
+        raise
     if created and local:
         studio_events.open(knowledge_id, reset=True)
+    elif local:
+        studio_events.restore_reservation(knowledge_id, previous)
     return {"knowledgeId": knowledge_id, "accepted": True, "duplicate": not created}
 
 
 @app.post("/api/v1/studio/extractions", status_code=202, dependencies=[Depends(require_studio_admin)])
 async def studio_extract(body: StudioExtractionRequest):
     try:
-        return submit_extraction(body.model_dump(mode="json", exclude={"syncTec01"}), body.syncTec01, True)
+        return await submit_extraction(await cpu_run(body.model_dump, mode="json", exclude={"syncTec01"}), body.syncTec01, True)
     except ValueError as exc:
         raise invalid(exc) from exc
 
@@ -251,23 +329,25 @@ async def studio_extract_ticket(body: StudioTicketExtractionRequest, x_aops_api_
     if not x_aops_api_key:
         raise HTTPException(422, "请提供X-AOPS-Api-Key")
     try:
-        ticket, timeline = await fetch_ticket_evidence(body.ticketId, x_aops_api_key)
-        payload = {"knowledgeId": body.knowledgeId, "requestId": body.requestId, "ticketId": body.ticketId, "ticketInfo": ticket, "auditTimeline": timeline}
-        return submit_extraction(payload, body.syncTec01, True)
-    except ValueError as exc:
-        raise invalid(exc) from exc
+        async with compiler_service.admission() as reservation:
+            ticket, timeline = await fetch_ticket_evidence(body.ticketId, x_aops_api_key)
+            payload = {"knowledgeId": body.knowledgeId, "requestId": body.requestId, "ticketId": body.ticketId, "ticketInfo": ticket, "auditTimeline": timeline}
+            return await submit_extraction(payload, body.syncTec01, True, reservation=reservation)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise compiler_http_failure(exc, "FETCHING_EVIDENCE", knowledge_id=body.knowledgeId, request_id=body.requestId) from exc
 
 
 @app.post("/api/v1/studio/workflows/validate", dependencies=[Depends(require_studio_admin)])
 async def studio_validate(body: RuntimeValidateRequest):
     try:
-        return validated(body)
+        return await data_response(await validated(body))
     except ValueError as exc:
         raise invalid(exc) from exc
 
 
-@app.post("/api/v1/studio/workflows/plan", dependencies=[Depends(require_studio_admin)])
-async def studio_plan(body: dict[str, Any]):
+def _studio_plan_data(body: dict[str, Any]):
     try:
         ticket_id = body.get("ticketId")
         if isinstance(ticket_id, bool) or not isinstance(ticket_id, int) or ticket_id <= 0:
@@ -297,34 +377,51 @@ async def studio_plan(body: dict[str, Any]):
         raise invalid(exc) from exc
 
 
-def dispatch(body: ExecutionDispatchRequest, key: str | None, *, local: bool, sync: bool):
+@app.post("/api/v1/studio/workflows/plan", dependencies=[Depends(require_studio_admin)])
+async def studio_plan(body: dict[str, Any]):
+    return await data_response(await cpu_run(_studio_plan_data, body))
+
+
+async def dispatch(body: ExecutionDispatchRequest, key: str | None, *, local: bool, sync: bool):
     if sync:
         configured_callbacks()
-    payload = body.model_dump(mode="json", exclude={"syncTec01", "planMaterialHash"})
-    reject_credentials({"workflowSnapshot": payload["workflowSnapshot"], "runInputs": payload["runInputs"]})
+    payload = await cpu_run(body.model_dump, mode="json", exclude={"syncTec01", "planMaterialHash"})
+    await cpu_run(reject_credentials, {"workflowSnapshot": payload["workflowSnapshot"], "runInputs": payload["runInputs"]})
     nodes = payload["workflowSnapshot"].get("nodes") or []
     if not isinstance(nodes, list) or not all(isinstance(node, dict) for node in nodes):
         raise ValueError("workflowSnapshot.nodes必须为节点对象数组")
     if any(node.get("type") == "sql_read" for node in nodes) and not key:
         raise ValueError("包含SQL读节点时必须通过X-AOPS-Api-Key提供当前用户凭据")
     if local and getattr(body, "planMaterialHash", None):
-        checked = render_plan(workflow_version_id="local-browser", workflow_content_hash=body.workflowContentHash, workflow_snapshot=body.workflowSnapshot, ticket_id=body.ticketId, parameters=body.runInputs, actor_uid="studio")
+        checked = await cpu_run(render_plan, workflow_version_id="local-browser", workflow_content_hash=body.workflowContentHash, workflow_snapshot=body.workflowSnapshot, ticket_id=body.ticketId, parameters=body.runInputs, actor_uid="studio")
         if not checked["valid"] or body.planMaterialHash != checked["planMaterialHash"]:
             raise HTTPException(409, {"code": "PLAN_CONFIRMATION_MISMATCH", "message": "计划定义、工单或参数已变化，请重新创建并确认计划", "retryable": False})
+    run_id = body.runId
     async def sink(event):
-        await studio_events.publish(body.runId, event)
-    with log_context(runId=body.runId, dispatchId=body.dispatchId, ticketId=body.ticketId), hide_credentials(key):
-        emit("EXECUTION_DISPATCHED", operation="dispatch")
-        accepted, created = push_executor.dispatch(payload, key, event_sink=sink if local else None, sync_tec01=sync)
+        # Do not retain the request model (and all recovery outputs) in the
+        # background event sink closure; the executor owns its prepared copy.
+        await studio_events.publish(run_id, event)
+    prepared = await push_executor.prepare_dispatch(payload)
+    previous = studio_events.reserve(body.runId, settings.executor_run_memory_mb * 1024 * 1024) if local else None
+    try:
+        with log_context(runId=body.runId, dispatchId=body.dispatchId, ticketId=body.ticketId), hide_credentials(key):
+            emit("EXECUTION_DISPATCHED", operation="dispatch")
+            accepted, created = push_executor.dispatch(payload, key, event_sink=sink if local else None, sync_tec01=sync, prepared=prepared)
+    except BaseException:
+        if local:
+            studio_events.restore_reservation(body.runId, previous)
+        raise
     if local and created:
         studio_events.open(body.runId, reset=True)
+    elif local:
+        studio_events.restore_reservation(body.runId, previous)
     return accepted
 
 
 @app.post("/api/v1/studio/executions/dispatch", dependencies=[Depends(require_studio_admin)])
 async def studio_dispatch(body: StudioExecutionRequest, x_aops_api_key: str | None = Header(default=None, alias="X-AOPS-Api-Key")):
     try:
-        return dispatch(body, x_aops_api_key, local=True, sync=body.syncTec01)
+        return await dispatch(body, x_aops_api_key, local=True, sync=body.syncTec01)
     except (ValueError, RuntimeError) as exc:
         if "NO_CAPACITY" in str(exc):
             raise HTTPException(429, "Executor当前无可用容量", headers={"Retry-After": "3"}) from exc
@@ -347,10 +444,10 @@ async def studio_activity(run_id: str):
 async def events(stream_id: str, after: int = Query(default=0, ge=0)):
     try:
         result = studio_events.get(stream_id, after)
-        record = compiler_service.get(stream_id)
+        record = compiler_service.sync_state(stream_id)
         if record:
             result.update({key: record[key] for key in ("syncStatus", "callbackError") if key in record})
-        return result
+        return await data_response(result)
     except KeyError as exc:
         raise HTTPException(404, "服务中没有活动记录，请使用浏览器已保存的计划恢复") from exc
 
@@ -368,20 +465,29 @@ async def runtime_catalog(response: Response, if_none_match: str | None = Header
 @app.post("/internal/v1/runtime/workflows/validate", dependencies=[Depends(runtime_service)])
 async def runtime_validate(body: RuntimeValidateRequest):
     try:
-        return validated(body)
+        return await data_response(await validated(body))
     except ValueError as exc:
         raise invalid(exc) from exc
 
 
 def schema_catalog():
-    models = {"workflowDefinition": WorkflowDefinition, "dispatch": ExecutionDispatchRequest, "extraction": ExtractionSubmitRequest}
+    from app.schemas import ExtractionDiagnostics, ExtractionFinished
+    models = {"workflowDefinition": WorkflowDefinition, "dispatch": ExecutionDispatchRequest, "extraction": ExtractionSubmitRequest,
+              "extractionDiagnostics": ExtractionDiagnostics, "extractionFinished": ExtractionFinished}
     dialect = "https://json-schema.org/draft/2020-12/schema"
     schemas = {name: {"$schema": dialect, **model.model_json_schema()} for name, model in models.items()}
+    schemas["extraction"]["properties"]["auditTimeline"]["maxItems"] = settings.compiler_max_audit_operations
     definitions = schemas["workflowDefinition"].get("$defs", {})
     definitions["WorkflowNode"]["properties"]["type"]["enum"] = [node["type"] for node in NODE_REGISTRY.catalog()["nodes"]]
     schemas["dispatch"]["$defs"] = {**definitions, "WorkflowDefinition": {key: value for key, value in schemas["workflowDefinition"].items() if key not in {"$defs", "$schema"}}}
     schemas["dispatch"]["properties"]["workflowSnapshot"] = {"$ref": "#/$defs/WorkflowDefinition"}
-    return {"runtimeVersion": __version__, "jsonSchemaDialect": dialect, "schemas": schemas, "nodes": NODE_REGISTRY.catalog()["nodes"]}
+    return {"runtimeVersion": __version__, "jsonSchemaDialect": dialect, "schemas": schemas, "nodes": NODE_REGISTRY.catalog()["nodes"],
+            "limits": {"requestMaxBytes": settings.request_max_body_mb * 1024 * 1024,
+                       "evidenceMaxBytes": settings.compiler_evidence_max_mb * 1024 * 1024,
+                       "auditOperations": settings.compiler_max_audit_operations,
+                       "sqlTemplateMaxChars": settings.sql_template_max_chars,
+                       "modelInputMaxChars": settings.compiler_model_input_max_chars,
+                       "jsonMaxDepth": 128, "jsonMaxScalarBytes": 4096}}
 
 
 @app.get("/internal/v1/runtime/schemas", dependencies=[Depends(runtime_service)])
@@ -400,7 +506,7 @@ async def runtime_schema(schema_name: str):
 @app.post("/internal/v1/runtime/workflows/plan", dependencies=[Depends(runtime_service)])
 async def runtime_plan(body: RuntimePlanRequest):
     try:
-        return render_plan(workflow_version_id=body.workflowVersionId, workflow_content_hash=body.workflowContentHash, workflow_snapshot=body.workflowSnapshot, ticket_id=body.ticketId, parameters=body.parameters, actor_uid=body.actorUid)
+        return await data_response(await cpu_run(render_plan, workflow_version_id=body.workflowVersionId, workflow_content_hash=body.workflowContentHash, workflow_snapshot=body.workflowSnapshot, ticket_id=body.ticketId, parameters=body.parameters, actor_uid=body.actorUid))
     except ValueError as exc:
         raise invalid(exc) from exc
 
@@ -408,7 +514,7 @@ async def runtime_plan(body: RuntimePlanRequest):
 @app.post("/internal/v1/extractions/{knowledge_id}", status_code=202, dependencies=[Depends(runtime_service)])
 async def extraction(knowledge_id: str, body: ExtractionSubmitRequest):
     try:
-        return submit_extraction({"knowledgeId": knowledge_id, **body.model_dump(mode="json")}, True, False)
+        return await submit_extraction({"knowledgeId": knowledge_id, **(await cpu_run(body.model_dump, mode="json"))}, True, False)
     except ValueError as exc:
         raise invalid(exc) from exc
 
@@ -416,7 +522,7 @@ async def extraction(knowledge_id: str, body: ExtractionSubmitRequest):
 @app.post("/internal/v1/executions/dispatch", dependencies=[Depends(runtime_service)])
 async def execution_dispatch(body: ExecutionDispatchRequest, x_aops_api_key: str | None = Header(default=None, alias="X-AOPS-Api-Key")):
     try:
-        return dispatch(body, x_aops_api_key, local=False, sync=True)
+        return await dispatch(body, x_aops_api_key, local=False, sync=True)
     except (ValueError, RuntimeError) as exc:
         if "NO_CAPACITY" in str(exc):
             raise HTTPException(429, {"code": "EXECUTOR_NO_CAPACITY", "message": "Executor当前无可用容量", "retryable": True}, headers={"Retry-After": "3"}) from exc

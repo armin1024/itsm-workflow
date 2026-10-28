@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlglot import exp, parse, parse_one
 
 from app.runtime import NODE_REGISTRY
+from app.config import settings
 
 
 NODE_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,119}$")
@@ -162,6 +163,8 @@ class WorkflowDefinition(BaseModel):
                 raise ValueError(f"节点 {node.id} 包含 SQL 不支持的输入类型")
             database = str(node.config.get("databaseRef") or "").strip()
             sql = str(node.config.get("sqlTemplate") or "").strip()
+            if len(sql) > settings.sql_template_max_chars:
+                raise ValueError(f"节点 {node.id} SQL模板超过{settings.sql_template_max_chars}字符，请拆分或调整配置")
             if not database or len(database) > 1000:
                 raise ValueError(f"节点 {node.id} 数据库路径无效")
             placeholders = set(PLACEHOLDER.findall(sql))

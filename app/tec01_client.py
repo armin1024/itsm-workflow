@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 import time
 from typing import Any, Awaitable, Callable
@@ -12,6 +13,8 @@ from app.cli import redact_diagnostic
 from app.config import settings
 from app.call_logs import call_span, emit, hide_credentials
 from app.log_descriptions import BUSINESS_ERRORS
+from app.http_clients import get_tec01_client
+from app.resources import cpu_run
 
 
 class Tec01Error(RuntimeError):
@@ -39,12 +42,14 @@ class Tec01Client:
         call_id = call_id or uuid.uuid4().hex
         failure_code = (payload.get("error") or {}).get("code") if isinstance(payload.get("error"), dict) else None
         failure_code = failure_code if isinstance(failure_code, str) and failure_code in BUSINESS_ERRORS else None
-        async with httpx.AsyncClient(transport=self.transport, timeout=min(settings.tec01_timeout_seconds, 30)) as client:
+        # Encode exactly once; transport retries reuse the identical bytes.
+        encoded = await cpu_run(lambda: json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8"))
+        async with get_tec01_client(transport=self.transport) as client:
             attempts = settings.tec01_callback_max_attempts if expected_ack is not None else 6
             for attempt in range(attempts):
                 with hide_credentials(self.token), call_span(peer="TEC01", callId=call_id, businessErrorCode=failure_code, direction="OUTBOUND", operation=payload.get("type", "callback"), stage=payload.get("stage"), businessStatus=payload.get("status"), method="POST", url=self.base_url + path, requestId=payload.get("requestId") or request_id, runId=(expected_ack or {}).get("runId"), knowledgeId=extraction_id, dispatchId=payload.get("dispatchId"), nodeId=payload.get("nodeId"), attemptId=payload.get("attemptId"), attempt=attempt + 1, maxAttempts=attempts) as outcome:
                     try:
-                        response = await client.post(self.base_url + path, headers=headers, json=payload)
+                        response = await client.post(self.base_url + path, headers=headers, content=encoded, timeout=min(settings.tec01_timeout_seconds, 30))
                         outcome["httpStatus"] = response.status_code
                     except httpx.TimeoutException as exc:
                         error = Tec01Error("TEC01_TIMEOUT", "tec01回调超时", status_code=503, retryable=True)

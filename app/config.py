@@ -41,8 +41,20 @@ class Settings(BaseSettings):
     tec01_callback_max_attempts: int = Field(default=6, ge=1, le=10)
     tec01_callback_wait_seconds: int = Field(default=70, ge=1, le=300)
     executor_id: str = "executor-01"
-    executor_max_active_runs: int = Field(default=32, ge=1, le=128)
-    executor_max_active_cli: int = Field(default=8, ge=1, le=64)
+    executor_max_active_runs: int = Field(default=8, ge=1, le=128)
+    executor_max_active_cli: int = Field(default=2, ge=1, le=64)
+    compiler_max_active_jobs: int = Field(default=1, ge=1, le=32)
+    cpu_max_workers: int = Field(default=1, ge=1, le=8)
+    request_max_body_mb: int = Field(default=64, ge=1, le=256)
+    compiler_evidence_max_mb: int = Field(default=8, ge=1, le=64)
+    compiler_max_audit_operations: int = Field(default=5000, ge=1, le=50000)
+    compiler_model_input_max_chars: int = Field(default=24000, ge=1000, le=1000000)
+    sql_template_max_chars: int = Field(default=65536, ge=100, le=1048576)
+    executor_run_memory_mb: int = Field(default=256, ge=1, le=4096)
+    runtime_data_budget_mb: int = Field(default=2048, ge=1, le=65536)
+    compiler_cache_max_mb: int = Field(default=64, ge=1, le=4096)
+    tec01_http_max_connections: int = Field(default=16, ge=1, le=256)
+    tec01_http_max_keepalive: int = Field(default=8, ge=0, le=256)
 
     node_timeout_seconds: int = Field(default=600, ge=1, le=7200)
     workflow_base_path: str = ""
@@ -86,6 +98,20 @@ class Settings(BaseSettings):
         return {
             "readOnly": True, "storage": "browser-indexeddb", "serverDatabase": False,
             "executorId": self.executor_id,
+            "performance": {
+                "activeRuns": self.executor_max_active_runs, "activeCli": self.executor_max_active_cli,
+                "compilerJobs": self.compiler_max_active_jobs, "cpuWorkers": self.cpu_max_workers,
+                "requestMaxBytes": self.request_max_body_mb * 1024 * 1024,
+                "compilerEvidenceMaxBytes": self.compiler_evidence_max_mb * 1024 * 1024,
+                "runMemoryBytes": self.executor_run_memory_mb * 1024 * 1024,
+                "dataBudgetBytes": self.runtime_data_budget_mb * 1024 * 1024,
+                "compilerCacheBytes": self.compiler_cache_max_mb * 1024 * 1024,
+                "modelInputMaxChars": self.compiler_model_input_max_chars,
+                "sqlTemplateMaxChars": self.sql_template_max_chars,
+                "httpConnections": self.tec01_http_max_connections,
+                "httpKeepalive": self.tec01_http_max_keepalive,
+                "memoryAccounting": "estimated-json-objects-not-rss", "cpuScratchBytesPerWorker": 512 * 1024 * 1024,
+            },
             "logging": {"directory": str(self.log_dir.absolute()), "level": self.log_level, "retentionDays": self.log_retention_days, "maxTotalBytes": self.log_max_total_mb * 1024 * 1024, "maxFileBytes": min(self.log_max_file_mb, self.log_max_total_mb) * 1024 * 1024, "cleanupIntervalSeconds": self.log_cleanup_interval_seconds},
             "tec01": {
                 "baseUrl": base_url, "serviceTokenConfigured": bool(self.tec01_service_token),

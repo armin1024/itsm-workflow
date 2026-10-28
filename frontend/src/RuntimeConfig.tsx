@@ -5,6 +5,7 @@ import { api } from "./api";
 export type RuntimeConfiguration = {
   runtimeVersion: string; readOnly: boolean; storage: string; serverDatabase: boolean; executorId: string;
   logging: { directory: string; level: string; retentionDays: number; maxTotalBytes: number; maxFileBytes: number; cleanupIntervalSeconds: number };
+  performance?: { activeRuns: number; activeCli: number; compilerJobs: number; cpuWorkers: number; requestMaxBytes: number; compilerEvidenceMaxBytes: number; runMemoryBytes: number; dataBudgetBytes: number; compilerCacheBytes: number; modelInputMaxChars: number; sqlTemplateMaxChars: number; httpConnections: number; httpKeepalive: number; memoryAccounting?: string; cpuScratchBytesPerWorker?: number };
   tec01: {
     baseUrl: string; serviceTokenConfigured: boolean; runCallbackPath: string; extractionCallbackPath: string;
     runCallbackUrl: string; extractionCallbackUrl: string; timeoutSeconds: number; callbackMaxAttempts: number;
@@ -13,7 +14,7 @@ export type RuntimeConfiguration = {
 };
 
 function Field({ label, value }: { label: string; value: string | number }) {
-  return <div><dt>{label}</dt><dd><code>{value || "未配置"}</code></dd></div>;
+  return <div><dt>{label}</dt><dd><code>{value === "" ? "未配置" : value}</code></dd></div>;
 }
 
 export default function RuntimeConfig() {
@@ -39,6 +40,7 @@ export default function RuntimeConfig() {
         <section className="runtime-config-section"><h2>提取回报</h2><p>提取进度和最终结果均使用此接口。</p><dl><Field label="TEC01_EXTRACTION_CALLBACK_PATH" value={data.tec01.extractionCallbackPath} /><Field label="完整地址模板 · POST" value={data.tec01.extractionCallbackUrl} /><Field label="单次请求超时（秒）" value={data.tec01.timeoutSeconds} /><Field label="最多尝试次数 · 提取既有策略" value={data.tec01.extractionMaxAttempts} /></dl><p>占位符由服务替换为实际 ID，无需手工拼接。变更地址不改变回报结构或确认协议。</p></section>
       </div>
       <section className="runtime-config-section"><h2>本地数据与运行内存</h2><p>知识、草稿、计划和调试结果由当前浏览器的 IndexedDB 保存，服务端不使用数据库。清除站点数据或更换访问域名不会迁移这些本地记录，请先导出备份。</p><p>执行中的计划仅保存在服务端内存；服务重启会释放活动运行。生产数据由 tec01 保存，AOPS_API_KEY 不写入浏览器存储。</p></section>
+      {data.performance && <section className="runtime-config-section"><h2>并发与资源上限 · 只读</h2><p>超过结果或内存上限会明确失败，不静默截断原始结果；不要仅提高并发而忽略内存及对端数据库承载。</p><dl>{Object.entries(data.performance).map(([key, value]) => <Field key={key} label={key} value={typeof value === "number" && key.includes("Bytes") ? `${(value / 1024 / 1024).toFixed(1)} MiB` : value ?? "未配置"} />)}</dl></section>}
       <section className="runtime-config-section"><h2>运维日志 · 只读策略</h2><dl><Field label="LOG_DIR" value={data.logging.directory} /><Field label="LOG_LEVEL" value={data.logging.level} /><Field label="LOG_RETENTION_DAYS" value={data.logging.retentionDays} /><Field label="LOG_MAX_TOTAL_MB · MiB" value={data.logging.maxTotalBytes / 1024 / 1024} /><Field label="LOG_MAX_FILE_MB · MiB" value={data.logging.maxFileBytes / 1024 / 1024} /><Field label="LOG_CLEANUP_INTERVAL_SECONDS" value={data.logging.cleanupIntervalSeconds} /></dl><p>日志是安全元数据滚动文件，不是业务数据库。实际占用与清理结果可在“日志”菜单查看；journalctl副本由系统管理。</p></section>
     </>}
   </main>;

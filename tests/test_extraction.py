@@ -78,7 +78,7 @@ async def test_llm_gateway_retries_without_response_format_and_parses_fence(monk
             return None
 
         async def post(self, _url, **kwargs):
-            self.calls.append(kwargs["json"])
+            self.calls.append(json.loads(kwargs["content"]))
             if len(self.calls) == 1:
                 return Response(400, text="response_format unsupported")
             content = '```json\n{"name":"客户查询","summary":"查询客户信息。","matchPhrases":["客户查询"],"negativePhrases":[],"steps":[]}\n```'

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Button, InlineNotification, Select, SelectItem, TextArea, TextInput } from "@carbon/react";
-import { pretty } from "./ui";
+import { ContextPreview } from "./ResultPreview";
 
 export function typedValue(raw: string, type: string): unknown {
   if (type === "integer" || type === "number") {
@@ -46,5 +46,5 @@ export default function HitlPanel({ interaction, busy, onSubmit, onCancel }: { i
       }
     } catch (error) { setError((error as Error).message); }
   };
-  return <section className="hitl-panel"><header><div><p className="overline">HUMAN IN THE LOOP</p><h2>{String(interaction.title || "等待人工处理")}</h2><p>{String(interaction.description || "核对前置结果后填写或选择后续步骤的参数。")}</p></div><span>由用户确认</span></header>{interaction.context != null && <details><summary>查看前置节点上下文</summary><pre>{pretty(interaction.context)}</pre></details>}{error && <InlineNotification kind="error" title="输入未完成" subtitle={error} hideCloseButton />}<div className="typed-input-grid">{fields.map((field) => <ValueInput key={String(field.name)} id={`hitl-${String(field.name)}`} label={String(field.label || field.name)} type={String(field.type || "string")} required={field.required !== false} options={field.enum as unknown[] | undefined} description={String(field.description || "")} value={values[String(field.name)] ?? String(field.default ?? "")} onChange={(value) => setValues((current) => ({ ...current, [String(field.name)]: value }))} />)}</div><div className="panel-actions"><Button kind="danger--ghost" disabled={busy} onClick={onCancel}>取消运行并移除</Button><Button disabled={busy} onClick={submit}>确认参数并继续</Button></div></section>;
+  return <section className="hitl-panel"><header><div><p className="overline">HUMAN IN THE LOOP</p><h2>{String(interaction.title || "等待人工处理")}</h2><p>{String(interaction.description || "核对前置结果后填写或选择后续步骤的参数。")}</p></div><span>由用户确认</span></header>{interaction.context != null && <ContextPreview value={interaction.context} />}{error && <InlineNotification kind="error" title="输入未完成" subtitle={error} hideCloseButton />}<div className="typed-input-grid">{fields.map((field) => <ValueInput key={String(field.name)} id={`hitl-${String(field.name)}`} label={String(field.label || field.name)} type={String(field.type || "string")} required={field.required !== false} options={field.enum as unknown[] | undefined} description={String(field.description || "")} value={values[String(field.name)] ?? String(field.default ?? "")} onChange={(value) => setValues((current) => ({ ...current, [String(field.name)]: value }))} />)}</div><div className="panel-actions"><Button kind="danger--ghost" disabled={busy} onClick={onCancel}>取消运行并移除</Button><Button disabled={busy} onClick={submit}>确认参数并继续</Button></div></section>;
 }

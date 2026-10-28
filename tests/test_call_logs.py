@@ -2,6 +2,7 @@ import asyncio
 import io
 import json
 import os
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -114,6 +115,83 @@ def test_query_scans_at_most_eight_mib(tmp_path):
     page = value.query(keyword="no-such-event")
     assert page["scannedBytes"] <= 8 * 1024 * 1024 and page["nextCursor"]
     assert value.query(cursor=page["nextCursor"], keyword="no-such-event")["nextCursor"] is None
+
+
+def test_slow_log_query_does_not_hold_writer_lock(tmp_path, monkeypatch):
+    value = store(tmp_path)
+    value._write({"timestamp": "2026-10-23T00:00:00+00:00", "logId": "before", "level": "INFO", "event": "CALL_COMPLETED"})
+    opened, release, written = threading.Event(), threading.Event(), threading.Event()
+    original = value._open_read
+    failures, pages = [], []
+
+    def slow_open(path):
+        opened.set()
+        assert release.wait(2)
+        return original(path)
+
+    def query():
+        try:
+            pages.append(value.query())
+        except BaseException as exc:
+            failures.append(exc)
+
+    def write():
+        value._write({"timestamp": "2026-10-23T00:00:01+00:00", "logId": "after", "level": "INFO", "event": "CALL_COMPLETED"})
+        written.set()
+
+    monkeypatch.setattr(value, "_open_read", slow_open)
+    reader = threading.Thread(target=query)
+    writer = threading.Thread(target=write)
+    reader.start()
+    assert opened.wait(2)
+    try:
+        writer.start()
+        assert written.wait(1), "writer must not wait for a paused log query"
+    finally:
+        release.set()
+        reader.join(2)
+        writer.join(2)
+    assert not reader.is_alive() and not writer.is_alive() and failures == []
+    assert [item["logId"] for item in pages[0]["items"]] == ["before"]
+    assert len(records(value)) == 2
+
+
+def test_cleanup_during_query_expires_cursor_without_blocking_cleanup(tmp_path, monkeypatch):
+    value = store(tmp_path)
+    value._write({"timestamp": "2026-10-23T00:00:00+00:00", "logId": "before", "level": "INFO", "event": "CALL_COMPLETED"})
+    opened, release, cleaned = threading.Event(), threading.Event(), threading.Event()
+    original = value._open_read
+    errors = []
+
+    def slow_open(path):
+        opened.set()
+        assert release.wait(2)
+        return original(path)
+
+    def query():
+        try:
+            value.query()
+        except BaseException as exc:
+            errors.append(exc)
+
+    def cleanup():
+        value.active = None
+        value.cleanup(now=datetime.now(UTC) + timedelta(days=30))
+        cleaned.set()
+
+    monkeypatch.setattr(value, "_open_read", slow_open)
+    reader = threading.Thread(target=query)
+    remover = threading.Thread(target=cleanup)
+    reader.start()
+    assert opened.wait(2)
+    try:
+        remover.start()
+        assert cleaned.wait(1), "cleanup must not wait for the scanning reader"
+    finally:
+        release.set()
+        reader.join(2)
+        remover.join(2)
+    assert len(errors) == 1 and isinstance(errors[0], LogCursorExpired)
 
 
 def test_queue_full_disk_failure_symlink_and_level_are_nonfatal(tmp_path, monkeypatch):

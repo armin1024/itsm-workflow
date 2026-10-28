@@ -127,3 +127,6 @@ HITL、暂停、失败或未知核实后，以新dispatchId重新下发固定计
 ticketInfo为info.data对象，auditTimeline为操作记录data数组，ticketId需一致。空数组可验证无有效操作的失败路径，不能提取有效草稿。tec01先建立知识/提取记录，服务端通过PROGRESS/FINISHED回调进度与结果。 PROGRESS和FINISHED均回传原提交requestId，回报幂等键包含该requestId；tec01按knowledgeId+requestId隔离提取尝试，旧请求迟到回报不得覆盖新请求，具体确认格式见回调API文档。
 
 不依赖tec01任务领取或轮询。发布前校验、人工审核、知识存储由tec01负责；LLM只用于提取。
+## 提取完整性扩展（0.13.3）
+
+成功FINISHED回报新增`extractionOutcome=SUCCESS|PARTIAL_SUCCESS`、`publishable`，并扩展diagnostics。tec01须保存完整诊断后按原协议确认；部分成功不能直接发布，仍需人工处理遗漏及校验。失败时已完成的分类位于`error.details.diagnostics`。详见[字段、示例与审核规则](extraction-partial-success-addendum.md)，现有回报路径、幂等和重试规则不变。

@@ -40,6 +40,8 @@ find "$PREFIX" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 cp -R "$PACKAGE_DIR/app" "$PACKAGE_DIR/frontend" "$PACKAGE_DIR/python" "$PACKAGE_DIR/site-packages" "$PREFIX/"
 cp "$PACKAGE_DIR/pyproject.toml" "$PACKAGE_DIR/uv.lock" "$PACKAGE_DIR/README.md" "$PREFIX/"
 cp -R "$PACKAGE_DIR/docs" "$PREFIX/"
+if [ -d "$PACKAGE_DIR/profiles" ]; then cp -R "$PACKAGE_DIR/profiles" "$PREFIX/"; fi
+if [ -d "$PACKAGE_DIR/tools" ]; then cp -R "$PACKAGE_DIR/tools" "$PREFIX/"; fi
 find "$PREFIX" \( -name '.DS_Store' -o -name '._*' -o -name '.AppleDouble' -o -name '__MACOSX' \) -prune -exec rm -rf {} +
 touch "$PREFIX/.itsm-workflow-install"
 if [ ! -f "$CONFIG_DIR/service.env" ]; then
@@ -63,6 +65,12 @@ if ! grep -q '^TEC01_EXTRACTION_CALLBACK_PATH=' "$CONFIG_DIR/service.env"; then
   printf '\nTEC01_EXTRACTION_CALLBACK_PATH=/internal/v1/extractions/{knowledgeId}/callbacks\n' >> "$CONFIG_DIR/service.env"
 fi
 for setting in LOG_LEVEL=INFO LOG_DIR=/var/lib/itsm-workflow/logs LOG_RETENTION_DAYS=7 LOG_MAX_TOTAL_MB=512 LOG_MAX_FILE_MB=16 LOG_CLEANUP_INTERVAL_SECONDS=60; do
+  key=${setting%%=*}
+  if ! grep -Eq "^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=" "$CONFIG_DIR/service.env"; then
+    printf '\n%s\n' "$setting" >> "$CONFIG_DIR/service.env"
+  fi
+done
+for setting in COMPILER_MAX_ACTIVE_JOBS=1 CPU_MAX_WORKERS=1 RUNTIME_DATA_BUDGET_MB=2048 EXECUTOR_RUN_MEMORY_MB=256 COMPILER_CACHE_MAX_MB=64 REQUEST_MAX_BODY_MB=64 COMPILER_EVIDENCE_MAX_MB=8 COMPILER_MAX_AUDIT_OPERATIONS=5000 COMPILER_MODEL_INPUT_MAX_CHARS=24000 SQL_TEMPLATE_MAX_CHARS=65536 TEC01_HTTP_MAX_CONNECTIONS=16 TEC01_HTTP_MAX_KEEPALIVE=8; do
   key=${setting%%=*}
   if ! grep -Eq "^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=" "$CONFIG_DIR/service.env"; then
     printf '\n%s\n' "$setting" >> "$CONFIG_DIR/service.env"

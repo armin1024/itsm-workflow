@@ -1,6 +1,6 @@
 [project]
 name = "itsm-workflow"
-version = "0.12.3"
+version = "0.13.3"
 description = "AOPS workflow runtime, compiler, node registry and standalone Studio"
 requires-python = ">=3.12"
 dependencies = [

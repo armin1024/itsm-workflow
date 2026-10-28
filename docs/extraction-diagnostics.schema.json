@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "ExtractionBlockingIssue": {
+      "properties": {
+        "code": {
+          "enum": [
+            "DEPENDENCY_REQUIRES_REVIEW",
+            "EXTRACTION_INCOMPLETE"
+          ],
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "nodeIds": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Nodeids",
+          "type": "array"
+        },
+        "operationIds": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Operationids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "nodeIds",
+        "operationIds"
+      ],
+      "title": "ExtractionBlockingIssue",
+      "type": "object"
+    },
+    "FailedSqlOperation": {
+      "properties": {
+        "operationId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Operationid"
+        },
+        "auditIndex": {
+          "minimum": 0,
+          "title": "Auditindex",
+          "type": "integer"
+        },
+        "stage": {
+          "enum": [
+            "FILTERING_OPERATIONS",
+            "PARAMETERIZING_SQL"
+          ],
+          "title": "Stage",
+          "type": "string"
+        },
+        "code": {
+          "enum": [
+            "SQL_PARSE_FAILED",
+            "SQL_NOT_READ_ONLY",
+            "SQL_MULTIPLE_STATEMENTS",
+            "SQL_TEMPLATE_TOO_LARGE",
+            "SQL_PARAMETERIZATION_FAILED",
+            "SQL_NODE_VALIDATION_FAILED"
+          ],
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operationId",
+        "auditIndex",
+        "stage",
+        "code",
+        "message"
+      ],
+      "title": "FailedSqlOperation",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "ticketNo": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ticketno"
+    },
+    "auditOperationCount": {
+      "minimum": 0,
+      "title": "Auditoperationcount",
+      "type": "integer"
+    },
+    "acceptedOperationCount": {
+      "minimum": 0,
+      "title": "Acceptedoperationcount",
+      "type": "integer"
+    },
+    "ignoredOperationCount": {
+      "minimum": 0,
+      "title": "Ignoredoperationcount",
+      "type": "integer"
+    },
+    "ignoredOperations": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Ignoredoperations",
+      "type": "array"
+    },
+    "failedOperationCount": {
+      "minimum": 0,
+      "title": "Failedoperationcount",
+      "type": "integer"
+    },
+    "failedOperations": {
+      "items": {
+        "$ref": "#/$defs/FailedSqlOperation"
+      },
+      "title": "Failedoperations",
+      "type": "array"
+    },
+    "blockingIssues": {
+      "items": {
+        "$ref": "#/$defs/ExtractionBlockingIssue"
+      },
+      "title": "Blockingissues",
+      "type": "array"
+    },
+    "llmMode": {
+      "const": "structured",
+      "default": "structured",
+      "title": "Llmmode",
+      "type": "string"
+    }
+  },
+  "required": [
+    "auditOperationCount",
+    "acceptedOperationCount",
+    "ignoredOperationCount",
+    "ignoredOperations",
+    "failedOperationCount",
+    "failedOperations",
+    "blockingIssues"
+  ],
+  "title": "ExtractionDiagnostics",
+  "type": "object"
+}

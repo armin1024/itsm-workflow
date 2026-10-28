@@ -28,7 +28,7 @@ from app.log_descriptions import describe
 
 _context = contextvars.ContextVar("call_log_context", default={})
 _secrets = contextvars.ContextVar("call_log_secrets", default=())
-FIELDS = {"traceId", "requestId", "runId", "dispatchId", "knowledgeId", "nodeId", "attemptId", "ticketId", "spanId", "callId", "direction", "peer", "operation", "method", "url", "stage", "businessStatus", "businessErrorCode", "httpStatus", "exitCode", "durationMs", "attempt", "maxAttempts", "retryDelaySeconds", "errorCode", "model", "acknowledged"}
+FIELDS = {"traceId", "requestId", "runId", "dispatchId", "knowledgeId", "nodeId", "attemptId", "ticketId", "spanId", "callId", "direction", "peer", "operation", "method", "url", "stage", "businessStatus", "businessErrorCode", "httpStatus", "exitCode", "durationMs", "attempt", "maxAttempts", "retryDelaySeconds", "errorCode", "model", "acknowledged", "errorMessage", "reasonCode", "errorField", "errorId", "exceptionType", "errorLocation", "filterSummary"}
 FILE_PATTERN = re.compile(r"^calls-\d{8}T\d{12}Z-[a-f0-9]{12}\.jsonl$")
 LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40}
 
@@ -80,7 +80,7 @@ def safe_url(value: str) -> str:
 def error_code(exc: BaseException) -> str:
     # Do not trust exception text or remote-provided error codes.
     code = getattr(exc, "code", "")
-    allowed = {"CLI_NOT_FOUND", "CLI_VERSION_FAILED", "CLI_VERSION_MISMATCH", "NON_ZERO_EXIT", "TIMEOUT", "CANCELLED", "OUTPUT_LIMIT_EXCEEDED", "INVALID_JSON", "AOPS_BUSINESS_ERROR", "TEC01_ACK_INVALID", "TEC01_INVALID_RESPONSE", "TEC01_ACK_NOT_SAVED", "TEC01_ACK_MISMATCH", "TEC01_EXTRACTION_ACK_INVALID", "TEC01_EXTRACTION_ACK_MISMATCH", "TEC01_ACK_WAIT_EXCEEDED", "TEC01_NOT_CONFIGURED", "TEC01_TIMEOUT", "TEC01_UNAVAILABLE"}
+    allowed = {"CLI_NOT_FOUND", "CLI_VERSION_FAILED", "CLI_VERSION_MISMATCH", "NON_ZERO_EXIT", "TIMEOUT", "CANCELLED", "OUTPUT_LIMIT_EXCEEDED", "INVALID_JSON", "INVALID_SSE", "INVALID_OUTPUT", "NON_SSE_RESPONSE", "AOPS_BUSINESS_ERROR", "TEC01_ACK_INVALID", "TEC01_INVALID_RESPONSE", "TEC01_ACK_NOT_SAVED", "TEC01_ACK_MISMATCH", "TEC01_EXTRACTION_ACK_INVALID", "TEC01_EXTRACTION_ACK_MISMATCH", "TEC01_ACK_WAIT_EXCEEDED", "TEC01_NOT_CONFIGURED", "TEC01_TIMEOUT", "TEC01_UNAVAILABLE"}
     return code if code in allowed else "CALL_FAILED"
 
 
@@ -226,9 +226,11 @@ class CallLogStore:
                     self.active = self.directory / f"calls-{now.strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex[:12]}.jsonl"
                     self.day = now.strftime("%Y%m%d")
                 files = self._files()
-                if sum(path.stat().st_size for path in files) + len(encoded) > self.max_bytes:
+                size = sum(path.stat().st_size for path in files)
+                if size + len(encoded) > self.max_bytes:
                     self.cleanup(reserve=len(encoded), now=now)
-                if sum(path.stat().st_size for path in self._files()) + len(encoded) > self.max_bytes or len(encoded) > self.file_bytes:
+                    size = sum(path.stat().st_size for path in self._files())
+                if size + len(encoded) > self.max_bytes or len(encoded) > self.file_bytes:
                     raise OSError("log capacity exceeded")
                 fd = os.open(self.active, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
                 with os.fdopen(fd, "ab") as stream:
@@ -266,10 +268,14 @@ class CallLogStore:
 
     def query(self, *, limit=100, cursor=None, raw=False, **filters):
         # Queries are bounded in both memory and bytes scanned, never getAll().
-        with self._query_lock, self.lock:
+        # Serialize readers without holding the writer/cleanup lock during I/O.
+        # Snapshot immutable names and lengths; later deletion expires the cursor
+        # rather than forcing the writer to wait for an 8MiB scan.
+        with self._query_lock:
             try:
                 with self.lock:
                     files = list(reversed(self._files()))
+                    lengths = {path.name: path.stat().st_size for path in files}
             except OSError:
                 return {"items": [], "nextCursor": None, "scannedBytes": 0, "unavailable": True}
             position = None
@@ -281,19 +287,22 @@ class CallLogStore:
                     if not isinstance(name, str) or not FILE_PATTERN.fullmatch(name) or type(offset) is not int or offset < 0 or filter_id != filter_hash:
                         raise ValueError()
                     position = next(i for i, path in enumerate(files) if path.name == name)
-                    if offset > files[position].stat().st_size:
+                    if offset > lengths[files[position].name]:
                         raise ValueError()
                 except Exception as exc:
                     raise LogCursorExpired("日志游标已失效，请从最新日志重新查询") from exc
                 files = files[position:]
             else:
-                offset = files[0].stat().st_size if files else 0
+                offset = lengths[files[0].name] if files else 0
             items, scanned, raw_lines = [], 0, []
             budget = 8 * 1024 * 1024
             for index, path in enumerate(files):
                 try:
                     with self._open_read(path) as stream:
-                        end = min(offset, os.fstat(stream.fileno()).st_size) if index == 0 else os.fstat(stream.fileno()).st_size
+                        actual_size = os.fstat(stream.fileno()).st_size
+                        if cursor and index == 0 and offset > actual_size:
+                            raise LogCursorExpired("日志游标已失效，请从最新日志重新查询")
+                        end = min(offset if index == 0 else lengths[path.name], actual_size)
                         while end > 0 and scanned < budget and len(items) < limit:
                             if budget - scanned < 65536 and end > budget - scanned:
                                 break
@@ -337,7 +346,9 @@ class CallLogStore:
                 if scanned >= budget:
                     if index + 1 < len(files):
                         nxt = files[index + 1]
-                        return {"items": items, "rawLines": raw_lines, "nextCursor": self._cursor(nxt.name, nxt.stat().st_size, filter_hash), "scannedBytes": scanned}
+                        if not nxt.exists():
+                            raise LogCursorExpired("日志已被自动清理，请重新查询")
+                        return {"items": items, "rawLines": raw_lines, "nextCursor": self._cursor(nxt.name, lengths[nxt.name], filter_hash), "scannedBytes": scanned}
                     break
             return {"items": items, "rawLines": raw_lines, "nextCursor": None, "scannedBytes": scanned}
 
@@ -349,9 +360,11 @@ class CallLogStore:
     def _matches(record, filters):
         if not isinstance(record, dict) or not {"timestamp", "event", "logId", "level"}.issubset(record):
             return False
-        for key in ("level", "peer", "direction", "event", "operation", "runId", "knowledgeId", "nodeId", "requestId", "spanId", "callId", "traceId"):
+        for key in ("level", "peer", "direction", "event", "operation", "runId", "knowledgeId", "nodeId", "requestId", "spanId", "callId", "traceId", "reasonCode", "errorField", "errorId", "stage"):
             if filters.get(key) and record.get(key) != filters[key]:
                 return False
+        if filters.get("errorCode") and filters["errorCode"] not in {record.get("errorCode"), record.get("businessErrorCode")}:
+            return False
         if filters.get("fromTime") and record["timestamp"] < filters["fromTime"]:
             return False
         if filters.get("toTime") and record["timestamp"] >= filters["toTime"]:

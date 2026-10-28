@@ -1,6 +1,7 @@
 """Static, safe operation descriptions: never copy user payload into prose."""
 
 STAGES = {
+    "ACCEPTED": "受理提取", "FETCHING_EVIDENCE": "获取工单证据", "REPORTING_RESULT": "生成并发送结果",
     "FILTERING_OPERATIONS": "过滤有效SQL操作",
     "PARAMETERIZING_SQL": "去重并参数化SQL",
     "ANALYZING_EVIDENCE": "分析工单与操作证据",
@@ -12,6 +13,10 @@ BUSINESS_ERRORS = {"LLM_ANALYSIS_FAILED", "NO_VALID_OPERATIONS", "COMPILER_FAILE
 
 def describe(record: dict) -> tuple[str, str]:
     operation = record.get("operation")
+    if record.get("event") == "COMPILER_PARTIAL_SUCCESS":
+        return "知识提取部分成功：完整性待审核", "已保留有效SQL节点；存在异常遗漏或待核实绑定，按知识ID或请求ID查看提取诊断。"
+    if operation == "compile_evidence":
+        return "知识提取失败：" + STAGES.get(record.get("stage"), "处理经验草稿"), "提取器记录的业务错误；按错误说明、字段、错误编号或请求ID查询，不代表回报通信失败。"
     if operation == "http_request":
         path = record.get("url", "")
         method = record.get("method")

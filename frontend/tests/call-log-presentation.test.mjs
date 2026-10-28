@@ -13,6 +13,13 @@ test("tec01 TERMINATED and legacy browser cancellation have readable labels", ()
   assert.equal(businessLabels.CANCELLED, "已取消");
 });
 
+test("independent compiler failure is a business error, not a fictitious HTTP failure", () => {
+  const group = groupLogs([row("1", "COMPILER_FAILED", {level:"ERROR",peer:"COMPILER",direction:"INTERNAL",operation:"compile_evidence",businessStatus:"FAILED",errorCode:"LLM_ANALYSIS_FAILED",errorMessage:"参数应为数组，实际null"})])[0];
+  assert.equal(statusLabel(group), "提取失败");
+  assert.equal(isFailure(group), true);
+  assert.equal(transportLabel(group), "本事件不记录响应码");
+});
+
 test("interleaved attempts pair only by span, never shared request or call ids", () => {
   const items = [row("4", "CALL_COMPLETED", {spanId:"b",callId:"same",requestId:"same",httpStatus:200,durationMs:10}), row("3", "CALL_STARTED", {spanId:"b",callId:"same",requestId:"same"}), row("2", "CALL_FAILED", {spanId:"a",callId:"same",requestId:"same",httpStatus:503,durationMs:30}), row("1", "CALL_STARTED", {spanId:"a",callId:"same",requestId:"same"})];
   const groups = groupLogs(items);

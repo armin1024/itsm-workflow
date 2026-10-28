@@ -1,5 +1,9 @@
 # Linux内网部署
 
+0.13.0新增资源预算与分档参数，见[机器容量与参数配置](machine-sizing.md)及[性能说明](performance-optimization.md)。升级保留已有显式值；旧32运行/8CLI配置不会自动降档，需按机器和对端额度核对。保持单Uvicorn worker，不增加数据库。
+
+源码离线构建时可设置`PYTHON_RUNTIME_SOURCE`指向已校验的独立Linux x86_64 CPython 3.12目录（含bin/python3），避免构建机重复下载运行时；只复用Python，依赖仍按uv.lock安装并重新执行发布及GLIBC验收。该变量仅供构建使用，不是service.env运行参数；不要传入其他架构或系统Python目录。
+
 ## 调用日志（0.12.0）
 
 “日志”菜单只读展示调用情况。默认文件目录`/var/lib/itsm-workflow/logs`，7天、最多512MiB、单文件16MiB，每60秒清理；升级保留显式配置和日志。终端同时输出结构化日志，日志不保存正文或凭据，不引入业务数据库。配置、journalctl、API及故障处理见[日志运维手册](logging.md)。应用限额不约束systemd journal副本。
@@ -14,8 +18,8 @@
 ## 安装
 
 ```bash
-tar -xzf itsm-workflow-0.12.2-linux-x86_64.tar.gz
-cd itsm-workflow-0.12.2-linux-x86_64
+tar -xzf itsm-workflow-0.13.3-linux-x86_64.tar.gz
+cd itsm-workflow-0.13.3-linux-x86_64
 sudo ./install.sh --no-start
 sudo vi /etc/itsm-workflow/service.env
 sudo systemctl start itsm-workflow-api

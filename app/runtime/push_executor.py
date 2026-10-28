@@ -12,6 +12,7 @@ from app.cli import redact_diagnostic
 from app.conditions import evaluate, pointer
 from app.config import settings
 from app.call_logs import log_context
+from app.resources import ResourceError, cpu_run, data_budget, object_size
 from app.runtime import NODE_REGISTRY
 from app.runtime.executor import execute_single_node
 from app.runtime.planner import canonical_hash, validate_workflow
@@ -49,9 +50,44 @@ class PushExecutor:
         self._fingerprints: dict[str, str] = {}
         self.cli_slots = asyncio.Semaphore(settings.executor_max_active_cli)
 
-    def dispatch(self, payload: dict[str, Any], api_key: str | None, *, event_sink: EventSink | None = None, sync_tec01: bool = True) -> tuple[dict[str, Any], bool]:
+    def _check_capacity(self, payload: dict[str, Any]) -> None:
+        if str(payload["dispatchId"]) in self.accepted:
+            return
+        if str(payload["runId"]) in self.active:
+            raise RuntimeError("RUN_ALREADY_ACTIVE")
+        if len(self.active) >= settings.executor_max_active_runs:
+            raise RuntimeError("EXECUTOR_NO_CAPACITY")
+
+    @staticmethod
+    def _prepare(payload: dict[str, Any], limit: int) -> dict[str, Any]:
+        input_size = object_size(payload, limit=limit)
+        if input_size > limit:
+            raise ResourceError("RESOURCE_LIMIT", "运行输入和恢复结果超过单运行内存配额")
+        owned = copy.deepcopy(payload)
+        validated = validate_workflow(dict(owned["workflowSnapshot"]), "EXECUTE")
+        if str(owned["workflowContentHash"]) != validated["workflowContentHash"]:
+            raise ValueError("WORKFLOW_CONTENT_HASH_MISMATCH")
+        # The validator already constructed and checked the complete graph.
+        # Rebuilding it here would parse every SQL template a second time.
+        normalized = validated["normalizedDefinition"]
+        definition = WorkflowDefinition.model_construct(
+            schemaVersion=normalized["schemaVersion"], catalogDigest=normalized.get("catalogDigest"), entryNodeId=normalized["entryNodeId"],
+            nodes=[WorkflowNode.model_validate(node) for node in normalized["nodes"]],
+            edges=[WorkflowEdge.model_validate(edge) for edge in normalized["edges"]],
+        )
+        return {"payload": owned, "fingerprint": canonical_hash(owned), "definition": definition, "inputSize": input_size, "limit": limit}
+
+    async def prepare_dispatch(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Prepare immutable owned data off-loop; dispatch rechecks admission."""
+        self._check_capacity(payload)
+        return await cpu_run(self._prepare, payload, settings.executor_run_memory_mb * 1024 * 1024)
+
+    def dispatch(self, payload: dict[str, Any], api_key: str | None, *, event_sink: EventSink | None = None, sync_tec01: bool = True, prepared: dict[str, Any] | None = None) -> tuple[dict[str, Any], bool]:
+        self._check_capacity(payload)
+        prepared = prepared or self._prepare(payload, settings.executor_run_memory_mb * 1024 * 1024)
+        payload = prepared["payload"]
         dispatch_id, run_id = str(payload["dispatchId"]), str(payload["runId"])
-        fingerprint = canonical_hash(payload)
+        fingerprint = prepared["fingerprint"]
         if dispatch_id in self.accepted:
             if self._fingerprints[dispatch_id] != fingerprint:
                 raise RuntimeError("DISPATCH_PAYLOAD_CONFLICT")
@@ -60,10 +96,7 @@ class PushExecutor:
             raise RuntimeError("RUN_ALREADY_ACTIVE")
         if len(self.active) >= settings.executor_max_active_runs:
             raise RuntimeError("EXECUTOR_NO_CAPACITY")
-        validated = validate_workflow(dict(payload["workflowSnapshot"]), "EXECUTE")
-        if str(payload["workflowContentHash"]) != validated["workflowContentHash"]:
-            raise ValueError("WORKFLOW_CONTENT_HASH_MISMATCH")
-        definition = WorkflowDefinition.model_validate(validated["normalizedDefinition"])
+        definition = prepared["definition"]
         node_map = {node.id: node for node in definition.nodes}
         states = dict(payload.get("nodeStates") or {})
         if any(key not in node_map or value not in NODE_STATES for key, value in states.items()):
@@ -91,13 +124,37 @@ class PushExecutor:
                 raise ValueError(f"已完成条件节点 {node.id} 缺少已提交的分支")
         accepted = {"dispatchId": dispatch_id, "runId": run_id, "accepted": True, "executorId": settings.executor_id, "executorInstanceId": self.instance_id, "acceptedAt": _now(), "status": "RUNNING"}
         active = ActiveRun(dispatch_id, current_node_id=payload.get("currentNodeId") or (payload.get("resumePayload") or {}).get("nodeId") or definition.entryNodeId)
-        self.active[run_id] = active
-        self.accepted[dispatch_id] = accepted
-        self._fingerprints[dispatch_id] = fingerprint
-        self._trim_metadata()
-        active.task = asyncio.create_task(self._run(copy.deepcopy(payload), definition, api_key, active, event_sink, sync_tec01), name="execution:" + run_id)
-        active.task.add_done_callback(lambda _: self.active.pop(run_id, None) if self.active.get(run_id) is active else None)
+        owner = f"execution:{self.instance_id}:{dispatch_id}"
+        data_budget.reserve(owner, prepared["limit"])
+        work = self._run_owned(payload, definition, api_key, active, event_sink, sync_tec01, owner, prepared["inputSize"], prepared["limit"])
+        try:
+            self.active[run_id] = active
+            self.accepted[dispatch_id] = accepted
+            self._fingerprints[dispatch_id] = fingerprint
+            self._trim_metadata()
+            active.task = asyncio.create_task(work, name="execution:" + run_id)
+        except BaseException:
+            work.close()
+            data_budget.release(owner)
+            self.active.pop(run_id, None)
+            self.accepted.pop(dispatch_id, None)
+            self._fingerprints.pop(dispatch_id, None)
+            raise
+
+        def finished(_task: asyncio.Task) -> None:
+            # Also covers cancellation before the coroutine's first instruction.
+            data_budget.release(owner)
+            if self.active.get(run_id) is active:
+                self.active.pop(run_id, None)
+
+        active.task.add_done_callback(finished)
         return dict(accepted), True
+
+    async def _run_owned(self, payload, definition, api_key, active, event_sink, sync_tec01, owner, used, limit) -> None:
+        try:
+            await self._run(payload, definition, api_key, active, event_sink, sync_tec01, used=used, limit=limit)
+        finally:
+            data_budget.release(owner)
 
     def activity(self, run_id: str) -> dict[str, Any]:
         """Liveness only, never historical business state or sensitive payloads."""
@@ -177,7 +234,7 @@ class PushExecutor:
                 skipped.update(reachable(edge.target) - kept)
         return sorted(skipped)
 
-    async def _run(self, payload: dict[str, Any], definition: WorkflowDefinition, api_key: str | None, active: ActiveRun, event_sink: EventSink | None, sync_tec01: bool) -> None:
+    async def _run(self, payload: dict[str, Any], definition: WorkflowDefinition, api_key: str | None, active: ActiveRun, event_sink: EventSink | None, sync_tec01: bool, *, used: int = 0, limit: int | None = None) -> None:
         run_id, dispatch_id = str(payload["runId"]), str(payload["dispatchId"])
         nodes = {node.id: node for node in definition.nodes}
         outgoing: dict[str, list[WorkflowEdge]] = {node.id: [] for node in definition.nodes}
@@ -187,7 +244,8 @@ class PushExecutor:
         states.update(payload.get("nodeStates") or {})
         outputs = dict(payload.get("nodeOutputs") or {})
         routes = dict(payload.get("selectedRoutes") or {})
-        results = copy.deepcopy(payload.get("nodeResults") or {})
+        results = {key: dict(value) for key, value in (payload.get("nodeResults") or {}).items()}
+        limit = limit if limit is not None else settings.executor_run_memory_mb * 1024 * 1024
         run_inputs = dict(payload.get("runInputs") or {})
         current = str(payload.get("currentNodeId") or (payload.get("resumePayload") or {}).get("nodeId") or definition.entryNodeId)
         status, interaction = "RUNNING", None
@@ -195,7 +253,7 @@ class PushExecutor:
         completion_committed = False
 
         def snapshot() -> dict[str, Any]:
-            return {"runId": run_id, "dispatchId": dispatch_id, "ticketId": payload["ticketId"], "workflowSnapshot": payload["workflowSnapshot"], "workflowContentHash": payload["workflowContentHash"], "runInputs": run_inputs, "nodeStates": states, "nodeOutputs": outputs, "selectedRoutes": routes, "currentNodeId": current, "nodeResults": results, "interaction": interaction, "status": status}
+            return {"runId": run_id, "dispatchId": dispatch_id, "ticketId": payload["ticketId"], "workflowSnapshot": payload["workflowSnapshot"], "workflowContentHash": payload["workflowContentHash"], "runInputs": dict(run_inputs), "nodeStates": dict(states), "nodeOutputs": dict(outputs), "selectedRoutes": dict(routes), "currentNodeId": current, "nodeResults": {key: dict(value) for key, value in results.items()}, "interaction": interaction, "status": status}
 
         def safe_message(value: Any) -> str:
             text = str(value)
@@ -216,7 +274,9 @@ class PushExecutor:
                 else:
                     await self.client.run_released(run_id, body)
             if event_sink:
-                await event_sink(copy.deepcopy({**body, "type": kind, "runId": run_id, "occurredAt": _now(), "snapshot": snapshot()}))
+                # Snapshot maps are independent, while large immutable outputs
+                # remain shared. The sink must not mutate nested result values.
+                await event_sink({**body, "type": kind, "runId": run_id, "occurredAt": _now(), "snapshot": snapshot()})
             if kind == "NODE_COMPLETED" and not sync_tec01:
                 completion_committed = True
                 active.last_acknowledged_node_id = str(body["nodeId"])
@@ -261,7 +321,7 @@ class PushExecutor:
                 try:
                     values = self._resolve(node, run_inputs, outputs)
                     state = {"inputs": run_inputs, "nodes": {key: {"output": value} for key, value in outputs.items()}}
-                    edge = self._next(node, outgoing[current], state)
+                    edge = await cpu_run(self._next, node, outgoing[current], state)
                     skipped = self._skipped(edge, outgoing[current], outgoing) if node.type == "condition" else []
                     if node.type == "condition":
                         result = {"status": "SUCCEEDED", "output": {"selectedTarget": edge.target if edge else None, "matched": bool(edge and not edge.default)}, "diagnostic": None, "interrupt": None}
@@ -291,8 +351,18 @@ class PushExecutor:
                                 result = await execute_single_node(**args)
                     external_completed = node.type == "sql_read" and result["status"] == "SUCCEEDED"
                 except Exception as exc:
-                    result = {"status": "FAILED", "output": None, "diagnostic": {"errorCode": "NODE_EXECUTION_FAILED", "message": safe_message(exc)}, "interrupt": None}
+                    result = {"status": "FAILED", "output": None, "diagnostic": {"errorCode": "RESOURCE_LIMIT" if isinstance(exc, ResourceError) else "NODE_EXECUTION_FAILED", "message": safe_message(exc)}, "interrupt": None}
                     edge, skipped = None, []
+
+                try:
+                    weight = await cpu_run(object_size, result, limit=max(0, limit - used))
+                except ResourceError:
+                    weight = max(0, limit - used) + 1
+                if weight > limit - used:
+                    result = {"status": "FAILED", "output": None, "diagnostic": {"errorCode": "RESOURCE_LIMIT", "message": "节点结果超过单运行累计内存配额，请减少查询范围后人工确认重试"}, "interrupt": None}
+                    edge, skipped = None, []
+                else:
+                    used += weight
 
                 # Legacy/custom handlers may still use the CLI's cancellation
                 # name; never send CANCELLED as a callback status to tec01.

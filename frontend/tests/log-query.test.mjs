@@ -15,6 +15,18 @@ test("query removes empty dates, UI-only fields and stale URL cursor", () => {
   assert.equal(values.get("peer"), "TEC01");
 });
 
+test("compiler diagnostic filters survive composition and API encoding", () => {
+  const result = composeLogFilters({ peer: "COMPILER", direction: "INTERNAL", level: "ERROR", errorCode: "LLM_ANALYSIS_FAILED", reasonCode: "LLM_RESPONSE_SCHEMA_INVALID", errorField: "/steps/0/parameters", errorId: "err_fixture", stage: "ANALYZING_EVIDENCE" }, "应为数组");
+  assert.deepEqual(result.errors, {});
+  const query = buildLogQuery(result.params.toString());
+  assert.equal(query.get("errorField"), "/steps/0/parameters");
+  assert.equal(query.get("errorId"), "err_fixture");
+  assert.equal(query.get("reasonCode"), "LLM_RESPONSE_SCHEMA_INVALID");
+  assert.equal(query.get("stage"), "ANALYZING_EVIDENCE");
+  assert.equal(query.get("keyword"), "应为数组");
+  assert.ok(validateLogFilters(new URLSearchParams({errorField:"x".repeat(241)})).errorField);
+});
+
 test("local datetime picker values become timezone-aware ISO strings", () => {
   const result = applyLocalDates(new URLSearchParams(), "2026-10-23T09:00", "2026-10-23T10:00");
   assert.deepEqual(result.errors, {});

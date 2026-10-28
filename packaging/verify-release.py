@@ -33,6 +33,12 @@ with tempfile.TemporaryDirectory() as directory:
         assert configuration.status_code == 200
         assert configuration.json()["readOnly"] is True
         assert configuration.json()["serverDatabase"] is False
+        assert configuration.json()["performance"]["activeRuns"] == 8
+        assert configuration.json()["performance"]["activeCli"] == 2
+        assert configuration.json()["performance"]["compilerJobs"] == 1
+        assert configuration.json()["performance"]["runMemoryBytes"] == 256 * 1024 * 1024
+        assert (package_root / "tools" / "benchmark_runtime.py").is_file()
+        assert all((package_root / "profiles" / f"{name}.env").is_file() for name in ("2c4g", "4c8g", "8c16g", "16c32g"))
         assert configuration.json()["logging"]["maxTotalBytes"] == 512 * 1024 * 1024
         assert client.get("/api/v1/studio/logs/status").json()["retentionDays"] == 7
         assert client.get("/api/v1/studio/logs").status_code == 200

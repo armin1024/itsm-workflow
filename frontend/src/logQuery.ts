@@ -1,21 +1,23 @@
 export const logLevels = { INFO: "信息", WARNING: "警告", ERROR: "错误", DEBUG: "调试" };
-export const logPeers = { TEC01: "tec01", STUDIO: "本地页面", LLM: "LLM网关", AOPS_CLI: "AOPS CLI" };
-export const logEvents = { REQUEST_STARTED: "收到请求", REQUEST_COMPLETED: "请求处理完成", REQUEST_FAILED: "请求处理失败", CALL_STARTED: "开始外部调用", CALL_COMPLETED: "外部调用完成", CALL_FAILED: "外部调用失败", RETRY_SCHEDULED: "安排重试", EXECUTION_DISPATCHED: "提交执行任务", EXTRACTION_SUBMITTED: "提交提取任务" };
-export const logOperations = { http_request: "服务接口请求", dispatch: "提交Workflow执行", extraction: "提交知识提取", sql_read: "SQL只读查询", ticket_info: "获取工单详情", audit_timeline: "获取操作记录", aops_command: "AOPS CLI调用", analyze_evidence: "LLM提炼草稿", PROGRESS: "回报提取进度", FINISHED: "回报提取终态", NODE_STARTED: "回报节点开始", NODE_COMPLETED: "回报节点结果", RUN_RELEASED: "回报运行释放", callback_ack_wait: "保存确认总等待", pause_run: "请求暂停", cancel_run: "请求取消" };
+export const logPeers = { TEC01: "tec01", STUDIO: "本地页面", LLM: "LLM网关", AOPS_CLI: "AOPS CLI", COMPILER: "提取器" };
+export const logEvents = { REQUEST_STARTED: "收到请求", REQUEST_COMPLETED: "请求处理完成", REQUEST_FAILED: "请求处理失败", CALL_STARTED: "开始外部调用", CALL_COMPLETED: "外部调用完成", CALL_FAILED: "外部调用失败", RETRY_SCHEDULED: "安排重试", EXECUTION_DISPATCHED: "提交执行任务", EXTRACTION_SUBMITTED: "提交提取任务", COMPILER_PARTIAL_SUCCESS: "提取部分成功", COMPILER_FAILED: "提取失败", COMPILER_REPORT_FAILED: "提取终态同步失败" };
+export const logOperations = { compile_evidence: "提取失败诊断", http_request: "服务接口请求", dispatch: "提交Workflow执行", extraction: "提交知识提取", sql_read: "SQL只读查询", ticket_info: "获取工单详情", audit_timeline: "获取操作记录", aops_command: "AOPS CLI调用", analyze_evidence: "LLM提炼草稿", PROGRESS: "回报提取进度", FINISHED: "回报提取终态", NODE_STARTED: "回报节点开始", NODE_COMPLETED: "回报节点结果", RUN_RELEASED: "回报运行释放", callback_ack_wait: "保存确认总等待", pause_run: "请求暂停", cancel_run: "请求取消" };
 export type LogFilterErrors = Record<string, string>;
 const idFields = ["runId", "knowledgeId", "nodeId", "requestId", "spanId", "callId", "traceId"];
-const labels: Record<string, string> = { keyword: "关键词", level: "日志级别", peer: "对端", event: "事件类型", operation: "操作", direction: "方向", fromTime: "开始时间", toTime: "结束时间", runId: "运行ID", knowledgeId: "知识ID", nodeId: "节点ID", requestId: "请求ID", spanId: "调用尝试ID", callId: "回报调用ID", traceId: "链路ID" };
+const errorFields = ["errorCode", "reasonCode", "errorField", "errorId", "stage"];
+const labels: Record<string, string> = { errorCode: "错误码", reasonCode: "具体原因码", errorField: "失败字段", errorId: "错误编号", stage: "失败阶段", keyword: "关键词", level: "日志级别", peer: "对端", event: "事件类型", operation: "操作", direction: "方向", fromTime: "开始时间", toTime: "结束时间", runId: "运行ID", knowledgeId: "知识ID", nodeId: "节点ID", requestId: "请求ID", spanId: "调用尝试ID", callId: "回报调用ID", traceId: "链路ID" };
 
 export function validateLogFilters(params: URLSearchParams): LogFilterErrors {
   const errors: LogFilterErrors = {};
   if (params.get("range") && !["all", "custom", "1h", "24h", "7d"].includes(params.get("range")!)) errors.range = "时间范围选项无效，请重新选择";
   if ((params.get("keyword") || "").length > 200) errors.keyword = "关键词最多200个字符，请缩短查询内容";
   for (const key of idFields) if ((params.get(key) || "").length > 160) errors[key] = `${labels[key]}最多160个字符`;
-  for (const [key, allowed] of Object.entries({ level: Object.keys(logLevels), peer: Object.keys(logPeers), direction: ["INBOUND", "OUTBOUND"] })) {
+  for (const [key, allowed] of Object.entries({ level: Object.keys(logLevels), peer: Object.keys(logPeers), direction: ["INBOUND", "OUTBOUND", "INTERNAL"] })) {
     const value = params.get(key);
     if (value && !allowed.includes(value)) errors[key] = `${labels[key]}选项无效，请重新选择或清空条件`;
   }
-  for (const key of ["event", "operation"]) if ((params.get(key) || "").length > 80) errors[key] = `${labels[key]}最多80个字符`;
+  for (const key of ["event", "operation", "errorCode", "reasonCode", "stage"]) if ((params.get(key) || "").length > 80) errors[key] = `${labels[key]}最多80个字符`;
+  for (const [key, limit] of [["errorId", 160], ["errorField", 240]] as const) if ((params.get(key) || "").length > limit) errors[key] = `${labels[key]}最多${limit}个字符`;
   for (const key of ["fromTime", "toTime"]) {
     const value = params.get(key);
     if (value && (!/T.*(?:Z|[+-]\d{2}:\d{2})$/i.test(value) || !Number.isFinite(Date.parse(value)))) errors[key] = `${labels[key]}格式不正确，请使用页面的时间选择器`;
@@ -27,7 +29,7 @@ export function validateLogFilters(params: URLSearchParams): LogFilterErrors {
 export function composeLogFilters(draft: Record<string, string>, keyword: string): { params: URLSearchParams; errors: LogFilterErrors } {
   let params = new URLSearchParams();
   if (keyword.trim()) params.set("keyword", keyword.trim());
-  for (const key of ["level", "peer", "event", "operation", "direction", ...idFields]) if (draft[key]?.trim()) params.set(key, draft[key].trim());
+  for (const key of ["level", "peer", "event", "operation", "direction", ...idFields, ...errorFields]) if (draft[key]?.trim()) params.set(key, draft[key].trim());
   const range = draft.range || "all";
   if (range !== "all") params.set("range", range);
   if (range === "custom") {
@@ -58,7 +60,7 @@ export function applyLocalDates(params: URLSearchParams, from: string, to: strin
 
 export function buildLogQuery(query: string, cursor?: string): URLSearchParams {
   const input = new URLSearchParams(query), output = new URLSearchParams();
-  for (const key of ["keyword", "level", "peer", "direction", "event", "operation", "fromTime", "toTime", ...idFields]) {
+  for (const key of ["keyword", "level", "peer", "direction", "event", "operation", "fromTime", "toTime", ...idFields, ...errorFields]) {
     const value = input.get(key)?.trim();
     if (value) output.set(key, value);
   }

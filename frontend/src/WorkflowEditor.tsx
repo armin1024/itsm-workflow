@@ -168,7 +168,7 @@ export default function WorkflowEditor({
   onChange: (value: EditableWorkflow) => void;
   allowedTypes?: Set<string>;
 }) {
-  const initial = toFlow(definition),
+  const [initial] = useState(() => toFlow(definition)),
     [nodes, setNodes] = useState(initial.nodes),
     [edges, setEdges] = useState(initial.edges),
     [entry, setEntryState] = useState(definition.entryNodeId),
@@ -212,7 +212,7 @@ export default function WorkflowEditor({
   const nodeChanges = (changes: NodeChange[]) => {
     const next = applyNodeChanges(changes, nodes) as Node<CardData>[];
     setNodes(next);
-    if (changes.some((change) => change.type !== "dimensions" && change.type !== "select")) emit(next, edges);
+    if (changes.some((change) => change.type !== "dimensions" && change.type !== "select" && (change.type !== "position" || change.dragging !== true))) emit(next, edges);
   };
   const edgeChanges = (changes: EdgeChange[]) => {
     const next = applyEdgeChanges(changes, edges);
