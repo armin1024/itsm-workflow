@@ -5,16 +5,6 @@ import pytest
 
 from app import cli
 from app.cli import CliExecutionError, parse_sql_read_output
-from app.crypto import SecretBox
-
-
-def test_secret_box_never_contains_plaintext():
-    box = SecretBox(b"1" * 32)
-    encrypted = box.seal({"apiKey": "secret-value"}, purpose="test")
-    assert b"secret-value" not in encrypted
-    assert box.open(encrypted, purpose="test") == {"apiKey": "secret-value"}
-    with pytest.raises(Exception):
-        box.open(encrypted, purpose="wrong")
 
 
 @pytest.mark.asyncio

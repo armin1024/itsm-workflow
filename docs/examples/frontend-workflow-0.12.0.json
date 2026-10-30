@@ -1,0 +1,194 @@
+{
+  "schemaVersion": 2,
+  "entryNodeId": "sql-1",
+  "nodes": [
+    {
+      "id": "sql-1",
+      "type": "sql_read",
+      "schemaVersion": 1,
+      "title": "查询客户候选",
+      "config": {
+        "databaseRef": "124/aops-t/aops-t/readonly/aops-t",
+        "sqlTemplate": "SELECT id, name FROM users WHERE name={{customer_name}}"
+      },
+      "inputs": [
+        {
+          "name": "customer_name",
+          "type": "string",
+          "description": "客户姓名",
+          "required": true,
+          "source": {
+            "kind": "RUN_INPUT",
+            "key": "customerName"
+          }
+        }
+      ],
+      "approvalPolicy": "PLAN",
+      "timeoutSeconds": 600,
+      "uiPosition": {
+        "x": 80,
+        "y": 180
+      }
+    },
+    {
+      "id": "check-1",
+      "type": "condition",
+      "title": "是否存在客户记录",
+      "config": {},
+      "inputs": [],
+      "approvalPolicy": "NONE",
+      "uiPosition": {
+        "x": 400,
+        "y": 180
+      }
+    },
+    {
+      "id": "input-1",
+      "type": "hitl_form",
+      "title": "人工确认后续参数",
+      "config": {
+        "title": "填写后续查询参数",
+        "description": "请参考候选结果，输入需要继续查询的客户编号及条数。",
+        "fields": [
+          {
+            "name": "customer_id",
+            "label": "客户编号",
+            "type": "string",
+            "required": true,
+            "minLength": 1,
+            "maxLength": 64
+          },
+          {
+            "name": "query_limit",
+            "label": "最多返回条数",
+            "type": "integer",
+            "required": true,
+            "minimum": 1,
+            "maximum": 100
+          }
+        ]
+      },
+      "inputs": [
+        {
+          "name": "queryRows",
+          "type": "array",
+          "description": "前置查询返回的候选记录",
+          "required": true,
+          "source": {
+            "kind": "NODE_OUTPUT",
+            "nodeId": "sql-1",
+            "jsonPointer": "/data"
+          }
+        }
+      ],
+      "approvalPolicy": "NONE",
+      "uiPosition": {
+        "x": 720,
+        "y": 80
+      }
+    },
+    {
+      "id": "sql-2",
+      "type": "sql_read",
+      "title": "按人工确认的客户编号查询",
+      "config": {
+        "databaseRef": "124/aops-t/aops-t/readonly/aops-t",
+        "sqlTemplate": "SELECT id, name FROM users WHERE id={{customer_id}} LIMIT {{query_limit}}"
+      },
+      "inputs": [
+        {
+          "name": "customer_id",
+          "type": "string",
+          "description": "用户确认的客户编号",
+          "required": true,
+          "source": {
+            "kind": "NODE_OUTPUT",
+            "nodeId": "input-1",
+            "jsonPointer": "/values/customer_id"
+          }
+        },
+        {
+          "name": "query_limit",
+          "type": "integer",
+          "description": "用户确认的查询条数",
+          "required": true,
+          "source": {
+            "kind": "NODE_OUTPUT",
+            "nodeId": "input-1",
+            "jsonPointer": "/values/query_limit"
+          }
+        }
+      ],
+      "approvalPolicy": "PLAN",
+      "uiPosition": {
+        "x": 1040,
+        "y": 80
+      }
+    },
+    {
+      "id": "done",
+      "type": "end",
+      "title": "查询完成",
+      "config": {},
+      "inputs": [],
+      "approvalPolicy": "NONE",
+      "uiPosition": {
+        "x": 1360,
+        "y": 80
+      }
+    },
+    {
+      "id": "empty-end",
+      "type": "end",
+      "title": "未查到客户，结束",
+      "config": {},
+      "inputs": [],
+      "approvalPolicy": "NONE",
+      "uiPosition": {
+        "x": 720,
+        "y": 340
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e-query-check",
+      "source": "sql-1",
+      "target": "check-1",
+      "kind": "NORMAL"
+    },
+    {
+      "id": "e-found",
+      "source": "check-1",
+      "target": "input-1",
+      "kind": "CONDITION",
+      "label": "有记录",
+      "condition": {
+        "path": "/nodes/sql-1/output/rowCount",
+        "op": "gt",
+        "value": 0
+      },
+      "default": false
+    },
+    {
+      "id": "e-empty",
+      "source": "check-1",
+      "target": "empty-end",
+      "kind": "CONDITION",
+      "label": "否则",
+      "default": true
+    },
+    {
+      "id": "e-input-query",
+      "source": "input-1",
+      "target": "sql-2",
+      "kind": "NORMAL"
+    },
+    {
+      "id": "e-query-done",
+      "source": "sql-2",
+      "target": "done",
+      "kind": "NORMAL"
+    }
+  ]
+}

@@ -21,7 +21,7 @@ import { memo, useEffect, useState } from "react";
 import type { WorkflowEdge, WorkflowNode } from "./types";
 
 export type EditableWorkflow = {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   entryNodeId: string;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
@@ -31,6 +31,7 @@ type CardData = { node: WorkflowNode; entry: boolean; [key: string]: unknown };
 const labels: Record<string, string> = {
   sql_read: "SQL READ",
   condition: "CONDITION",
+  hitl_form: "HITL FORM",
   end: "END",
 };
 const GraphCard = memo(({ data, selected }: NodeProps<Node<CardData>>) => {
@@ -53,6 +54,8 @@ const GraphCard = memo(({ data, selected }: NodeProps<Node<CardData>>) => {
           ? String(node.config.databaseRef || "待配置数据库")
           : node.type === "condition"
             ? "按前置结果选择分支"
+            : node.type === "hitl_form"
+                ? "等待用户填写参数"
             : "汇总并结束运行"}
       </p>
       <footer>
@@ -60,7 +63,9 @@ const GraphCard = memo(({ data, selected }: NodeProps<Node<CardData>>) => {
           ? `${node.inputs.length} 输入${bound ? ` · ${bound} 数据绑定` : ""}`
           : node.type === "condition"
             ? "条件路由"
-            : "终点"}
+            : node.type === "hitl_form"
+                ? "人工输入"
+                : "终点"}
       </footer>
       {node.type !== "end" && (
         <Handle type="source" position={Position.Right} />
@@ -110,6 +115,11 @@ const endNode = (id: string, x: number, y: number): WorkflowNode => ({
   timeoutSeconds: 60,
   uiPosition: { x, y },
 });
+const hitlFormNode = (id: string, x: number, y: number): WorkflowNode => ({
+  id, type: "hitl_form", schemaVersion: 1, title: "填写查询参数",
+  config: { title: "填写后续查询参数", fields: [{ name: "customer_id", label: "客户编号", type: "string", required: true }] },
+  inputs: [], approvalPolicy: "NONE", timeoutSeconds: 60, uiPosition: { x, y },
+});
 
 export function newWorkflow(): EditableWorkflow {
   return {
@@ -144,7 +154,7 @@ function toFlow(definition: EditableWorkflow): {
       label: edge.default ? "默认" : edge.label || "",
       type: "bezier",
       markerEnd: arrow,
-      data: { default: edge.default, condition: edge.condition },
+      data: { default: edge.default, condition: edge.condition, kind: edge.kind },
     })),
   };
 }
@@ -152,11 +162,13 @@ function toFlow(definition: EditableWorkflow): {
 export default function WorkflowEditor({
   definition,
   onChange,
+  allowedTypes,
 }: {
   definition: EditableWorkflow;
   onChange: (value: EditableWorkflow) => void;
+  allowedTypes?: Set<string>;
 }) {
-  const initial = toFlow(definition),
+  const [initial] = useState(() => toFlow(definition)),
     [nodes, setNodes] = useState(initial.nodes),
     [edges, setEdges] = useState(initial.edges),
     [entry, setEntryState] = useState(definition.entryNodeId),
@@ -193,21 +205,20 @@ export default function WorkflowEditor({
         label: String(item.label || ""),
         default: Boolean(item.data?.default),
         condition: item.data?.condition as Record<string, unknown> | undefined,
+        kind: item.data?.kind as WorkflowEdge["kind"],
       })),
     });
   };
-  const nodeChanges = (changes: NodeChange[]) =>
-    setNodes((current) => {
-      const next = applyNodeChanges(changes, current) as Node<CardData>[];
-      emit(next, edges);
-      return next;
-    });
-  const edgeChanges = (changes: EdgeChange[]) =>
-    setEdges((current) => {
-      const next = applyEdgeChanges(changes, current);
-      emit(nodes, next);
-      return next;
-    });
+  const nodeChanges = (changes: NodeChange[]) => {
+    const next = applyNodeChanges(changes, nodes) as Node<CardData>[];
+    setNodes(next);
+    if (changes.some((change) => change.type !== "dimensions" && change.type !== "select" && (change.type !== "position" || change.dragging !== true))) emit(next, edges);
+  };
+  const edgeChanges = (changes: EdgeChange[]) => {
+    const next = applyEdgeChanges(changes, edges);
+    setEdges(next);
+    if (changes.some((change) => change.type !== "select")) emit(nodes, next);
+  };
   const connect = (connection: Connection) => {
     if (
       !connection.source ||
@@ -231,12 +242,10 @@ export default function WorkflowEditor({
       id: `edge-${Date.now()}`,
       type: "bezier",
       markerEnd: arrow,
-      label:
-        source.type === "condition" && outgoing.length === 0
+      label: source.type === "condition" && outgoing.length === 0
           ? "默认"
           : "条件分支",
-      data:
-        source.type === "condition"
+      data: source.type === "condition"
           ? outgoing.length === 0
             ? { default: true }
             : {
@@ -249,16 +258,15 @@ export default function WorkflowEditor({
               }
           : {},
     };
-    setEdges((current) => {
-      const next = addEdge(edge, current);
-      emit(nodes, next);
-      return next;
-    });
+    const nextEdges = addEdge(edge, edges);
+    setEdges(nextEdges);
+    emit(nodes, nextEdges);
     setSelectedEdge(edge.id);
     setSelectedNode("");
   };
-  const add = (type: "sql_read" | "condition" | "end") => {
-    const id = `${type === "sql_read" ? "sql" : type === "condition" ? "condition" : "end"}-${Date.now()}`,
+  const add = (type: "sql_read" | "condition" | "hitl_form" | "end") => {
+    const prefix = type === "sql_read" ? "sql" : type === "condition" ? "condition" : type === "hitl_form" ? "hitl-form" : "end",
+      id = `${prefix}-${Date.now()}`,
       position = {
         x: 120 + (nodes.length % 3) * 320,
         y: 100 + Math.floor(nodes.length / 3) * 220,
@@ -268,6 +276,8 @@ export default function WorkflowEditor({
           ? sqlNode(id, position.x, position.y)
           : type === "condition"
             ? conditionNode(id, position.x, position.y)
+            : type === "hitl_form"
+                ? hitlFormNode(id, position.x, position.y)
             : endNode(id, position.x, position.y),
       flow: Node<CardData> = {
         id,
@@ -275,17 +285,14 @@ export default function WorkflowEditor({
         position,
         data: { node, entry: false },
       };
-    setNodes((current) => {
-      const next = [...current, flow];
-      emit(next, edges);
-      return next;
-    });
+    const nextNodes = [...nodes, flow];
+    setNodes(nextNodes);
+    emit(nextNodes, edges);
     setSelectedNode(id);
     setSelectedEdge("");
   };
-  const patchNode = (patch: Partial<WorkflowNode>) =>
-    setNodes((current) => {
-      const next = current.map((item) =>
+  const patchNode = (patch: Partial<WorkflowNode>) => {
+      const next = nodes.map((item) =>
         item.id === selectedNode
           ? {
               ...item,
@@ -293,9 +300,9 @@ export default function WorkflowEditor({
             }
           : item,
       );
+      setNodes(next);
       emit(next, edges);
-      return next;
-    });
+  };
   const removeNode = () => {
     const nextNodes = nodes.filter((item) => item.id !== selectedNode),
       nextEdges = edges.filter(
@@ -323,9 +330,9 @@ export default function WorkflowEditor({
     label?: string;
     default?: boolean;
     condition?: Record<string, unknown>;
-  }) =>
-    setEdges((currentEdges) => {
-      let next = currentEdges.map((item) =>
+    kind?: WorkflowEdge["kind"];
+  }) => {
+      let next = edges.map((item) =>
         item.id === selectedEdge
           ? {
               ...item,
@@ -342,9 +349,9 @@ export default function WorkflowEditor({
             : item,
         );
       }
+      setEdges(next);
       emit(nodes, next);
-      return next;
-    });
+  };
   const syncInputs = () => {
     if (!current || current.type !== "sql_read") return;
     const names = [
@@ -376,13 +383,16 @@ export default function WorkflowEditor({
           <h2>流程画布</h2>
         </div>
         <div>
-          <Button type="button" size="sm" kind="tertiary" onClick={() => add("sql_read")}>
+          <Button type="button" size="sm" kind="tertiary" disabled={allowedTypes ? !allowedTypes.has("sql_read") : false} onClick={() => add("sql_read")}>
             ＋ SQL 读
           </Button>
-          <Button type="button" size="sm" kind="tertiary" onClick={() => add("condition")}>
+          <Button type="button" size="sm" kind="tertiary" disabled={allowedTypes ? !allowedTypes.has("condition") : false} onClick={() => add("condition")}>
             ◇ 条件判断
           </Button>
-          <Button type="button" size="sm" kind="ghost" onClick={() => add("end")}>
+          <Button type="button" size="sm" kind="tertiary" disabled={allowedTypes ? !allowedTypes.has("hitl_form") : false} onClick={() => add("hitl_form")}>
+            ＋ HITL 表单
+          </Button>
+          <Button type="button" size="sm" kind="ghost" disabled={allowedTypes ? !allowedTypes.has("end") : false} onClick={() => add("end")}>
             ＋ 结束
           </Button>
           <Button type="button" size="sm" kind="ghost" onClick={() => setFullscreen((value) => !value)}>
@@ -685,6 +695,32 @@ function NodeInspector({
           </p>
         </div>
       )}
+      {node.type === "hitl_form" && (
+        <>
+          <TextArea
+            id={`${node.id}-config-json`}
+            labelText="节点配置 JSON"
+            rows={10}
+            key={`${node.id}-config-${JSON.stringify(node.config).length}`}
+            defaultValue={JSON.stringify(node.config, null, 2)}
+            onBlur={(event) => {
+              try { patch({ config: JSON.parse(event.target.value) }); } catch { /* server validation reports invalid saved value */ }
+            }}
+            helperText="配置必须符合Node Registry中的configSchema。"
+          />
+          <TextArea
+            id={`${node.id}-inputs-json`}
+            labelText="输入绑定 JSON"
+            rows={10}
+            key={`${node.id}-inputs-${node.inputs.length}`}
+            defaultValue={JSON.stringify(node.inputs, null, 2)}
+            onBlur={(event) => {
+              try { patch({ inputs: JSON.parse(event.target.value) }); } catch { /* server validation reports invalid saved value */ }
+            }}
+            helperText="可绑定RUN_INPUT或前置节点NODE_OUTPUT。"
+          />
+        </>
+      )}
       <div className="danger-zone">
         <Button size="sm" kind="danger--ghost" onClick={remove}>
           删除节点
@@ -706,6 +742,7 @@ function EdgeInspector({
     label?: string;
     default?: boolean;
     condition?: Record<string, unknown>;
+    kind?: WorkflowEdge["kind"];
   }) => void;
   remove: () => void;
 }) {

@@ -1,244 +1,118 @@
-# Linux x86_64 非 Docker部署
+# Linux内网部署
 
-当前推荐部署版本为 `0.6.3`。不要继续部署 `0.6.0`：该版本的 Alembic revision超过 PostgreSQL默认版本字段长度。`0.6.1`修复迁移，`0.6.2`修复可编辑导出包的哈希策略，`0.6.3`进一步清理并阻止 macOS AppleDouble元数据进入安装目录。
+0.13.0新增资源预算与分档参数，见[机器容量与参数配置](machine-sizing.md)及[性能说明](performance-optimization.md)。升级保留已有显式值；旧32运行/8CLI配置不会自动降档，需按机器和对端额度核对。保持单Uvicorn worker，不增加数据库。
+
+源码离线构建时可设置`PYTHON_RUNTIME_SOURCE`指向已校验的独立Linux x86_64 CPython 3.12目录（含bin/python3），避免构建机重复下载运行时；只复用Python，依赖仍按uv.lock安装并重新执行发布及GLIBC验收。该变量仅供构建使用，不是service.env运行参数；不要传入其他架构或系统Python目录。
+
+## 调用日志（0.12.0）
+
+“日志”菜单只读展示调用情况。默认文件目录`/var/lib/itsm-workflow/logs`，7天、最多512MiB、单文件16MiB，每60秒清理；升级保留显式配置和日志。终端同时输出结构化日志，日志不保存正文或凭据，不引入业务数据库。配置、journalctl、API及故障处理见[日志运维手册](logging.md)。应用限额不约束systemd journal副本。
 
 ## 前置条件
 
-- Linux x86_64和 systemd。
-- 可访问 PostgreSQL。
-- 系统已安装 `aops-cli`，服务账号具有执行权限。
-- Node.js只在构建机需要，目标机不需要。
-
-## 工单草稿提取配置
-
-在 `/etc/itsm-workflow/service.env` 配置 OpenAI-compatible 内网 LLM：
-
-```dotenv
-LLM_BASE_URL=http://llm.internal/v1
-LLM_API_KEY=
-LLM_MODEL=<内网模型名>
-LLM_TIMEOUT_SECONDS=30
-LLM_PATH=/chat/completions
-LLM_RESPONSE_FORMAT=auto
-```
-
-服务会向 `${LLM_BASE_URL}${LLM_PATH}` 发送分析请求。`LLM_RESPONSE_FORMAT=auto` 会先尝试 JSON Object模式，推理网关不支持时自动改用普通对话响应，并解析纯 JSON或 Markdown JSON代码块。AOPS凭据来自当前登录会话，只通过子进程环境变量传给 `aops-cli`，不会写入知识、日志或命令行参数。
-
-如需三方平台审核知识，在 `/etc/itsm-workflow/service.env` 配置独立审核凭据：
-
-```dotenv
-WORKFLOW_REVIEW_TOKEN=<与WORKFLOW_API_TOKEN不同的长随机Token>
-WORKFLOW_REVIEW_ACTOR_UID=workflow-review-service
-```
-
-审核 Token不要写入 Hermes MCP配置；它只交给受信任的审核平台。
-
-跨环境导出必须标记当前环境；新安装和升级环境都要增加：
-
-```dotenv
-KNOWLEDGE_ENVIRONMENT_NAME=生产
-```
-
-未配置时仅禁止导出，不影响知识查询和工作流执行。
+- Linux x86_64，glibc 2.17或更高。
+- 系统已安装可执行的`aops-cli`。
+- 能访问AOPS和内网LLM。
+- 不需要PostgreSQL、Redis、向量库或MCP端口。
 
 ## 安装
 
 ```bash
-tar -xzf itsm-workflow-0.6.3-linux-x86_64.tar.gz
-cd itsm-workflow-0.6.3-linux-x86_64
+tar -xzf itsm-workflow-0.13.3-linux-x86_64.tar.gz
+cd itsm-workflow-0.13.3-linux-x86_64
 sudo ./install.sh --no-start
 sudo vi /etc/itsm-workflow/service.env
-sudo systemctl start itsm-workflow-migrate
-sudo systemctl start itsm-workflow-api itsm-workflow-worker itsm-workflow-mcp
+sudo systemctl start itsm-workflow-api
+sudo systemctl status itsm-workflow-api --no-pager
 ```
 
-MCP配置单独保存在 `/etc/itsm-workflow/mcp.env`，避免 MCP进程获得数据库连接和主加密密钥。首次安装或从旧版升级时，安装器会从 `service.env` 复制 `WORKFLOW_API_TOKEN` 并补齐安全默认值：
+必须核对：
 
 ```dotenv
-WORKFLOW_API_TOKEN=<必须与service.env一致>
-WORKFLOW_PUBLIC_URL=http://workflow.internal:8089
-MCP_INTERNAL_API_URL=http://127.0.0.1:8089/api/v1
-MCP_BIND_HOST=127.0.0.1
-MCP_PORT=8090
-MCP_PATH=/mcp
-MCP_ALLOWED_HOSTS=workflow.internal:*,127.0.0.1:*,localhost:*
-MCP_WAIT_MAX_SECONDS=15
+AOPS_BASE_URL=https://aops.internal/aops/api
+AOPS_CLI_PATH=/usr/local/bin/aops-cli
+LLM_BASE_URL=http://llm.internal/v1
+LLM_MODEL=<模型名>
+STUDIO_ADMIN_TOKEN=<随机长管理Token>
 ```
 
-如果 Hermes直接通过服务器 IP连接且不经过反向代理，将 `MCP_BIND_HOST` 改成 `0.0.0.0`，并把实际 IP加入 `MCP_ALLOWED_HOSTS`，例如 `91.0.14.5:*`。
+不要在`service.env`配置`AOPS_API_KEY`。真实SQL测试时由使用者在页面临时输入。
 
-## 检查
+## 服务
 
 ```bash
-systemctl status itsm-workflow-api itsm-workflow-worker itsm-workflow-mcp --no-pager
+systemctl status itsm-workflow-api --no-pager
+journalctl -u itsm-workflow-api -n 200 --no-pager
 curl http://127.0.0.1:8089/api/v1/health
-curl http://127.0.0.1:8089/metrics
-curl http://127.0.0.1:8090/health
-journalctl -u itsm-workflow-worker -n 100 --no-pager
-journalctl -u itsm-workflow-mcp -n 100 --no-pager
 ```
 
-健康检查中的 `cli.status` 必须为 `ok`。`CLI_NOT_FOUND`、`CLI_VERSION_MISMATCH` 会阻止操作节点成功执行。
+tec01通过内部API传递`ticketInfo`和`auditTimeline`，Compiler在后台处理并回调进度和DraftProposal，不需要启动旧版轮询Compiler Worker。为tec01配置Runtime服务认证：
 
-### 迁移启动失败
-
-不要使用不带 unit过滤的 `journalctl -xe`，它会混入 Zabbix等无关服务。按下面顺序收集事实：
+```dotenv
+RUNTIME_SERVICE_TOKEN=<tec01调用itsm-workflow的服务令牌>
+TEC01_BASE_URL=https://tec01.internal
+TEC01_SERVICE_TOKEN=<itsm-workflow回调tec01的服务令牌>
+TEC01_RUN_CALLBACK_PATH=/internal/v1/runs/{runId}/callbacks
+TEC01_EXTRACTION_CALLBACK_PATH=/internal/v1/extractions/{knowledgeId}/callbacks
+EXECUTOR_ID=executor-01
+EXECUTOR_MAX_ACTIVE_RUNS=32
+EXECUTOR_MAX_ACTIVE_CLI=8
+TEC01_TIMEOUT_SECONDS=20
+TEC01_CALLBACK_MAX_ATTEMPTS=6
+TEC01_CALLBACK_WAIT_SECONDS=70
+```
 
 ```bash
-sudo systemctl status itsm-workflow-migrate --full --no-pager
-sudo journalctl -u itsm-workflow-migrate -n 200 --no-pager -o cat
-sudo systemctl show itsm-workflow-migrate \
-  -p User -p Group -p ExecStart -p EnvironmentFiles --no-pager
+# 旧版Compiler Worker不属于新部署拓扑
+sudo systemctl disable --now itsm-workflow-compiler
 ```
 
-正常升级应出现：
+## Nginx子路径
 
-```text
-Running upgrade 0006_list_search_indexes -> 0007_diagnostics_transfer
-```
-
-如果日志出现 `value too long for type character varying(32)`，说明仍在使用 `0.6.0`迁移文件，请安装 `0.6.3`。如果出现 `SyntaxError`、`source code string cannot contain null bytes` 或文件名以 `._` 开头，说明传输链路生成了 AppleDouble文件；`0.6.3`安装器会自动清理，也可以先只读检查：
-
-```bash
-sudo find /opt/itsm-workflow -name '._*' -o -name '.DS_Store' -o -name '__MACOSX'
-```
-
-安装包本身可这样验收，命令应无输出：
-
-```bash
-tar -tzf itsm-workflow-0.6.3-linux-x86_64.tar.gz \
-  | grep -E '(^|/)(\._|\.DS_Store|\.AppleDouble|__MACOSX)(/|$)'
-```
-
-修正问题后重试：
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl reset-failed itsm-workflow-migrate
-sudo systemctl restart itsm-workflow-migrate
-sudo systemctl status itsm-workflow-migrate --full --no-pager
-```
-
-离线包所有原生扩展均按 `manylinux_2_17 x86_64` 选择并在构建时扫描 GLIBC符号，可运行于 glibc 2.17及以上系统。
-
-## 反向代理与 SSE
-
-执行详情依赖长连接事件流。使用 Nginx时必须关闭 `/api/v1/runs/*/events` 的响应缓冲：
-
-```nginx
-location / {
-    proxy_pass http://127.0.0.1:8089;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-Proto $scheme;
-}
-
-location ~ ^/api/v1/runs/.+/events$ {
-    proxy_pass http://127.0.0.1:8089;
-    proxy_http_version 1.1;
-    proxy_buffering off;
-    proxy_cache off;
-    proxy_read_timeout 3600s;
-    add_header X-Accel-Buffering no;
-}
-
-location = /mcp {
-    proxy_pass http://127.0.0.1:8090/mcp;
-    proxy_http_version 1.1;
-    proxy_buffering off;
-    proxy_read_timeout 30s;
-    proxy_set_header Host $host;
-}
-```
-
-Hermes使用最终地址 `/mcp`，不要依赖尾斜杠重定向。MCP单次工具超时建议30秒；事件等待工具本身最多等待10–15秒。
-
-## 部署在域名子路径
-
-例如页面地址为：
-
-```text
-https://test.mg.tf.cn/aops/itsm-workflow/
-```
-
-先在 `/etc/itsm-workflow/service.env` 配置：
+service.env：
 
 ```dotenv
 WORKFLOW_BASE_PATH=/aops/itsm-workflow
 ```
 
-在 `/etc/itsm-workflow/mcp.env` 配置：
-
-```dotenv
-WORKFLOW_PUBLIC_URL=https://test.mg.tf.cn/aops/itsm-workflow
-MCP_ALLOWED_HOSTS=test.mg.tf.cn,test.mg.tf.cn:*,127.0.0.1:*,localhost:*
-```
-
-Nginx配置如下。`proxy_pass` 末尾的 `/` 不能省略，它负责把 `/aops/itsm-workflow/` 前缀从上游请求中移除：
+Nginx：
 
 ```nginx
-location = /aops/itsm-workflow {
-    return 301 /aops/itsm-workflow/;
-}
-
-location = /aops/itsm-workflow/mcp {
-    proxy_pass http://91.0.14.5:8090/mcp;
-    proxy_http_version 1.1;
-    proxy_buffering off;
-    proxy_read_timeout 30s;
-    proxy_set_header Host $http_host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-}
-
-location ~ ^/aops/itsm-workflow/api/v1/runs/[^/]+/events$ {
-    rewrite ^/aops/itsm-workflow/(.*)$ /$1 break;
-    proxy_pass http://91.0.14.5:8089;
-    proxy_http_version 1.1;
-    proxy_buffering off;
-    proxy_cache off;
-    proxy_read_timeout 3600s;
-    proxy_set_header Host $http_host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    add_header X-Accel-Buffering no;
-}
-
 location /aops/itsm-workflow/ {
-    proxy_pass http://91.0.14.5:8089/;
-    proxy_http_version 1.1;
-    proxy_read_timeout 600s;
     proxy_set_header Host $http_host;
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Prefix /aops/itsm-workflow;
-    proxy_hide_header Content-Security-Policy;
-    proxy_hide_header X-Frame-Options;
-    add_header Content-Security-Policy "frame-ancestors 'self' https://test.mg.tf.cn" always;
+    proxy_read_timeout 600s;
+    proxy_pass http://127.0.0.1:8089/;
 }
 ```
 
-修改后执行：
+重启：
 
 ```bash
-sudo nginx -t
-sudo systemctl reload nginx
-sudo systemctl restart itsm-workflow-api itsm-workflow-mcp
+sudo systemctl restart itsm-workflow-api
 ```
 
-Hermes地址相应改为：
+## 安全边界
 
-```text
-https://test.mg.tf.cn/aops/itsm-workflow/mcp
-```
+运行回调要求tec01已实现HTTP200、整数业务status=200及data.runId匹配的AopsResult；不再要求saved或节点身份回显，200只能在事务提交并采纳后返回。先拒绝旧调度409，再确认当前调度已保存的完全相同重试，最后拒绝新终态冲突。空data仍会停止执行。运行回报对5xx、连接异常和超时默认最多尝试6次，退避1/2/4/8/16秒，仍受70秒总等待约束，不保证6次全部发生。4xx和无效确认不重试。提取五阶段各一次、不发心跳，原requestId仍用于隔离；终止回报统一TERMINATED。请先让tec01配套再开启生产同步。
 
-## 升级
+已有service.env显式配置的TEC01_CALLBACK_MAX_ATTEMPTS（例如3）会保留；如需采用新的默认6次策略，请自行调整该值并重启服务。提取回报仍固定最多6次且不套用运行回报总等待上限。
 
-安装器会停止 API、Worker、MCP和迁移单元，替换程序文件但保留 `/etc/itsm-workflow/service.env`。启动迁移单元成功后才能启动 API、Worker和MCP。
+服务按单进程运行（systemd固定`--workers 1`，`KillMode=control-group`）。不要在不具备运行归属控制时改为多进程或跨实例随机负载均衡。恢复前查询同一执行器活动；active=false不证明远端AOPS未执行。
 
-从任意 `0.5.x/0.6.x`升级时，直接安装 `0.6.3`并运行迁移即可；PostgreSQL迁移使用事务DDL，失败不会把 Alembic版本号推进到一半。升级后检查：
+Studio使用`STUDIO_ADMIN_TOKEN`建立HttpOnly会话。调试会真实调用外部系统并产生AOPS审计记录。知识、计划和结果保存在浏览器IndexedDB，服务端不建立数据库，不需要数据库配置或数据库备份。更换浏览器、访问域名或清除站点数据前，应通过页面导出需要保留的记录。升级安装会清理旧数据库路径配置，不删除历史数据库文件。
 
-```bash
-curl http://127.0.0.1:8089/api/v1/health
-sudo systemctl status itsm-workflow-api itsm-workflow-worker itsm-workflow-mcp --no-pager
-```
+## 回报接口配置与只读查看
+
+登录后进入“运行配置”，或访问 `/config`（部署上下文前缀仍适用），查看当前生效配置。令牌只显示是否配置；页面不提供修改、连接探测或自动请求tec01功能。
+
+- `TEC01_RUN_CALLBACK_PATH`：节点开始、节点完成、流程释放统一使用，且必须包含一次 `{runId}`。
+- `TEC01_EXTRACTION_CALLBACK_PATH`：提取进度、最终结果统一使用，且必须包含一次 `{knowledgeId}`。
+- 完整地址为 `TEC01_BASE_URL + 路径模板`，保留基础地址的上下文。例如基础地址 `https://tec01.internal/aops`、路径 `/custom/runs/{runId}/report`，实际地址是 `https://tec01.internal/aops/custom/runs/run_1/report`。
+- 路径只接受以 `/` 开头的相对路径，不接受完整URL、查询参数、路径跳转或其他占位符；ID由执行器编码替换。
+- 未配置新字段时沿用上述默认接口；升级脚本会把默认配置补入现有 `service.env`，已配置值不会覆盖。
+- 修改 `/etc/itsm-workflow/service.env` 后执行 `sudo systemctl restart itsm-workflow-api`。刷新配置页面即可核对。
+- 地址配置不改变回报结构：运行回报仍需严格保存确认。运行回报最多尝试次数和总等待分别由现有配置控制，5xx、连接异常和超时有限重试；提取回报沿用最多6次策略。单次HTTP请求实际超时上限30秒。
+
+默认本地调试不依赖tec01；启用状态同步前配置回调地址和令牌，并在tec01预先创建相应经验或运行。接入细节见[API文档](api.md)及[独立调试手册](standalone-studio-guide.md)。

@@ -1,0 +1,338 @@
+{
+  "profile": "16c32g",
+  "settings": {
+    "executor_max_active_runs": 32,
+    "executor_max_active_cli": 8,
+    "cpu_max_workers": 2,
+    "compiler_max_active_jobs": 4,
+    "runtime_data_budget_mb": 8192
+  },
+  "measurement": {
+    "transport": "in-process ASGI HTTP routes",
+    "sql": "simulated in-memory SSE; no CLI subprocess",
+    "cliHealth": "mock metadata; no installed CLI inspection",
+    "llm": "simulated 20ms wait; no model service",
+    "tec01": "MockTransport 1ms acknowledgement; no network",
+    "hardwareLimitsApplied": false,
+    "observedCgroupLimits": {
+      "available": true,
+      "cpuQuotaCores": 16.0,
+      "memoryLimitMiB": 32768.0
+    },
+    "host": "Linux-7.0.14-linuxkit-x86_64-with-glibc2.36",
+    "logicalCpuCount": 18,
+    "largeExplicitlyEnabled": true
+  },
+  "scenarios": [
+    {
+      "name": "normal",
+      "submitted": 32,
+      "accepted": 32,
+      "results": [
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        }
+      ],
+      "sqlInvocations": 64
+    },
+    {
+      "name": "resume",
+      "submitted": 4,
+      "accepted": 4,
+      "results": [
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        },
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        }
+      ],
+      "sqlInvocations": 4
+    },
+    {
+      "name": "audit5000",
+      "submitted": 1,
+      "auditOperationsPerJob": 5000,
+      "accepted": 1,
+      "httpStatuses": {
+        "202": 1
+      },
+      "terminalStatuses": {
+        "SUCCEEDED": 1
+      }
+    },
+    {
+      "name": "extractionBurst100",
+      "submitted": 100,
+      "auditOperationsPerJob": 1,
+      "accepted": 4,
+      "httpStatuses": {
+        "202": 4,
+        "429": 96
+      },
+      "terminalStatuses": {
+        "SUCCEEDED": 4
+      }
+    },
+    {
+      "name": "large",
+      "submitted": 1,
+      "accepted": 1,
+      "results": [
+        {
+          "accepted": true,
+          "status": "SUCCEEDED"
+        }
+      ],
+      "sqlInvocations": 1
+    }
+  ],
+  "inputBytes": {
+    "normal": 1179,
+    "resume": 1179,
+    "large": 20970393
+  },
+  "latency": {
+    "health": {
+      "count": 76,
+      "p50Ms": 1.453,
+      "p95Ms": 29.54,
+      "maxMs": 68.175
+    },
+    "activity": {
+      "count": 76,
+      "p50Ms": 1.025,
+      "p95Ms": 23.737,
+      "maxMs": 45.205
+    },
+    "commands": {
+      "count": 76,
+      "p50Ms": 1.846,
+      "p95Ms": 44.338,
+      "maxMs": 98.292
+    },
+    "validate": {
+      "count": 3,
+      "p50Ms": 6.82,
+      "p95Ms": 80.148,
+      "maxMs": 88.295
+    },
+    "dispatch": {
+      "count": 37,
+      "p50Ms": 96.447,
+      "p95Ms": 121.936,
+      "maxMs": 123.619
+    },
+    "normalRun": {
+      "count": 32,
+      "p50Ms": 426.029,
+      "p95Ms": 436.815,
+      "maxMs": 438.098
+    },
+    "resumeRun": {
+      "count": 4,
+      "p50Ms": 167.842,
+      "p95Ms": 169.715,
+      "maxMs": 169.937
+    },
+    "extractionSubmit": {
+      "count": 101,
+      "p50Ms": 160.931,
+      "p95Ms": 170.897,
+      "maxMs": 227.747
+    },
+    "audit5000": {
+      "count": 1,
+      "p50Ms": 943.469,
+      "p95Ms": 943.469,
+      "maxMs": 943.469
+    },
+    "extractionBurst100": {
+      "count": 1,
+      "p50Ms": 284.769,
+      "p95Ms": 284.769,
+      "maxMs": 284.769
+    },
+    "largeRun": {
+      "count": 1,
+      "p50Ms": 520.945,
+      "p95Ms": 520.945,
+      "maxMs": 520.945
+    }
+  },
+  "eventLoopLag": {
+    "count": 225,
+    "p50Ms": 0.83,
+    "p95Ms": 30.786,
+    "maxMs": 75.934
+  },
+  "probeCycleDelay": {
+    "count": 76,
+    "p50Ms": 6.363,
+    "p95Ms": 103.529,
+    "maxMs": 142.171
+  },
+  "rss": {
+    "selfPeakMiB": 296.656,
+    "childrenPeakMiB": 214.582,
+    "platformRawUnit": "KiB",
+    "note": "OS high-water RSS, not estimated data-budget usage; children include no real CLI workload"
+  },
+  "outcomes": {
+    "health:200": 76,
+    "activity:200": 76,
+    "commands:200": 76,
+    "validate:200": 3,
+    "dispatch:200": 37,
+    "extractionSubmit:202": 5,
+    "extractionSubmit:429": 96
+  },
+  "peakSimulatedModelCalls": 4,
+  "checks": {
+    "noExternalNetworkOrSubprocess": true,
+    "resumeDoesNotReplayCommittedNode": true,
+    "compilerAdmissionBounded": true,
+    "budgetReturned": true
+  },
+  "targetObservation": {
+    "healthP95TargetMs": 250,
+    "metOnThisRun": true,
+    "capacityGuarantee": false,
+    "note": "A target miss is reported honestly, not hidden or asserted away. Hardware profile names do not emulate CPU/RAM limits."
+  }
+}

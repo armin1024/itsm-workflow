@@ -32,7 +32,7 @@ def test_subpath_proxy_serves_spa_assets_and_api(monkeypatch):
     monkeypatch.setattr(main.settings, "workflow_base_path", "/aops/itsm-workflow")
     proxy = Starlette(routes=[Mount("/aops/itsm-workflow", app=main.app)])
     with TestClient(proxy) as client:
-        page = client.get("/aops/itsm-workflow/runs/example")
+        page = client.get("/aops/itsm-workflow/studio")
         assert page.status_code == 200
         asset = re.search(r'src="(\./assets/[^"]+\.js)"', page.text).group(1).removeprefix("./")
         response = client.get("/aops/itsm-workflow/" + asset)

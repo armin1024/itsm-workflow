@@ -7,7 +7,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 from sqlglot import exp, parse, parse_one
 
-from app.node_types import NODE_TYPES
+from app.runtime import NODE_REGISTRY
+from app.config import settings
 
 
 NODE_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,119}$")
@@ -35,6 +36,8 @@ class NodeInput(BaseModel):
 class WorkflowNode(BaseModel):
     id: str
     type: str = Field(min_length=1, max_length=80)
+    schemaVersion: int = Field(default=1, ge=1)
+    handlerVersion: str | None = Field(default=None, max_length=40)
     title: str = Field(min_length=1, max_length=200)
     config: dict[str, Any] = Field(default_factory=dict)
     inputs: list[NodeInput] = Field(default_factory=list)
@@ -47,13 +50,15 @@ class WorkflowEdge(BaseModel):
     id: str
     source: str
     target: str
+    kind: Literal["NORMAL", "CONDITION"] = "NORMAL"
     label: str = ""
     condition: dict[str, Any] | None = None
     default: bool = False
 
 
 class WorkflowDefinition(BaseModel):
-    schemaVersion: Literal[1] = 1
+    schemaVersion: Literal[1, 2] = 1
+    catalogDigest: str | None = None
     entryNodeId: str
     nodes: list[WorkflowNode] = Field(min_length=1, max_length=500)
     edges: list[WorkflowEdge] = Field(default_factory=list, max_length=1000)
@@ -96,7 +101,7 @@ class WorkflowDefinition(BaseModel):
                 if indegree[edge.target] == 0:
                     queue.append(edge.target)
         if len(visited) != len(ids):
-            raise ValueError("第一版工作流不允许循环")
+            raise ValueError("普通控制边不允许循环")
         reachable = {self.entryNodeId}
         queue = deque([self.entryNodeId])
         while queue:
@@ -143,8 +148,7 @@ class WorkflowDefinition(BaseModel):
 
     @staticmethod
     def _validate_node(node: WorkflowNode, nodes: dict[str, WorkflowNode]) -> None:
-        if node.type not in NODE_TYPES:
-            raise ValueError(f"不支持的节点类型：{node.type}")
+        manifest = NODE_REGISTRY.get(node.type, node.schemaVersion).manifest
         names = {item.name for item in node.inputs}
         if len(names) != len(node.inputs):
             raise ValueError(f"节点 {node.id} 输入名称重复")
@@ -155,10 +159,12 @@ class WorkflowDefinition(BaseModel):
             if item.source.kind == "RUN_INPUT" and not item.source.key:
                 raise ValueError(f"节点 {node.id} 运行输入缺少 key")
         if node.type == "sql_read":
-            if any(item.type not in NODE_TYPES["sql_read"].input_types for item in node.inputs):
+            if any(item.type not in manifest.input_types for item in node.inputs):
                 raise ValueError(f"节点 {node.id} 包含 SQL 不支持的输入类型")
             database = str(node.config.get("databaseRef") or "").strip()
             sql = str(node.config.get("sqlTemplate") or "").strip()
+            if len(sql) > settings.sql_template_max_chars:
+                raise ValueError(f"节点 {node.id} SQL模板超过{settings.sql_template_max_chars}字符，请拆分或调整配置")
             if not database or len(database) > 1000:
                 raise ValueError(f"节点 {node.id} 数据库路径无效")
             placeholders = set(PLACEHOLDER.findall(sql))
@@ -170,6 +176,7 @@ class WorkflowDefinition(BaseModel):
             expression = parse_one(rendered, read="mysql")
             if not isinstance(expression, READ_ROOTS) or any(expression.find_all(FORBIDDEN_NODES)):
                 raise ValueError(f"节点 {node.id} 不是只读 SQL")
+        NODE_REGISTRY.validate_node(node.model_dump(mode="json"))
 
 
 def legacy_steps_to_workflow(steps: list[dict[str, Any]]) -> WorkflowDefinition:

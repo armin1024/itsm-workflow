@@ -1,117 +1,82 @@
-# ITSM Workflow
+# ITSM Workflow Runtime
 
-当前稳定版本：`0.6.3`。
+理解流程定义本身：[Workflow定义逐字段解释](docs/workflow-definition-field-reference-0.12.0.md)，含顶层、节点、输入来源、连线、条件及HITL每个字段和完整注释示例，不是接口调用说明。
 
-面向 AOPS 生产操作的可观测、可中断、可恢复工作流平台。知识、不可变工作流版本、运行状态、LangGraph checkpoint、审批与审计统一保存在 PostgreSQL。
+全流程接入：[节点、连线、计划、执行与回报详细接口文档](docs/workflow-full-api-guide-0.12.0.md) · [完整请求/响应示例](docs/examples/workflow-api-examples-0.12.0.json)。
 
-当前实现：
+前端编排接入：[JSON约束与交互设计指南](docs/frontend-json-contract-0.12.0.md) · [完整Schema](docs/json-schema-0.12.0.json) · [画布示例](docs/examples/frontend-workflow-0.12.0.json)。
 
-- 版本化 DAG与发布校验。
-- `sql_read`、`condition`、`human_input`、`approval`、`end` 节点。
-- 系统 `aops-cli db read` 安全执行。
-- 计划哈希确认、节点级中断、恢复、暂停、取消和未知结果处理。
-- AES-256-GCM运行凭据与节点结果加密。
-- PostgreSQL LangGraph加密 checkpoint；SQLite只用于本地测试。
-- SSE节点事件、Prometheus格式运行指标。
-- AOPS身份和 UID allowlist。
-- React + Carbon + React Flow可编辑编排画布及只读执行画布，移动端自动切换节点时间线。
-- 兼容旧知识服务 `schemaVersion=1` JSON导入包。
-- Dify式多节点经验编排与流程详情视图。
-- 通过工单 ID读取详情和审计记录，由程序过滤后调用 LLM生成中文草稿。
-- 操作员可摄入并编辑自己的草稿、提交管理员审核；独立服务审核 Token支持三方平台审核和发布。
-- 知识支持二次确认软删除；已发布经验可由管理员创建新草稿并审核发布为下一不可变版本。
-- 执行中心和知识清单支持权限感知的后端分页、关键词查询、状态筛选及可恢复URL查询状态。
-- 创建运行时根据经验中的 `RUN_INPUT` 动态生成类型化表单；节点输出绑定参数不会重复向用户索要。
-- `FAILED` 节点支持人工重试；`UNKNOWN` 节点要求操作者选择重试或标记失败。
-- 独立 Streamable HTTP MCP Adapter，提供经验匹配、计划确认、紧凑事实短等待、节点结果读取、中断和恢复等13个工具。
-- 节点失败记录可读错误原因，并为运行发起人和管理员提供加密、脱敏的 stdout/stderr诊断。
-- 知识、运行与不可变版本支持权限感知的字段级精确筛选和生命周期时间线。
-- 原生 DAG v2跨环境导入导出支持数据库路径映射、重复检测、待审核导入、快速路径替换和迁移审计。
+新增只读“日志”菜单，覆盖tec01、LLM和AOPS CLI关键调用；7天、最多512MiB滚动文件，终端同步输出，不保存正文或凭据。配置和清理见[日志运维手册](docs/logging.md)。
 
-## 经验创建
+当前源码版本 `0.13.3`。本服务负责节点定义、工单知识抽取、Workflow校验和真实执行；tec01负责生产知识、计划、权限、MCP、Hermes消息渠道和运行数据。
 
-- **从工单提取**：使用当前登录人的 AOPS API Key调用系统 `aops-cli event-center info --id <id>` 和 `aops-cli event-center audit_timeline --id <id>`。程序只保留明确成功、数据库路径完整且通过只读校验的 `sql_exec_read`，再由内网 LLM生成中文名称、摘要、匹配短语、参数语义和依赖。
-- **手工编排**：在可拖动、可连线的流程画布中添加 SQL读、条件判断和结束节点。点击节点编辑；点击条件出线配置 JSON Pointer、运算符、比较值和默认分支。SQL参数既可来自运行输入，也可通过 `来源节点 + JSON Pointer` 绑定图上任意可达前置节点的输出。
+0.13.3逐条隔离SQL解析、参数化与节点校验异常，保留有效草稿并回报完整性诊断；部分成功须由tec01配套审核后发布，详见[提取完整性接入补充说明](docs/extraction-partial-success-addendum.md)。
 
-两种方式均先创建草稿。管理员在流程详情页核对、编辑后发布；发布生成不可变版本，既有运行不受后续编辑影响。
+0.13.2提取失败返回安全的具体原因、字段、阶段和错误编号，并独立记录可检索ERROR日志；关闭tec01同步也可查，详见[提取失败诊断与日志检索](docs/compiler-failure-diagnostics.md)。
 
-编辑画布和运行/经验查看画布均支持全屏。控制边使用带闭合箭头的贝塞尔曲线；按 `Esc` 可退出全屏。
+0.13.1修正SQL读错误诊断：显式SSE错误优先于缺少done，HTML/文本单独识别，未完整结束的结果仍失败并停止后续节点。见[SQL读故障排查](docs/sql-read-troubleshooting.md)。
 
-## 本地开发
+性能与容量：[实现说明](docs/performance-optimization.md) · [四档机器参数与配置方法](docs/machine-sizing.md) · [模拟性能报告与复测方式](docs/performance-report-0.13.0.md)。新默认为4核8GiB起始档（8个活动运行、2个CLI、1个提取、1个CPU线程），既有显式配置升级不覆盖；不是容量承诺。
+
+“运行配置”菜单只读展示当前tec01连接、回报接口与重试策略，不提供网页修改入口。回报路径由 `TEC01_RUN_CALLBACK_PATH`、`TEC01_EXTRACTION_CALLBACK_PATH` 配置，默认沿用文档；修改 `service.env` 后重启服务。Studio知识、草稿、计划和调试结果只存当前浏览器IndexedDB，不需要服务端数据库。
+
+运行节点为 `sql_read`、`condition`、`hitl_form`、`end`。LLM只用于草稿提取。用户参考SQL结果，在人工表单中填写一个或多个参数，再传给后续节点。
+
+## 独立调试
 
 ```bash
 cp .env.example .env
-uv sync --extra dev
-cd frontend && npm install && npm run build && cd ..
+uv sync
+cd frontend && npm ci && npm run build && cd ..
 uv run uvicorn app.main:app --host 127.0.0.1 --port 8089
 ```
 
-另一个终端启动 Worker：
+打开 `http://127.0.0.1:8089/`，用 `STUDIO_ADMIN_TOKEN` 登录。
+
+Studio提供知识抽取、本地知识管理、手工新建、可视化编辑、执行计划和流程测试。知识、计划与节点结果保存在浏览器IndexedDB中，后台不使用数据库。支持多条知识和计划、导入导出、暂停、继续、失败重试；取消后移除本地计划。
+
+SQL调试真实执行系统已安装的 `aops-cli db read`。当前工单ID和 `AOPS_API_KEY` 必填，Key仅通过当前请求的 `X-AOPS-Api-Key` 头传入，不保存到浏览器存储、Workflow、事件或导出数据。
+
+默认关闭tec01同步，可独立完成摄入和执行。勾选同步前需配置 `TEC01_BASE_URL` 与 `TEC01_SERVICE_TOKEN`，并提供tec01已创建的经验ID或运行ID。
+
+本地操作分为“确认此执行计划”和“执行已确认计划”。计划确认不需要AOPS Key；执行时才填写凭据。确认记录保存在浏览器，计划定义、工单或参数变化后不能复用旧确认。
+
+## 生产集成
+
+只有一个常驻服务 `itsm-workflow-api`：
+
+1. tec01获取Catalog/JSON Schema，在发布前请求Workflow校验。
+2. tec01提交工单详情data对象和操作记录data数组，Compiler异步回调进度与草稿。
+3. tec01从已发布版本创建并保存计划，向用户展示并确认。
+4. tec01主动下发一次固定Workflow和必要输入；Executor保留内存计划，每节点回报获得明确保存确认后连续推进，不反复下发完整快照。
+5. 暂停、HITL等待、失败或结束后释放执行资源；tec01根据已保存状态重新下发恢复。
+
+当前运行回调采用HTTP200、整数status=200及匹配data.runId的AopsResult，不再要求saved或节点身份回显。tec01仅在事务提交并采纳本次消息后返回200；旧调度或新终态冲突返回409。恢复前可查询原执行器是否仍活动，active=false不代表SQL从未执行。
+
+最新回报对齐：运行回报遇5xx、连接异常、超时默认最多6次请求，仍受70秒总等待限制；4xx和无效确认不重试。提取PROGRESS/FINISHED新增原requestId并纳入幂等键，tec01必须隔离不同提取尝试、忽略旧回报。已有显式重试次数配置不会被覆盖，详见[回报协议](docs/tec01-to-itsm-workflow-api.md)。
+
+当前源码提取五阶段各回报一次，不发送逐项进度或定时心跳，正常成功为五条PROGRESS加一条FINISHED；终止回报统一TERMINATED。tec01接入请使用[提取与执行对齐交付文档](docs/tec01-extraction-execution-alignment.md)。既有离线包需重新构建部署才生效。
+
+JSON约束通过 `GET /internal/v1/runtime/schemas` 获取，内部Node Registry继续维护节点配置与输入输出契约。测试某项操作时，手工建立最小Workflow（如SQL读→结束），经计划确认后使用相同的流程执行接口。
+
+## 文档
+
+- [0.11.0实现对齐与待补充约定](docs/runtime-alignment-0.11.0.md)
+- [独立调试教程](docs/standalone-studio-guide.md)
+- [REST API与示例](docs/api.md)
+- [部署手册](docs/deployment.md)
+- [当前架构](docs/architecture.md)
+- [tec01总体分工](docs/tec01-control-plane-split.md)
+- [tec01集成约定](docs/tec01-integration-contract.md)
+- [本服务提供给tec01的API](docs/itsm-workflow-to-tec01-api.md)
+- [tec01提供的回调API](docs/tec01-to-itsm-workflow-api.md)
+- [Node Registry与节点扩展](docs/node-registry-design.md)
+
+`/docs`是使用本地资源的API页面，不依赖Swagger CDN；`/openapi.json`提供接口定义。
+
+## 验证
 
 ```bash
-uv run python -m app.worker
+uv run --extra dev pytest -q
+cd frontend && npm test && npm run build
 ```
-
-开发身份桩和 CLI 桩：
-
-```bash
-uv run uvicorn tools.fake_aops:app --host 127.0.0.1 --port 8090
-export AOPS_BASE_URL=http://127.0.0.1:8090
-export AOPS_CLI_PATH=$PWD/tools/fake-aops-cli
-```
-
-## 关键配置
-
-```dotenv
-DATABASE_URL=postgresql+asyncpg://user:password@postgres.internal:5432/itsm_workflow
-LANGGRAPH_DATABASE_URL=postgresql://user:password@postgres.internal:5432/itsm_workflow
-AOPS_BASE_URL=https://aops.internal/aops/api
-AOPS_CA_BUNDLE=/etc/pki/tls/certs/ca-bundle.crt
-AOPS_CLI_PATH=/usr/local/bin/aops-cli
-AOPS_CLI_VERSION_REQUIREMENT=
-EMBEDDING_BASE_URL=http://embedding.internal/v1
-EMBEDDING_MODEL=BAAI/bge-m3
-RERANK_BASE_URL=http://rerank.internal/v1
-RERANK_MODEL=BAAI/bge-reranker-v2-m3
-RERANK_PATH=/rerank
-RERANK_API_FORMAT=auto
-WORKFLOW_API_TOKEN=replace-with-long-random-token
-WORKFLOW_PUBLIC_URL=http://workflow.internal:8089
-MCP_INTERNAL_API_URL=http://127.0.0.1:8089/api/v1
-MCP_BIND_HOST=127.0.0.1
-MCP_PORT=8090
-MCP_PATH=/mcp
-MCP_ALLOWED_HOSTS=workflow.internal:*,127.0.0.1:*,localhost:*
-MCP_WAIT_MAX_SECONDS=15
-WORKFLOW_MASTER_KEY=<Base64编码的32字节密钥>
-WORKFLOW_ADMIN_UIDS=S000001,S000002
-WORKFLOW_OPERATOR_UIDS=S000001,S000002,S000003
-WORKFLOW_BASE_PATH=
-KNOWLEDGE_ENVIRONMENT_NAME=生产
-```
-
-MCP进程实际读取独立的 `/etc/itsm-workflow/mcp.env`，其中只保留 MCP配置和 `WORKFLOW_API_TOKEN`；不要把数据库密码或 `WORKFLOW_MASTER_KEY` 写入该文件。
-
-部署到 `/aops/itsm-workflow` 等域名子路径时，设置 `WORKFLOW_BASE_PATH=/aops/itsm-workflow`，并使用部署文档中带尾斜杠的 `proxy_pass` 配置。
-
-生成主密钥：
-
-```bash
-python3 -c 'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())'
-```
-
-详细说明：
-
-- [REST API](docs/api.md)
-- [部署与运维](docs/deployment.md)
-- [架构和恢复语义](docs/architecture.md)
-- [服务职责、总体架构与关键流程泳道图](docs/services-and-swimlanes.md)
-- [tec01控制面与itsm-workflow计算执行平台设计](docs/tec01-control-plane-split.md)
-- [MCP 与 Agent 接入指南](docs/mcp-agent-integration.md)
-- [MCP 与 Agent 接入实施计划](docs/mcp-implementation-plan.md)
-- [通用节点与卡片扩展平台设计](docs/node-extension-platform.md)
-- [统一Node Registry与节点扩展设计](docs/node-registry-design.md)
-- [tec01与itsm-workflow可行性评审](docs/tec01-runtime-feasibility-review.md)
-- [tec01与itsm-workflow详细实施计划](docs/tec01-runtime-implementation-plan.md)
-- [tec01与itsm-workflow并行开发集成契约](docs/tec01-integration-contract.md)
-- [0.6.x版本说明](CHANGELOG.md)

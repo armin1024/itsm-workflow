@@ -1,79 +1,60 @@
-# 架构与恢复语义
+# 当前实现架构
 
-各 systemd服务、外部组件职责及安装、鉴权、知识提取、执行、中断恢复、条件分支和跨环境迁移泳道图，见 [服务职责、总体架构与关键流程泳道图](services-and-swimlanes.md)。
+计划驻留内存，运行回调获得tec01保存及采纳确认后连续推进；当前使用HTTP200、整数status=200及匹配data.runId的AopsResult，不再要求saved。具体实现与tec01配套事项见[当前交付说明](tec01-extraction-execution-alignment.md)。旧泳道图仅作交互概览，以方向API文档的当前契约为准。
 
-如需把MCP和全部生产存储迁移到tec01，并由itsm-workflow统一管理草稿编译、节点定义、Python执行器及独立Studio临时测试环境，见 [tec01控制面与itsm-workflow计算执行平台设计](tec01-control-plane-split.md)。
+独立流程图：[草稿提取](extraction-flow.md)、[Workflow执行](execution-flow.md)。两份文档分别说明生产对接、人工交互、异常处理及独立Studio调试的区别。
 
-SQL读、条件、LLM、HITL等节点及其生产/测试/模拟模式统一由 [Node Registry与节点扩展设计](node-registry-design.md) 管理。
+## 两端职责
 
-架构拆分实施前的代码现状、技术风险和Go/No-Go条件见 [可行性评审](tec01-runtime-feasibility-review.md)；分阶段接口、迁移、测试和切换步骤见 [详细实施计划](tec01-runtime-implementation-plan.md)。
+| 位置 | 负责内容 | 存储 |
+|---|---|---|
+| tec01 | 生产知识、版本、计划、运行状态、结果、权限、MCP、Hermes消息渠道 | tec01数据库 |
+| itsm-workflow | 节点定义、JSON Schema、工单草稿提取、校验和Workflow执行 | 活动任务内存与有限期事件缓存 |
+| Studio浏览器 | 调试知识、手工定义、执行计划、节点结果 | IndexedDB；支持JSON导入导出 |
 
-Java与Python团队并行开发所需的调用方向、认证、接口、状态提交、错误和联调顺序见 [tec01与itsm-workflow并行开发集成契约](tec01-integration-contract.md)。
+后台不建立SQLite、PostgreSQL或其他业务数据库。生产恢复依赖tec01重新下发状态；独立调试依赖浏览器保存的快照。API Key只存在于当前请求和执行内存。
 
-## 编排模型
-
-流程画布保存节点位置、控制边和结构化配置，但不允许携带 Python代码或任意 shell命令。`sql_read`、`condition`、`human_input`、`approval`、`end` 均来自节点注册表；新增操作类型通过 Handler、配置 Schema、输入 Schema、输出 Schema和风险级别扩展，不修改调度核心。
-
-控制依赖和数据依赖分离：边决定节点何时可运行；`NODE_OUTPUT` 输入通过来源节点 ID和 JSON Pointer取值。发布校验会拒绝环、不可达节点、非法条件、无默认分支，以及引用非前置节点的数据绑定。
-
-`aops-cli db read` 的 stdout 是 SSE事件流。执行适配器以 `event:done` 和 `data:!ok` 判定成功，将 `title` 与每个 `message` 数组合并为对象行。例如标题 `user_id` 和消息 `000244` 会形成 `data[0].user_id`，后续节点可以使用 `/data/0/user_id` 绑定。
-
-## 组件
-
-```text
-Browser / REST client
-        │ AOPS identity + service token
-        ▼
-itsm-workflow-api ───── SSE ─────► run cards
-        │
-        ▼
-PostgreSQL
-  knowledge / lifecycle / immutable versions / runs / events
-  transfer provenance / transfer audits
-  encrypted credentials / encrypted artifacts
-  LangGraph encrypted checkpoints
-        ▲
-        │ lease + checkpoint
-itsm-workflow-worker
-        │ argv + minimal environment
-        ▼
-system aops-cli ─────► AOPS
+```mermaid
+flowchart LR
+    U[调试人员] --> S[Studio页面]
+    S <--> B[(浏览器本地知识与计划)]
+    S --> R[itsm-workflow]
+    T[tec01页面与Hermes渠道] -->|提取 / 校验 / 下发 / 控制| R
+    R -->|进度与节点结果| T
+    R --> C[aops-cli / AOPS]
+    R --> L[内网LLM：仅草稿提取]
 ```
 
-API之前已有独立无状态 MCP Adapter。Adapter只转换 MCP参数和 REST响应，不直接访问 checkpoint、不领取队列任务，也不执行 `aops-cli`。详细约定见 [MCP 与 Agent 接入指南](mcp-agent-integration.md)。
+## 执行侧模块
 
-API和 Worker是独立 systemd进程。Worker通过 PostgreSQL领取 `QUEUED` 运行并维护租约；Worker重启后从 LangGraph checkpoint继续。
+| 模块 | 主要代码 | 职责 |
+|---|---|---|
+| Node Registry | `app/runtime/registry.py`、`builtin_nodes.py` | 配置、输入输出Schema、版本和节点目录 |
+| Compiler | `app/extraction.py`、`compiler_service.py` | 过滤成功只读操作、参数化、中文提炼、生成草稿、阶段回报 |
+| Planner | `app/runtime/planner.py` | DAG归一化、只读SQL和绑定校验、内容哈希、调试计划 |
+| Node Executor | `app/runtime/executor.py` | 执行SQL读、条件判断、人工表单和结束节点 |
+| Push Executor | `app/runtime/push_executor.py` | 异步下发、恢复、并发限制、暂停/取消、逐节点回调 |
+| CLI Adapter | `app/cli.py` | 安全argv调用、SSE解析、进程组控制、诊断脱敏 |
+| tec01 Client | `app/tec01_client.py` | 统一提取与运行回调、稳定幂等键和失败重试 |
+| Studio | `frontend`、`app/studio` | 浏览器持久化、画布、调试交互、临时事件读取 |
 
-## 外部操作边界
+## 运行与人的交互
 
-LangGraph能恢复图状态，但不能保证外部 CLI 调用 exactly-once。Worker在启动 CLI 前写入 `STARTED` attempt；如果租约过期时仍有 STARTED attempt，运行进入 `UNKNOWN`，不会自动重放。操作员必须明确选择重新执行或标记失败。
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant T as tec01页面/Hermes
+    participant E as itsm-workflow
+    U->>T: 确认完整计划
+    T->>E: 下发Workflow和已有状态
+    E-->>T: 每个节点开始、结果或失败
+    E-->>T: 需要人工填写参数，释放执行资源
+    T-->>U: 展示SQL结果与表单
+    U->>T: 填写并确认
+    T->>E: 携带表单值重新下发
+    E-->>T: 继续执行并返回结果
+```
 
-## 可观测与控制通道
+等待用户时没有常驻执行任务。暂停/失败同样释放资源；取消停止当前执行。条件节点可用SQL的 `rowCount` 决定是否进入人工表单。
 
-- Web页面通过持久化 SSE事件流展示节点开始、成功、失败、跳过、中断和恢复。
-- `Last-Event-ID` 用于断线续传，页面刷新不会丢失进度。
-- 暂停在节点安全边界生效；取消可以终止当前 CLI进程组，但不承诺撤销已经到达 AOPS 的请求。
-- Agent接入应使用短事件等待而非永久阻塞的 MCP调用，使用户指令能及时进入下一轮。
-- Web控制与 Agent控制使用相同 REST状态机，因此用户可在 Agent等待期间直接从执行详情页暂停或取消。
-- CLI失败会从 SSE错误事件、JSON错误字段或 stderr中提炼安全摘要；脱敏后的 stdout/stderr作为独立加密诊断 artifact保存，不进入普通列表或 MCP状态快照。
-
-## Checkpoint和敏感数据
-
-- 运行状态不包含明文 API Key，只保存 credential引用。
-- 节点结果单独 AES-GCM加密并通过 artifact引用进入图状态。
-- PostgreSQL checkpointer使用 `EncryptedSerializer`。
-- 启用 `LANGGRAPH_STRICT_MSGPACK=true`。
-- 完整运行输入、artifact和 checkpoint默认保留30天；审计元数据长期保留。
-
-## 知识生命周期与跨环境迁移
-
-- `knowledge`保存当前工作草稿和最近发布信息，`workflow_versions`保存不可变发布快照，`knowledge_lifecycle_events`保存创建、修改、提交、退回、发布、导入、路径替换和删除事件。
-- 原生迁移包只包含结构化知识定义和 DAG，不包含向量、凭据、运行结果或 checkpoint。
-- 导入始终创建待审核知识，不覆盖生产现有知识；规范化后的 `effectiveContentHash`用于重复检测，包内来源哈希只承担变更提示，不是数字签名。
-- 数据库路径在导出和导入预检中按完整字符串去重映射；修改已发布经验路径会退回待审核并生成生命周期和迁移审计。
-
-## 扩展节点
-
-节点注册表位于 `app/node_types.py`。增加操作类型时必须新增 Manifest和 Handler，实现输入输出 Schema、风险级别、校验、准备、执行、摘要和未知结果协调。数据库定义不能包含 Python代码或任意命令模板。
-
-通用节点、控制台模板、Capability安全边界和未来节点市场设计见 [通用节点与卡片扩展平台设计](node-extension-platform.md)。
+独立Studio通过最小或完整Workflow使用同一Executor，结果回到浏览器；勾选同步时再调用tec01的统一回调。后台事件缓存用于短期页面追踪，不能代替浏览器或tec01持久化。
